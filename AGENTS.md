@@ -25,7 +25,7 @@ agent-session-tui/
 │   ├── lib.rs              # Library re-exports (all pub mod) for use by tests
 │   ├── config.rs           # TOML config loading (AppConfig, ProviderConfig)
 │   ├── models.rs           # Core types: Session, SessionState (4-axis), StateSignals
-│   ├── archive.rs          # JSON-based archive store (replaces SQLite)
+│   ├── archive.rs          # JSON-based archive store
 │   ├── log.rs              # File-based logging (next to exe)
 │   ├── process_info.rs     # Shared process discovery (WMI on Windows + sysinfo fallback)
 │   ├── util.rs             # UTF-8 safe string truncation

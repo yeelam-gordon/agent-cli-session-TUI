@@ -154,7 +154,7 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 
 | Provider | File | Data Sources |
 |----------|------|-------------|
-| Copilot CLI | `src/provider/copilot/mod.rs` | `session-store.db` (SQLite, read-only), `events.jsonl`, `inuse.<pid>.lock` files, `plan.md` |
+| Copilot CLI | `src/provider/copilot/mod.rs` | `workspace.yaml`, `events.jsonl`, `inuse.<pid>.lock` files, `plan.md` |
 | Claude Code | `src/provider/claude/mod.rs` | `~/.claude/projects/<encoded-path>/<session-id>.jsonl` |
 
 Study these for patterns on summary extraction, state inference, and edge case handling.

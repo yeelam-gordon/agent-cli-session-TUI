@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-/// Simple JSON-based archive store. Replaces the SQLite sessions.db.
+/// Simple JSON-based archive store for tracking hidden/archived session IDs.
 /// Stores only the set of archived session IDs — everything else
 /// comes fresh from provider scans.
 pub struct ArchiveStore {

@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     config.write_default_if_missing()?;
     log::info(&format!("Config loaded from {:?}", AppConfig::config_path()));
 
-    // Simple JSON archive instead of SQLite
+    // Simple JSON archive
     let archive_path = config.db_path.with_extension("json");
     let archive = ArchiveStore::open(&archive_path)?;
     let archive = Arc::new(Mutex::new(archive));

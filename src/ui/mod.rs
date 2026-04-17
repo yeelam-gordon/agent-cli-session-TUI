@@ -815,7 +815,7 @@ fn state_color(state: &crate::models::SessionState) -> Style {
 fn format_age(iso_timestamp: &str) -> String {
     let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_timestamp) else {
         // Try parsing other common formats — assume UTC for naive timestamps
-        // (SQLite stores them without timezone info)
+        // (timestamps may lack timezone info)
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(iso_timestamp, "%Y-%m-%d %H:%M:%S") {
             let dt_utc = naive.and_utc();
             let duration = chrono::Utc::now().signed_duration_since(dt_utc);
