@@ -1,13 +1,14 @@
-# Agent Session TUI
+# Agent CLI Session TUI
 
-A terminal UI for managing agent CLI sessions — **Copilot CLI**, Claude Code, Codex CLI, and more.
+A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, and extensible to others.
 
 ## Pain Points Solved
 
 - **Too many tabs** — see all sessions in one view with clear status badges
 - **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
 - **Resume after reboot** — session summaries, last activity, work state help you decide what to pick up
-- **One place to start them all** — launch new sessions or resume old ones without memorizing flags
+- **Fast search + resume** — `/` to search across all sessions by title, summary, CWD, then `Enter` → `r` to resume instantly
+- **One place to start them all** — launch new sessions or resume old ones in their original working directory
 
 ## Architecture
 
@@ -17,18 +18,21 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, Claude Code, 
 │  Session List  │  Session Detail  │  Activity Log           │
 ├─────────────────────────────────────────────────────────────┤
 │ Supervisor (tokio background task)                          │
-│  Discovery · Reconciliation · Process monitoring · Commands │
+│  Discovery · Process matching · Launch/Resume (config-driven)│
 ├─────────────────────────────────────────────────────────────┤
-│ Provider Registry                                           │
-│  Copilot CLI │ Claude Code │ Codex CLI │ (extensible)       │
+│ Provider plugins (data-only — read from each CLI's state)   │
+│  Copilot CLI │ Claude Code │ (extensible via Provider trait)│
 ├─────────────────────────────────────────────────────────────┤
-│ SQLite (WAL mode) — persistent session tracking             │
+│ Process detection (WMI on Windows, sysinfo on Linux/macOS)  │
+│ archived.json — simple list of hidden session IDs           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+No internal database. Providers read directly from each CLI's own state directory (read-only). The only file we write is `archived.json` for tracking hidden sessions.
+
 ### Multi-Axis State Model
 
-Sessions are tracked across four independent axes, not a flat enum:
+Sessions are tracked across four independent axes:
 
 | Axis | Values |
 |------|--------|
@@ -37,26 +41,29 @@ Sessions are tracked across four independent axes, not a flat enum:
 | **Persistence** | Resumable · Ephemeral · Archived |
 | **Health** | Clean · Crashed · Orphaned |
 
-State is inferred from **multiple signals** (lock files, event streams, process liveness, timestamps) with a confidence rating.
+State is inferred from **multiple signals** (lock files, event streams, process liveness, file timestamps) with a confidence rating.
 
 ## Keybindings
 
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` or `j`/`k` | Navigate sessions |
-| `Enter` or `r` | Resume selected session |
+| `Enter` or `r` | Resume selected session (in original CWD) |
 | `n` | New session |
-| `a` | Archive session |
-| `R` | Force refresh |
+| `a` | Archive session (instantly hidden) |
+| `/` | Search (type to filter, `↑`/`↓` to browse, `Enter` to lock, `Esc` to clear) |
+| `Shift+Tab` | Toggle between active and archived view |
 | `Tab` | Switch panel focus |
+| Mouse click | Select session |
+| Mouse scroll | Navigate session list |
+| `Esc` | Clear search filter |
 | `q` / `Ctrl+C` | Quit |
 
 ## Configuration
 
-Config lives at `~/.config/agent-session-tui/config.toml` (auto-created on first run):
+Copy `config.toml.example` next to the binary and rename to `config.toml`:
 
 ```toml
-db_path = "~/.local/share/agent-session-tui/sessions.db"
 poll_interval_ms = 2000
 log_max_lines = 500
 
@@ -64,44 +71,62 @@ log_max_lines = 500
 enabled = true
 command = "copilot"
 default_args = []
+state_dir = '~/.copilot/session-state'
 resume_flag = "--resume"
+# startup_dir = '/home/user/projects'
+launch_method = "wt"    # "wt" (Windows Terminal) | "cmd" | "pwsh"
 
 [providers.claude]
-enabled = false
+enabled = true
 command = "claude"
 default_args = []
-resume_flag = "--continue"
+state_dir = '~/.claude/projects'
+resume_flag = "--resume"
+launch_method = "wt"
 ```
+
+Config search order: next to exe → `%APPDATA%/agent-session-tui/config.toml` → built-in defaults.
 
 ## Adding a Provider
 
-Implement the `Provider` trait in `src/provider/`:
+See [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.instructions.md) for the full guide.
+
+Implement the `Provider` trait (data-only — no launch/resume logic needed):
 
 ```rust
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn key(&self) -> &str;
     fn capabilities(&self) -> ProviderCapabilities;
-    fn discover_persisted_sessions(&self) -> Result<Vec<Session>>;
-    fn discover_live_processes(&self) -> Result<Vec<(u32, Option<String>)>>;
-    fn reconcile(&self, persisted: &mut [Session], live: &[(u32, Option<String>)]) -> Result<()>;
-    fn read_session_metadata(&self, session: &Session) -> Result<SessionMetadata>;
-    fn activity_sources(&self, session: &Session) -> Result<Vec<ActivitySource>>;
-    fn build_resume_command(&self, session: &Session) -> Result<Vec<String>>;
-    fn build_new_command(&self, cwd: &PathBuf) -> Result<Vec<String>>;
-    fn collect_signals(&self, session: &Session) -> Result<StateSignals>;
-    fn infer_state(&self, signals: &StateSignals) -> SessionState; // default impl provided
+    fn discover_sessions(&self) -> Result<Vec<Session>>;       // scan CLI state dir
+    fn match_processes(&self, sessions: &mut [Session]) -> Result<()>; // match live processes
+    // Optional: session_detail(), activity_sources(), infer_state()
 }
 ```
 
-Register it in `main.rs` and add config in `config.toml`.
+Launch/resume/kill are handled by the framework from `config.toml`. Register your provider in `main.rs::create_provider()`.
 
 ## Building
 
 ```bash
 cargo build --release
-# Binary at target/release/agent-session-tui(.exe)
+# Binary: target/release/agent-session-tui(.exe)
 ```
+
+## Testing
+
+```bash
+# Run all provider integration tests
+cargo test -- --nocapture
+
+# Run a specific provider's tests
+cargo test --test copilot_lifecycle_test -- --nocapture
+cargo test --test claude_lifecycle_test -- --nocapture
+```
+
+## For Contributors & AI Agents
+
+Read [`AGENTS.md`](AGENTS.md) first — it covers project structure, how to build, how to add providers, key design decisions, and common pitfalls.
 
 ## License
 
