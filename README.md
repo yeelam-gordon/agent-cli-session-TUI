@@ -6,6 +6,7 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 
 - **Too many tabs** — see all sessions in one view with clear status badges
 - **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
+- **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later, no need to keep tabs open "just in case"
 - **Resume after reboot** — session summaries, last activity, work state help you decide what to pick up
 - **Fast search + resume** — `/` to search across all sessions by title, summary, CWD, then `Enter` → `r` to resume instantly
 - **One place to start them all** — launch new sessions or resume old ones in their original working directory
