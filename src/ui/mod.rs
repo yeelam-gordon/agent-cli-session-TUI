@@ -3,7 +3,8 @@ use std::io;
 use anyhow::Result;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+            EnableMouseCapture, DisableMouseCapture, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -51,6 +52,8 @@ pub struct App {
     search_active: bool,
     search_query: String,
     log_max_lines: usize,
+    /// Tracked area of session list for mouse scroll hit testing.
+    session_list_area: Rect,
 }
 
 impl App {
@@ -74,6 +77,7 @@ impl App {
             search_active: false,
             search_query: String::new(),
             log_max_lines,
+            session_list_area: Rect::default(),
         }
     }
 
@@ -125,7 +129,7 @@ impl App {
     ) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+        execute!(stdout, EnterAlternateScreen, cursor::Hide, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -135,7 +139,7 @@ impl App {
         std::panic::set_hook(Box::new(move |panic_info| {
             crate::log::panic(panic_info);
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
             original_hook(panic_info);
         }));
 
@@ -155,6 +159,9 @@ impl App {
                         if key.kind == KeyEventKind::Press {
                             self.handle_key(key, &cmd_tx);
                         }
+                    }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse(mouse);
                     }
                     _ => {}
                 }
@@ -229,7 +236,7 @@ impl App {
 
         // Restore terminal fully
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, cursor::Show)?;
+        execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show)?;
         terminal.show_cursor()?;
         Ok(())
     }
@@ -438,6 +445,7 @@ impl App {
             ])
             .split(chunks[1]);
 
+        self.session_list_area = main_chunks[0];
         self.draw_session_list(f, main_chunks[0]);
         self.draw_session_detail(f, main_chunks[1]);
 
@@ -446,6 +454,32 @@ impl App {
 
         // Status bar
         self.draw_status_bar(f, chunks[3]);
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let area = self.session_list_area;
+        let in_list = mouse.column >= area.x && mouse.column < area.x + area.width
+            && mouse.row >= area.y && mouse.row < area.y + area.height;
+
+        // Only handle scroll in the session list — all other mouse events pass
+        // through to the terminal for native text selection (Shift+drag).
+        match mouse.kind {
+            MouseEventKind::ScrollUp if in_list => {
+                if self.selected_index > 0 {
+                    self.selected_index -= 1;
+                    self.list_state.select(Some(self.selected_index));
+                    self.detail_scroll = 0;
+                }
+            }
+            MouseEventKind::ScrollDown if in_list => {
+                if self.selected_index + 1 < self.filtered_indices.len() {
+                    self.selected_index += 1;
+                    self.list_state.select(Some(self.selected_index));
+                    self.detail_scroll = 0;
+                }
+            }
+            _ => {} // clicks etc. ignored — terminal handles natively
+        }
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
@@ -739,6 +773,8 @@ impl App {
             Span::raw(": panel  "),
             Span::styled("↑↓", Style::default().fg(Color::Yellow)),
             Span::raw(": nav  "),
+            Span::styled("Shift+drag", Style::default().fg(Color::Yellow)),
+            Span::raw(": copy  "),
             Span::styled(view_hint, Style::default().fg(Color::Gray)),
             Span::raw("  "),
             Span::raw(&self.status_message),
@@ -809,85 +845,68 @@ mod ui_invariant_tests {
             .expect("should read ui/mod.rs")
     }
 
-    #[test]
-    fn no_mouse_capture() {
+    fn code_section() -> String {
         let src = ui_source();
-        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
-        assert!(
-            !code_section.contains("EnableMouseCapture"),
-            "Mouse capture must NOT be enabled — native terminal text selection must work"
-        );
-        assert!(
-            !code_section.contains("DisableMouseCapture"),
-            "No DisableMouseCapture needed when capture is not enabled"
-        );
+        src.split("#[cfg(test)]").next().unwrap_or(&src).to_string()
     }
 
     #[test]
-    fn no_mouse_event_handling() {
-        let src = ui_source();
-        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
-        assert!(
-            !code_section.contains("Event::Mouse"),
-            "Mouse events must NOT be handled — let terminal handle mouse natively"
-        );
-        assert!(
-            !code_section.contains("fn handle_mouse"),
-            "handle_mouse method should not exist — no mouse capture"
-        );
+    fn mouse_capture_for_scroll() {
+        let code = code_section();
+        assert!(code.contains("EnableMouseCapture"), "Must enable mouse capture for scroll support");
+        let disable_count = code.matches("DisableMouseCapture").count();
+        assert!(disable_count >= 2, "DisableMouseCapture in both quit and panic hook (found {disable_count})");
+    }
+
+    #[test]
+    fn mouse_scroll_only_no_click() {
+        let code = code_section();
+        assert!(code.contains("Event::Mouse"), "Event loop must dispatch mouse events");
+        assert!(code.contains("fn handle_mouse"), "handle_mouse method must exist");
+        assert!(code.contains("ScrollUp"), "Must handle scroll up");
+        assert!(code.contains("ScrollDown"), "Must handle scroll down");
+        // Must NOT handle mouse click for selection (let terminal handle it)
+        assert!(!code.contains("MouseButton::Left"), "Must NOT handle left click — Shift+drag for text selection");
     }
 
     #[test]
     fn detail_panel_pads_lines_to_fill() {
         let src = ui_source();
-        assert!(
-            src.contains("while lines.len() < inner_height"),
-            "draw_session_detail must pad lines to fill the panel height (prevents stale artifacts)"
-        );
+        assert!(src.contains("while lines.len() < inner_height"),
+            "draw_session_detail must pad lines to fill panel height (prevents stale artifacts)");
     }
 
     #[test]
     fn no_clear_widget_in_detail() {
-        let src = ui_source();
-        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
-        assert!(
-            !code_section.contains("render_widget(Clear"),
-            "Do NOT use Clear widget — it causes flicker by resetting all cells every frame"
-        );
+        let code = code_section();
+        assert!(!code.contains("render_widget(Clear"),
+            "Do NOT use Clear widget — causes flicker by resetting all cells every frame");
     }
 
     #[test]
     fn no_terminal_clear_for_redraw() {
-        let src = ui_source();
-        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
-        let clear_count = code_section.matches("terminal.clear()").count();
-        assert!(
-            clear_count <= 1,
-            "terminal.clear() should only appear once (initial setup) — found {clear_count}"
-        );
-        assert!(
-            !code_section.contains("needs_full_redraw"),
-            "No full-screen redraw machinery — line padding handles artifacts"
-        );
+        let code = code_section();
+        let clear_count = code.matches("terminal.clear()").count();
+        assert!(clear_count <= 1, "terminal.clear() only at startup — found {clear_count}");
+        assert!(!code.contains("needs_full_redraw"), "No full-screen redraw machinery");
     }
 
     #[test]
     fn only_press_events_handled() {
         let src = ui_source();
-        assert!(
-            src.contains("KeyEventKind::Press"),
-            "Must filter to KeyEventKind::Press to avoid double/triple on Windows"
-        );
+        assert!(src.contains("KeyEventKind::Press"), "Filter to Press only (Windows double/triple)");
     }
 
     #[test]
     fn terminal_restored_on_quit_and_panic() {
-        let src = ui_source();
-        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
-        let leave_count = code_section.matches("LeaveAlternateScreen").count();
-        assert!(
-            leave_count >= 2,
-            "LeaveAlternateScreen must appear in both quit path and panic hook (found {leave_count})"
-        );
+        let code = code_section();
+        let leave_count = code.matches("LeaveAlternateScreen").count();
+        assert!(leave_count >= 2, "LeaveAlternateScreen in quit + panic (found {leave_count})");
+    }
+
+    #[test]
+    fn shift_drag_hint_in_status_bar() {
+        let code = code_section();
+        assert!(code.contains("Shift+drag"), "Status bar must hint Shift+drag for text copy");
     }
 }
