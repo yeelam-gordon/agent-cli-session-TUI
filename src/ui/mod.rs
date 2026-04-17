@@ -696,12 +696,22 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
 
-            // Pad with empty lines to fill the panel — Paragraph only writes
-            // cells where it has content, leaving stale characters from previous
-            // renders in any unfilled rows.
-            let inner_height = area.height.saturating_sub(2) as usize; // minus borders
+            // Pad every line with trailing spaces to fill the panel width.
+            // Paragraph only writes characters it has — without padding, stale
+            // characters from a previous session's longer wrapped text remain.
+            let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+            let inner_height = area.height.saturating_sub(2) as usize;
+            for line in &mut lines {
+                // Calculate visible length of all spans in this line
+                let visible_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
+                if visible_len < inner_width {
+                    let pad = " ".repeat(inner_width - visible_len);
+                    line.spans.push(Span::raw(pad));
+                }
+            }
+            // Also pad with full-width empty lines to fill remaining rows
             while lines.len() < inner_height {
-                lines.push(Line::from(""));
+                lines.push(Line::from(" ".repeat(inner_width)));
             }
 
             let detail = Paragraph::new(lines)
@@ -871,9 +881,11 @@ mod ui_invariant_tests {
 
     #[test]
     fn detail_panel_pads_lines_to_fill() {
-        let src = ui_source();
-        assert!(src.contains("while lines.len() < inner_height"),
-            "draw_session_detail must pad lines to fill panel height (prevents stale artifacts)");
+        let code = code_section();
+        assert!(code.contains("inner_width"),
+            "draw_session_detail must pad lines to fill panel width (prevents ghost characters)");
+        assert!(code.contains("inner_height"),
+            "draw_session_detail must pad rows to fill panel height");
     }
 
     #[test]
