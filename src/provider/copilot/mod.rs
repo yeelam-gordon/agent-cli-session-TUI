@@ -12,14 +12,14 @@ use crate::util::truncate_str_safe;
 
 /// GitHub Copilot CLI provider.
 ///
-/// Reads session state from:
-///   1. `~/.copilot/session-store.db` (SQLite — sessions + checkpoints tables)
-///   2. `~/.copilot/session-state/<id>/` (workspace.yaml, events.jsonl, plan.md)
-///   3. `inuse.<pid>.lock` files for liveness detection
+/// Reads session state from files only (no SQLite dependency):
+///   1. `~/.copilot/session-state/<id>/workspace.yaml` (summary, cwd)
+///   2. `~/.copilot/session-state/<id>/events.jsonl` (messages, state, timestamps)
+///   3. `~/.copilot/session-state/<id>/plan.md` (plan items)
+///   4. `inuse.<pid>.lock` files for liveness detection
 pub struct CopilotProvider {
     config: ProviderConfig,
     state_dir: PathBuf,
-    store_db_path: PathBuf,
 }
 
 impl CopilotProvider {
@@ -30,111 +30,62 @@ impl CopilotProvider {
             .state_dir
             .clone()
             .unwrap_or_else(|| copilot_dir.join("session-state"));
-        let store_db_path = copilot_dir.join("session-store.db");
 
         Self {
             config: config.clone(),
             state_dir,
-            store_db_path,
         }
     }
 
-    /// Try to read summary from the session-store.db SQLite database.
-    fn read_store_db_session(&self, session_id: &str) -> Option<StoredSession> {
-        let db = rusqlite::Connection::open_with_flags(
-            &self.store_db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()?;
+    /// Read summary and CWD from workspace.yaml.
+    fn read_workspace_yaml(&self, session_dir: &Path) -> Option<WorkspaceInfo> {
+        let ws_path = session_dir.join("workspace.yaml");
+        let text = std::fs::read_to_string(ws_path).ok()?;
+        let mut summary = None;
+        let mut cwd = None;
+        let mut in_summary = false;
+        let mut summary_lines = Vec::new();
 
-        let mut stmt = db
-            .prepare(
-                "SELECT id, summary, cwd, repository, branch, created_at, updated_at \
-                 FROM sessions WHERE id = ?1",
-            )
-            .ok()?;
+        for line in text.lines() {
+            let trimmed = line.trim();
 
-        stmt.query_row(rusqlite::params![session_id], |row| {
-            Ok(StoredSession {
-                id: row.get(0)?,
-                summary: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                cwd: row.get::<_, Option<String>>(2)?,
-                repository: row.get::<_, Option<String>>(3)?,
-                branch: row.get::<_, Option<String>>(4)?,
-                created_at: row.get::<_, Option<String>>(5)?,
-                updated_at: row.get::<_, Option<String>>(6)?,
-            })
-        })
-        .ok()
-    }
-
-    /// Read the latest checkpoint summary for a session.
-    fn read_latest_checkpoint(&self, session_id: &str) -> Option<String> {
-        let db = rusqlite::Connection::open_with_flags(
-            &self.store_db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()?;
-
-        let mut stmt = db
-            .prepare(
-                "SELECT title, overview, work_done FROM checkpoints \
-                 WHERE session_id = ?1 \
-                 ORDER BY checkpoint_number DESC LIMIT 1",
-            )
-            .ok()?;
-
-        stmt.query_row(rusqlite::params![session_id], |row| {
-            let title: Option<String> = row.get(0)?;
-            let overview: Option<String> = row.get(1)?;
-            let work_done: Option<String> = row.get(2)?;
-            // Compose a rich checkpoint summary from all available fields
-            let mut parts = Vec::new();
-            if let Some(t) = title.filter(|s| !s.is_empty()) {
-                parts.push(t);
+            // Handle multi-line summary (YAML block scalar)
+            if in_summary {
+                if line.starts_with(' ') || line.starts_with('\t') {
+                    summary_lines.push(trimmed.to_string());
+                    continue;
+                } else {
+                    in_summary = false;
+                    summary = Some(summary_lines.join("\n"));
+                    summary_lines.clear();
+                }
             }
-            if let Some(o) = overview.filter(|s| !s.is_empty()) {
-                parts.push(o);
+
+            if let Some(rest) = trimmed.strip_prefix("summary:") {
+                let val = rest.trim().trim_matches('"').trim_matches('\'');
+                if val.is_empty() || val == "|-" || val == "|" || val == ">" {
+                    in_summary = true; // multi-line follows
+                } else {
+                    summary = Some(val.to_string());
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("cwd:") {
+                let val = rest.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    cwd = Some(PathBuf::from(val));
+                }
             }
-            if let Some(w) = work_done.filter(|s| !s.is_empty()) {
-                parts.push(format!("Work done: {}", w));
-            }
-            Ok(if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join("\n"))
-            })
-        })
-        .ok()
-        .flatten()
-    }
+        }
 
-    /// Read the first user message from the session to use as a fallback summary.
-    fn read_first_user_message(&self, session_id: &str) -> Option<String> {
-        let db = rusqlite::Connection::open_with_flags(
-            &self.store_db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()?;
+        // Capture trailing multi-line summary
+        if in_summary && !summary_lines.is_empty() {
+            summary = Some(summary_lines.join("\n"));
+        }
 
-        let mut stmt = db
-            .prepare(
-                "SELECT user_message FROM turns \
-                 WHERE session_id = ?1 \
-                 ORDER BY turn_index ASC LIMIT 1",
-            )
-            .ok()?;
-
-        stmt.query_row(rusqlite::params![session_id], |row| {
-            row.get::<_, Option<String>>(0)
-        })
-        .ok()
-        .flatten()
-        .map(|msg| {
-            // Truncate long messages to first meaningful chunk (char-safe)
-            let trimmed = msg.trim();
-            truncate_str_safe(trimmed, 200)
-        })
+        if summary.is_some() || cwd.is_some() {
+            Some(WorkspaceInfo { summary, cwd })
+        } else {
+            None
+        }
     }
 
     /// Check for `inuse.<pid>.lock` files in the session dir.
@@ -187,22 +138,6 @@ impl CopilotProvider {
         results
     }
 
-    /// Read CWD from workspace.yaml in the session state dir.
-    fn read_workspace_cwd(&self, session_dir: &Path) -> Option<PathBuf> {
-        let ws_path = session_dir.join("workspace.yaml");
-        let text = std::fs::read_to_string(ws_path).ok()?;
-        // Simple line-based parsing — avoid pulling in a YAML crate
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("cwd:") {
-                let cwd = rest.trim().trim_matches('"').trim_matches('\'');
-                if !cwd.is_empty() {
-                    return Some(PathBuf::from(cwd));
-                }
-            }
-        }
-        None
-    }
 
     /// Read plan.md from session state dir.
     fn read_plan_md(&self, session_dir: &Path) -> Option<Vec<PlanItem>> {
@@ -395,14 +330,10 @@ impl CopilotProvider {
     }
 }
 
-struct StoredSession {
-    id: String,
-    summary: String,
-    cwd: Option<String>,
-    repository: Option<String>,
-    branch: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+/// Workspace info extracted from workspace.yaml.
+struct WorkspaceInfo {
+    summary: Option<String>,
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -448,10 +379,8 @@ impl Provider for CopilotProvider {
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
 
-            // Read from session-store.db first (best source of truth)
-            let stored = self.read_store_db_session(&dir_name);
-            let checkpoint_summary = self.read_latest_checkpoint(&dir_name);
-            let first_message_db = self.read_first_user_message(&dir_name);
+            // Read from workspace.yaml (summary, cwd)
+            let workspace = self.read_workspace_yaml(&entry.path());
             let plan_items = self.read_plan_md(&entry.path());
             let last_activity = self.last_activity_time(&entry.path());
 
@@ -459,36 +388,22 @@ impl Provider for CopilotProvider {
             let (first_msg_events, last_assistant_events, has_user_events, _event_count) =
                 self.read_user_messages_from_events(&entry.path());
 
-            // Pick the best available first message
-            let first_message = first_message_db.or(first_msg_events);
+            let first_message = first_msg_events;
             let last_assistant = last_assistant_events;
 
             // Skip sessions with zero user interaction
-            let has_db_content = stored.as_ref().map_or(false, |s| !s.summary.is_empty());
+            let ws_summary = workspace.as_ref().and_then(|w| w.summary.as_ref());
+            let has_ws_content = ws_summary.map_or(false, |s| !s.is_empty());
             let has_turns = first_message.is_some();
-            let has_checkpoint = checkpoint_summary.is_some();
             let has_plan = plan_items.is_some();
 
-            if !has_db_content && !has_turns && !has_checkpoint && !has_plan && !has_user_events {
+            if !has_ws_content && !has_turns && !has_plan && !has_user_events {
                 continue;
             }
 
-            // Build summary with ordered fallbacks + first/last user messages
-            let db_summary = stored
-                .as_ref()
-                .map(|s| s.summary.clone())
-                .filter(|s| !s.is_empty());
-
-            let mut summary = if let Some(ref s) = db_summary {
-                let mut enriched = s.clone();
-                if let Some(ref cp) = checkpoint_summary {
-                    if !cp.is_empty() && *cp != *s {
-                        enriched = format!("{}\n\n--- Latest checkpoint ---\n{}", enriched, cp);
-                    }
-                }
-                enriched
-            } else if let Some(ref cp) = checkpoint_summary {
-                cp.clone()
+            // Build summary with ordered fallbacks
+            let mut summary = if let Some(s) = ws_summary.filter(|s| !s.is_empty()) {
+                s.clone()
             } else if let Some(ref msg) = first_message {
                 format!("User asked: {}", msg)
             } else if let Some(ref items) = plan_items {
@@ -500,7 +415,7 @@ impl Provider for CopilotProvider {
                 String::new()
             };
 
-            // Always append first user message + last assistant response for context
+            // Append first user message + last assistant response for context
             if let Some(ref msg) = first_message {
                 summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
             }
@@ -509,14 +424,8 @@ impl Provider for CopilotProvider {
             }
 
             // Build a meaningful title
-            let repo_context = stored.as_ref()
-                .and_then(|s| s.repository.as_ref())
-                .map(|r| r.rsplit('/').next().unwrap_or(r).to_string());
-
-            let title = if let Some(ref s) = db_summary {
-                s.lines().next().unwrap_or("").to_string()
-            } else if let Some(ref cp) = checkpoint_summary {
-                cp.lines().next().unwrap_or("").to_string()
+            let title = if let Some(s) = ws_summary.filter(|s| !s.is_empty()) {
+                truncate_str_safe(s.lines().next().unwrap_or(""), 60)
             } else if let Some(ref msg) = first_message {
                 let short = msg.lines().next().unwrap_or(msg);
                 truncate_str_safe(short, 60)
@@ -527,30 +436,16 @@ impl Provider for CopilotProvider {
                     .or(items.last())
                     .map(|i| i.title.clone())
                     .unwrap_or_else(|| dir_name[..8.min(dir_name.len())].to_string())
-            } else if let Some(ref repo) = repo_context {
-                format!("[{}] {}", repo, &dir_name[..8.min(dir_name.len())])
             } else {
                 dir_name[..8.min(dir_name.len())].to_string()
             };
 
-            // CWD fallback chain: session-store.db → workspace.yaml → "."
-            let cwd_path = stored
-                .as_ref()
-                .and_then(|s| s.cwd.as_ref())
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| self.read_workspace_cwd(&entry.path()))
+            // CWD from workspace.yaml
+            let cwd_path = workspace.as_ref()
+                .and_then(|w| w.cwd.clone())
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            let created = stored
-                .as_ref()
-                .and_then(|s| s.created_at.clone())
-                .unwrap_or_default();
-            let updated = stored
-                .as_ref()
-                .and_then(|s| s.updated_at.clone())
-                .or(last_activity)
-                .unwrap_or_default();
+            let updated = last_activity.unwrap_or_default();
 
             sessions.push(Session {
                 id: format!("copilot_{}", dir_name),
@@ -561,7 +456,7 @@ impl Provider for CopilotProvider {
                 summary,
                 state: SessionState::default(),
                 pid: None,
-                created_at: created,
+                created_at: updated.clone(), // use file mtime as best approximation
                 updated_at: updated,
                 state_dir: Some(entry.path()),
             });
@@ -675,8 +570,8 @@ impl Provider for CopilotProvider {
     }
 
     fn session_detail(&self, session: &Session) -> Result<SessionDetail> {
-        let stored = self.read_store_db_session(&session.provider_session_id);
-        let checkpoint = self.read_latest_checkpoint(&session.provider_session_id);
+        let workspace = session.state_dir.as_ref()
+            .and_then(|dir| self.read_workspace_yaml(dir));
         let plan_items = session
             .state_dir
             .as_ref()
@@ -684,18 +579,10 @@ impl Provider for CopilotProvider {
             .unwrap_or_default();
 
         Ok(SessionDetail {
-            title: stored.as_ref().map(|s| {
-                s.summary
-                    .lines()
-                    .next()
-                    .unwrap_or(&s.id)
-                    .to_string()
-            }),
-            summary: stored
-                .as_ref()
-                .map(|s| s.summary.clone())
-                .filter(|s| !s.is_empty())
-                .or(checkpoint),
+            title: workspace.as_ref()
+                .and_then(|w| w.summary.as_ref())
+                .map(|s| truncate_str_safe(s.lines().next().unwrap_or(""), 60)),
+            summary: workspace.and_then(|w| w.summary),
             plan_items,
         })
     }
