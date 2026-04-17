@@ -577,9 +577,6 @@ impl App {
     }
 
     fn draw_session_detail(&self, f: &mut Frame, area: Rect) {
-        // Clear the area to prevent stale character artifacts
-        f.render_widget(Clear, area);
-
         let border_style = if self.focus == Focus::Detail {
             Style::default().fg(Color::Cyan)
         } else {
@@ -664,6 +661,14 @@ impl App {
                 &session.state.reason,
                 Style::default().fg(Color::DarkGray),
             )));
+
+            // Pad with empty lines to fill the panel — Paragraph only writes
+            // cells where it has content, leaving stale characters from previous
+            // renders in any unfilled rows.
+            let inner_height = area.height.saturating_sub(2) as usize; // minus borders
+            while lines.len() < inner_height {
+                lines.push(Line::from(""));
+            }
 
             let detail = Paragraph::new(lines)
                 .block(
@@ -833,11 +838,21 @@ mod ui_invariant_tests {
     }
 
     #[test]
-    fn detail_panel_clears_before_render() {
+    fn detail_panel_pads_lines_to_fill() {
         let src = ui_source();
         assert!(
-            src.contains("render_widget(Clear, area)"),
-            "draw_session_detail must render Clear widget to prevent stale artifacts"
+            src.contains("while lines.len() < inner_height"),
+            "draw_session_detail must pad lines to fill the panel height (prevents stale artifacts)"
+        );
+    }
+
+    #[test]
+    fn no_clear_widget_in_detail() {
+        let src = ui_source();
+        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
+        assert!(
+            !code_section.contains("render_widget(Clear"),
+            "Do NOT use Clear widget — it causes flicker by resetting all cells every frame"
         );
     }
 
@@ -852,7 +867,7 @@ mod ui_invariant_tests {
         );
         assert!(
             !code_section.contains("needs_full_redraw"),
-            "No full-screen redraw machinery — Clear widget handles artifacts"
+            "No full-screen redraw machinery — line padding handles artifacts"
         );
     }
 
