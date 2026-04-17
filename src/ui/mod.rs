@@ -664,20 +664,26 @@ impl App {
             )));
 
             // Pad every line with trailing spaces to fill the panel width.
-            // Use unicode display width — CJK chars and emoji take 2 columns
-            // but .len() counts bytes, causing under-padding and ghost artifacts.
+            // Without Wrap, lines longer than inner_width are truncated by ratatui
+            // but we still need padding for shorter lines to overwrite stale content.
+            // Tabs and zero-width chars are replaced to ensure accurate width calc.
             let inner_width = area.width.saturating_sub(2) as usize; // minus borders
             let inner_height = area.height.saturating_sub(2) as usize;
             for line in &mut lines {
+                // Replace tabs with spaces in each span (tabs have width 0 but render wider)
+                for span in &mut line.spans {
+                    if span.content.contains('\t') {
+                        span.content = span.content.replace('\t', "    ").into();
+                    }
+                }
                 let display_width: usize = line.spans.iter()
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
                 if display_width < inner_width {
-                    let pad = " ".repeat(inner_width - display_width);
-                    line.spans.push(Span::raw(pad));
+                    line.spans.push(Span::raw(" ".repeat(inner_width - display_width)));
                 }
             }
-            // Also pad with full-width empty lines to fill remaining rows
+            // Pad remaining rows with full-width space lines
             while lines.len() < inner_height {
                 lines.push(Line::from(" ".repeat(inner_width)));
             }
