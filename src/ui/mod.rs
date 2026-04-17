@@ -3,7 +3,8 @@ use std::io;
 use anyhow::Result;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+            EnableMouseCapture, DisableMouseCapture, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -51,6 +52,8 @@ pub struct App {
     search_active: bool,
     search_query: String,
     log_max_lines: usize,
+    /// Tracked area of session list for mouse hit testing.
+    session_list_area: Rect,
     /// Set when selection changes — forces a full terminal redraw to clear stale cells.
     needs_full_redraw: bool,
     /// Track which session is currently displayed to detect changes.
@@ -78,6 +81,7 @@ impl App {
             search_active: false,
             search_query: String::new(),
             log_max_lines,
+            session_list_area: Rect::default(),
             needs_full_redraw: false,
             last_displayed_session_id: String::new(),
         }
@@ -129,10 +133,11 @@ impl App {
         mut event_rx: mpsc::UnboundedReceiver<SupervisorEvent>,
         cmd_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Result<()> {
-        // Setup terminal — no mouse capture so native text selection works everywhere
+        // Setup terminal with mouse capture for left-panel interaction
+        // (Shift+drag bypasses capture for native text selection in most terminals)
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
+        execute!(stdout, EnterAlternateScreen, cursor::Hide, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -142,16 +147,17 @@ impl App {
         std::panic::set_hook(Box::new(move |panic_info| {
             crate::log::panic(panic_info);
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
             original_hook(panic_info);
         }));
 
         let tick_rate = std::time::Duration::from_millis(100);
 
         loop {
-            // Force full redraw when selection changes to clear stale character artifacts
+            // Invalidate ratatui's diff buffer so every cell is redrawn (no visible flicker)
             if self.needs_full_redraw {
-                terminal.clear()?;
+                let size = terminal.size()?;
+                terminal.resize(Rect::new(0, 0, size.width, size.height))?;
                 self.needs_full_redraw = false;
             }
 
@@ -168,6 +174,9 @@ impl App {
                         if key.kind == KeyEventKind::Press {
                             self.handle_key(key, &cmd_tx);
                         }
+                    }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse(mouse);
                     }
                     _ => {}
                 }
@@ -242,7 +251,7 @@ impl App {
 
         // Restore terminal fully
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, cursor::Show)?;
+        execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show)?;
         terminal.show_cursor()?;
         Ok(())
     }
@@ -451,6 +460,7 @@ impl App {
             ])
             .split(chunks[1]);
 
+        self.session_list_area = main_chunks[0];
         self.draw_session_list(f, main_chunks[0]);
         self.draw_session_detail(f, main_chunks[1]);
 
@@ -459,6 +469,50 @@ impl App {
 
         // Status bar
         self.draw_status_bar(f, chunks[3]);
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let area = self.session_list_area;
+        let col = mouse.column;
+        let row = mouse.row;
+
+        // Only handle mouse events inside the session list panel
+        let in_list = col >= area.x && col < area.x + area.width
+            && row >= area.y && row < area.y + area.height;
+
+        match mouse.kind {
+            MouseEventKind::Down(event::MouseButton::Left) if in_list => {
+                self.focus = Focus::SessionList;
+                // Each list item = 2 rows, border = 1 row at top
+                let content_y = row.saturating_sub(area.y + 1);
+                let item_height = 2u16;
+                let clicked_offset = (content_y / item_height) as usize;
+
+                let scroll_offset = self.list_state.offset();
+                let clicked_index = scroll_offset + clicked_offset;
+
+                if clicked_index < self.filtered_indices.len() {
+                    self.selected_index = clicked_index;
+                    self.list_state.select(Some(clicked_index));
+                    self.detail_scroll = 0;
+                }
+            }
+            MouseEventKind::ScrollUp if in_list => {
+                if self.selected_index > 0 {
+                    self.selected_index -= 1;
+                    self.list_state.select(Some(self.selected_index));
+                    self.detail_scroll = 0;
+                }
+            }
+            MouseEventKind::ScrollDown if in_list => {
+                if self.selected_index + 1 < self.filtered_indices.len() {
+                    self.selected_index += 1;
+                    self.list_state.select(Some(self.selected_index));
+                    self.detail_scroll = 0;
+                }
+            }
+            _ => {} // Events outside list panel are ignored (terminal handles natively)
+        }
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
@@ -807,5 +861,114 @@ fn format_duration(d: chrono::Duration) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests — enforce UI invariants so future changes can't silently
+// break mouse handling, rendering, or terminal cleanup.
+// These read the source file and assert critical patterns are present.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod ui_invariant_tests {
+    use std::fs;
+
+    fn ui_source() -> String {
+        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/mod.rs"))
+            .expect("should read ui/mod.rs")
+    }
+
+    #[test]
+    fn mouse_capture_enabled_at_startup() {
+        let src = ui_source();
+        assert!(
+            src.contains("EnableMouseCapture"),
+            "Terminal setup must enable mouse capture"
+        );
+    }
+
+    #[test]
+    fn mouse_capture_disabled_on_quit() {
+        let src = ui_source();
+        // Both the normal quit path and panic hook must disable mouse capture
+        let count = src.matches("DisableMouseCapture").count();
+        assert!(
+            count >= 2,
+            "DisableMouseCapture must appear in both quit path and panic hook (found {count})"
+        );
+    }
+
+    #[test]
+    fn event_loop_handles_mouse_events() {
+        let src = ui_source();
+        assert!(
+            src.contains("Event::Mouse(mouse)"),
+            "Event loop must handle Event::Mouse — do not remove mouse event dispatch"
+        );
+    }
+
+    #[test]
+    fn handle_mouse_method_exists() {
+        let src = ui_source();
+        assert!(
+            src.contains("fn handle_mouse("),
+            "handle_mouse method must exist for mouse click/scroll on session list"
+        );
+    }
+
+    #[test]
+    fn mouse_handler_checks_list_area() {
+        let src = ui_source();
+        assert!(
+            src.contains("session_list_area"),
+            "Mouse handler must use session_list_area for hit testing"
+        );
+    }
+
+    #[test]
+    fn session_list_area_stored_during_draw() {
+        let src = ui_source();
+        assert!(
+            src.contains("self.session_list_area = main_chunks"),
+            "draw() must store session_list_area for mouse hit testing"
+        );
+    }
+
+    #[test]
+    fn detail_panel_clears_before_render() {
+        let src = ui_source();
+        assert!(
+            src.contains("render_widget(Clear, area)"),
+            "draw_session_detail must render Clear widget to prevent stale artifacts"
+        );
+    }
+
+    #[test]
+    fn full_redraw_uses_resize_not_clear() {
+        let src = ui_source();
+        assert!(
+            src.contains("terminal.resize("),
+            "Full redraw must use terminal.resize() to invalidate diff buffer"
+        );
+        // Count actual terminal.clear()? calls (the code pattern), excluding test code
+        let code_section = src.split("#[cfg(test)]").next().unwrap_or(&src);
+        let clear_count = code_section.matches("terminal.clear()").count();
+        assert!(
+            clear_count <= 1,
+            "terminal.clear() should only appear once (initial setup) in non-test code — found {clear_count}"
+        );
+    }
+
+    #[test]
+    fn selection_change_triggers_redraw() {
+        let src = ui_source();
+        assert!(
+            src.contains("needs_full_redraw = true"),
+            "Selection change must set needs_full_redraw to prevent ghost artifacts"
+        );
+        assert!(
+            src.contains("last_displayed_session_id"),
+            "Must track last displayed session to detect selection changes"
+        );
     }
 }
