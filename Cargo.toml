@@ -21,6 +21,7 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "6"
 anyhow = "1"
+unicode-width = "0.2"
 
 # Process info — disable disk/network/component/user, keep only process lookup
 [target.'cfg(windows)'.dependencies]

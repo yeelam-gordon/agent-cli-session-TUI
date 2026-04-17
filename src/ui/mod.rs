@@ -9,6 +9,7 @@ use crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 use crate::models::{InteractionState, PersistenceState, ProcessState, Session};
 use crate::supervisor::{SupervisorCommand, SupervisorEvent};
@@ -663,15 +664,16 @@ impl App {
             )));
 
             // Pad every line with trailing spaces to fill the panel width.
-            // Paragraph only writes characters it has — without padding, stale
-            // characters from a previous session's longer wrapped text remain.
+            // Use unicode display width — CJK chars and emoji take 2 columns
+            // but .len() counts bytes, causing under-padding and ghost artifacts.
             let inner_width = area.width.saturating_sub(2) as usize; // minus borders
             let inner_height = area.height.saturating_sub(2) as usize;
             for line in &mut lines {
-                // Calculate visible length of all spans in this line
-                let visible_len: usize = line.spans.iter().map(|s| s.content.len()).sum();
-                if visible_len < inner_width {
-                    let pad = " ".repeat(inner_width - visible_len);
+                let display_width: usize = line.spans.iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                if display_width < inner_width {
+                    let pad = " ".repeat(inner_width - display_width);
                     line.spans.push(Span::raw(pad));
                 }
             }
