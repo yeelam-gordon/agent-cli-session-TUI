@@ -3,8 +3,7 @@ use std::io;
 use anyhow::Result;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-            EnableMouseCapture, DisableMouseCapture, MouseEvent, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -52,10 +51,10 @@ pub struct App {
     search_active: bool,
     search_query: String,
     log_max_lines: usize,
-    /// Tracked area of session list for mouse hit testing.
-    session_list_area: Rect,
-    /// Whether mouse capture is currently enabled (only for left panel focus).
-    mouse_captured: bool,
+    /// Set when selection changes — forces a full terminal redraw to clear stale cells.
+    needs_full_redraw: bool,
+    /// Track which session is currently displayed to detect changes.
+    last_displayed_session_id: String,
 }
 
 impl App {
@@ -79,8 +78,8 @@ impl App {
             search_active: false,
             search_query: String::new(),
             log_max_lines,
-            session_list_area: Rect::default(),
-            mouse_captured: true,
+            needs_full_redraw: false,
+            last_displayed_session_id: String::new(),
         }
     }
 
@@ -130,10 +129,10 @@ impl App {
         mut event_rx: mpsc::UnboundedReceiver<SupervisorEvent>,
         cmd_tx: mpsc::UnboundedSender<SupervisorCommand>,
     ) -> Result<()> {
-        // Setup terminal
+        // Setup terminal — no mouse capture so native text selection works everywhere
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, cursor::Hide, EnableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -143,15 +142,18 @@ impl App {
         std::panic::set_hook(Box::new(move |panic_info| {
             crate::log::panic(panic_info);
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen, cursor::Show);
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
             original_hook(panic_info);
         }));
 
         let tick_rate = std::time::Duration::from_millis(100);
 
         loop {
-            // Sync mouse capture state: enabled only when left panel has focus
-            self.sync_mouse_capture();
+            // Force full redraw when selection changes to clear stale character artifacts
+            if self.needs_full_redraw {
+                terminal.clear()?;
+                self.needs_full_redraw = false;
+            }
 
             // Draw
             terminal.draw(|f| {
@@ -166,9 +168,6 @@ impl App {
                         if key.kind == KeyEventKind::Press {
                             self.handle_key(key, &cmd_tx);
                         }
-                    }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse(mouse);
                     }
                     _ => {}
                 }
@@ -452,7 +451,6 @@ impl App {
             ])
             .split(chunks[1]);
 
-        self.session_list_area = main_chunks[0];
         self.draw_session_list(f, main_chunks[0]);
         self.draw_session_detail(f, main_chunks[1]);
 
@@ -461,70 +459,6 @@ impl App {
 
         // Status bar
         self.draw_status_bar(f, chunks[3]);
-    }
-
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
-        let area = self.session_list_area;
-        let col = mouse.column;
-        let row = mouse.row;
-
-        // Check if mouse is within the session list area
-        let in_list = col >= area.x && col < area.x + area.width
-            && row >= area.y && row < area.y + area.height;
-
-        match mouse.kind {
-            MouseEventKind::Down(event::MouseButton::Left) if in_list => {
-                self.focus = Focus::SessionList;
-                // Each list item = 2 rows, border = 1 row at top
-                let content_y = row.saturating_sub(area.y + 1); // subtract border
-                let item_height = 2u16; // title line + status line
-                let clicked_offset = (content_y / item_height) as usize;
-
-                // Account for scroll offset in ListState
-                let scroll_offset = self.list_state.offset();
-                let clicked_index = scroll_offset + clicked_offset;
-
-                if clicked_index < self.filtered_indices.len() {
-                    self.selected_index = clicked_index;
-                    self.list_state.select(Some(clicked_index));
-                    self.detail_scroll = 0;
-                }
-            }
-            MouseEventKind::Down(event::MouseButton::Left) if !in_list => {
-                // Click outside the list panel — switch focus to Detail
-                // (mouse capture will be disabled on next loop, enabling native selection)
-                self.focus = Focus::Detail;
-            }
-            MouseEventKind::ScrollUp if in_list => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                    self.list_state.select(Some(self.selected_index));
-                    self.detail_scroll = 0;
-                }
-            }
-            MouseEventKind::ScrollDown if in_list => {
-                if self.selected_index + 1 < self.filtered_indices.len() {
-                    self.selected_index += 1;
-                    self.list_state.select(Some(self.selected_index));
-                    self.detail_scroll = 0;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Toggle mouse capture based on focus: enabled for SessionList, disabled for Detail/Logs.
-    /// When mouse capture is disabled, the terminal handles selection natively (copy/paste).
-    fn sync_mouse_capture(&mut self) {
-        let want_capture = self.focus == Focus::SessionList;
-        if want_capture != self.mouse_captured {
-            if want_capture {
-                let _ = execute!(io::stdout(), EnableMouseCapture);
-            } else {
-                let _ = execute!(io::stdout(), DisableMouseCapture);
-            }
-            self.mouse_captured = want_capture;
-        }
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
@@ -655,8 +589,8 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn draw_session_detail(&self, f: &mut Frame, area: Rect) {
-        // Clear the area first to prevent stale character artifacts from previous renders
+    fn draw_session_detail(&mut self, f: &mut Frame, area: Rect) {
+        // Clear the area to prevent stale character artifacts
         f.render_widget(Clear, area);
 
         let border_style = if self.focus == Focus::Detail {
@@ -665,7 +599,14 @@ impl App {
             Style::default().fg(Color::DarkGray)
         };
 
-        if let Some(session) = self.selected_session() {
+        // Clone the selected session to avoid borrow conflicts with &mut self
+        let session = self.selected_session().cloned();
+        if let Some(session) = session {
+            // Detect selection change and flag for full terminal redraw
+            if session.id != self.last_displayed_session_id {
+                self.last_displayed_session_id = session.id.clone();
+                self.needs_full_redraw = true;
+            }
             let mut lines = vec![];
 
             // Header
