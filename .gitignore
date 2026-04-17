@@ -1,0 +1,7 @@
+/target
+
+# User config (contains private paths)
+config.toml
+agent-session-tui.log
+archived.json
+sessions.json
