@@ -54,6 +54,8 @@ pub struct App {
     log_max_lines: usize,
     /// Tracked area of session list for mouse hit testing.
     session_list_area: Rect,
+    /// Whether mouse capture is currently enabled (only for left panel focus).
+    mouse_captured: bool,
 }
 
 impl App {
@@ -78,6 +80,7 @@ impl App {
             search_query: String::new(),
             log_max_lines,
             session_list_area: Rect::default(),
+            mouse_captured: true,
         }
     }
 
@@ -147,6 +150,9 @@ impl App {
         let tick_rate = std::time::Duration::from_millis(100);
 
         loop {
+            // Sync mouse capture state: enabled only when left panel has focus
+            self.sync_mouse_capture();
+
             // Draw
             terminal.draw(|f| {
                 self.draw(f);
@@ -484,6 +490,11 @@ impl App {
                     self.detail_scroll = 0;
                 }
             }
+            MouseEventKind::Down(event::MouseButton::Left) if !in_list => {
+                // Click outside the list panel — switch focus to Detail
+                // (mouse capture will be disabled on next loop, enabling native selection)
+                self.focus = Focus::Detail;
+            }
             MouseEventKind::ScrollUp if in_list => {
                 if self.selected_index > 0 {
                     self.selected_index -= 1;
@@ -499,6 +510,20 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Toggle mouse capture based on focus: enabled for SessionList, disabled for Detail/Logs.
+    /// When mouse capture is disabled, the terminal handles selection natively (copy/paste).
+    fn sync_mouse_capture(&mut self) {
+        let want_capture = self.focus == Focus::SessionList;
+        if want_capture != self.mouse_captured {
+            if want_capture {
+                let _ = execute!(io::stdout(), EnableMouseCapture);
+            } else {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+            }
+            self.mouse_captured = want_capture;
         }
     }
 
@@ -631,6 +656,9 @@ impl App {
     }
 
     fn draw_session_detail(&self, f: &mut Frame, area: Rect) {
+        // Clear the area first to prevent stale character artifacts from previous renders
+        f.render_widget(Clear, area);
+
         let border_style = if self.focus == Focus::Detail {
             Style::default().fg(Color::Cyan)
         } else {
