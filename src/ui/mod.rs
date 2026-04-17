@@ -689,8 +689,7 @@ impl App {
                         .border_style(border_style)
                         .title(" Detail "),
                 )
-                .scroll((self.detail_scroll, 0))
-                .wrap(Wrap { trim: false });
+                .scroll((self.detail_scroll, 0));
 
             f.render_widget(detail, area);
         } else {
