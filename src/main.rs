@@ -35,11 +35,8 @@ fn create_provider(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Init log file next to the executable
-    let log_path = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("agent-session-tui.log")))
-        .unwrap_or_else(|| std::path::PathBuf::from("agent-session-tui.log"));
+    // Init log file in temp directory
+    let log_path = std::env::temp_dir().join("agent-session-tui.log");
     log::init(log_path);
     log::info("=== agent-session-tui starting ===");
 
