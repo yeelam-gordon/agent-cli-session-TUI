@@ -1,6 +1,8 @@
 # Agent CLI Session TUI
 
 A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, and extensible to others.
+![Uploading image.png…]()
+
 
 ## Pain Points Solved
 
