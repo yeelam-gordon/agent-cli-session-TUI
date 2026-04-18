@@ -179,3 +179,77 @@ pub struct StateSignals {
     pub recent_tool_activity: Option<bool>,
     pub cpu_active: Option<bool>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_state() {
+        let state = SessionState::default();
+        assert_eq!(state.process, ProcessState::Missing);
+        assert_eq!(state.interaction, InteractionState::Unknown);
+        assert_eq!(state.persistence, PersistenceState::Ephemeral);
+        assert_eq!(state.health, HealthState::Clean);
+        assert_eq!(state.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn badge_running_busy() {
+        let state = SessionState {
+            process: ProcessState::Running,
+            interaction: InteractionState::Busy,
+            ..SessionState::default()
+        };
+        assert_eq!(state.badge(), "🟢");
+        assert_eq!(state.label(), "Running");
+    }
+
+    #[test]
+    fn badge_running_waiting() {
+        let state = SessionState {
+            process: ProcessState::Running,
+            interaction: InteractionState::WaitingInput,
+            ..SessionState::default()
+        };
+        assert_eq!(state.badge(), "🟡");
+        assert_eq!(state.label(), "Waiting");
+    }
+
+    #[test]
+    fn badge_resumable() {
+        let state = SessionState {
+            process: ProcessState::Exited,
+            persistence: PersistenceState::Resumable,
+            ..SessionState::default()
+        };
+        assert_eq!(state.badge(), "💤");
+        assert_eq!(state.label(), "Resumable");
+    }
+
+    #[test]
+    fn badge_orphaned() {
+        let state = SessionState {
+            health: HealthState::Orphaned,
+            ..SessionState::default()
+        };
+        assert_eq!(state.badge(), "⚠️");
+        assert_eq!(state.label(), "Orphaned");
+    }
+
+    #[test]
+    fn badge_crashed() {
+        let state = SessionState {
+            health: HealthState::Crashed,
+            ..SessionState::default()
+        };
+        assert_eq!(state.badge(), "🔴");
+        assert_eq!(state.label(), "Crashed");
+    }
+
+    #[test]
+    fn confidence_ordering() {
+        assert!(Confidence::Low < Confidence::Medium);
+        assert!(Confidence::Medium < Confidence::High);
+    }
+}
