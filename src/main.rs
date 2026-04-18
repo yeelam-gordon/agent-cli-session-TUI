@@ -84,10 +84,10 @@ async fn main() -> Result<()> {
         supervisor.run(event_tx, cmd_rx).await;
     });
 
-    // Resolve default provider: config setting → first enabled provider
-    let default_provider = config.default_provider
-        .clone()
-        .filter(|p| enabled_keys.contains(p))
+    // Resolve default provider: find the one with default=true, else first enabled
+    let default_provider = config.providers.iter()
+        .find(|(k, v)| v.enabled && v.default && enabled_keys.contains(k))
+        .map(|(k, _)| k.clone())
         .or_else(|| enabled_keys.first().cloned())
         .unwrap_or_default();
 

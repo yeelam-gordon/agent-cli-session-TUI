@@ -6,12 +6,10 @@ db_path = 'sessions.json'
 poll_interval_ms = 2000
 log_max_lines = 500
 
-# Which provider to launch when pressing 'n' (must match a [providers.X] key)
-default_provider = "copilot"
-
 # ─── Copilot CLI ───
 [providers.copilot]
 enabled = true
+default = true
 command = "copilot"
 default_args = []
 state_dir = '~/.copilot/session-state'

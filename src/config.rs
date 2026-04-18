@@ -16,10 +16,6 @@ pub struct AppConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_log_lines")]
     pub log_max_lines: usize,
-    /// Which provider to use when pressing 'n' for a new session.
-    /// Must match a key in [providers]. Defaults to first enabled provider.
-    #[serde(default)]
-    pub default_provider: Option<String>,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
 }
@@ -27,26 +23,19 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub enabled: bool,
+    /// Mark as the default provider for 'n' (new session). Only one should be true.
+    #[serde(default)]
+    pub default: bool,
     /// The CLI command to invoke (e.g., "copilot", "claude").
-    /// Can be a full path like "C:\\Program Files\\GitHub\\copilot.exe".
     pub command: String,
-    /// Extra args always passed to the CLI.
     #[serde(default)]
     pub default_args: Vec<String>,
-    /// Where the CLI stores its session state (provider discovers from here).
     pub state_dir: Option<PathBuf>,
-    /// Override the resume flag (e.g., "--resume" for copilot).
     pub resume_flag: Option<String>,
-    /// Default working directory when starting new sessions.
-    /// If not set, uses the current working directory.
     #[serde(default)]
     pub startup_dir: Option<PathBuf>,
-    /// How to launch the session. Options: "wt" (Windows Terminal tab),
-    /// "cmd" (new cmd window), "pwsh" (new PowerShell window).
-    /// Defaults to "wt" on Windows.
     #[serde(default = "default_launch_method")]
     pub launch_method: String,
-    /// Optional: Windows Terminal profile name to use (e.g., "PowerShell", "Command Prompt").
     #[serde(default)]
     pub wt_profile: Option<String>,
 }
@@ -79,6 +68,7 @@ impl Default for AppConfig {
             "copilot".into(),
             ProviderConfig {
                 enabled: true,
+                default: true,
                 command: "copilot".into(),
                 default_args: vec![],
                 state_dir: dirs::home_dir().map(|h| h.join(".copilot").join("session-state")),
@@ -94,6 +84,7 @@ impl Default for AppConfig {
             "claude".into(),
             ProviderConfig {
                 enabled: true,
+                default: false,
                 command: "claude".into(),
                 default_args: vec![],
                 state_dir: dirs::home_dir().map(|h| h.join(".claude").join("projects")),
@@ -108,7 +99,6 @@ impl Default for AppConfig {
             db_path: default_db_path(),
             poll_interval_ms: default_poll_interval_ms(),
             log_max_lines: default_log_lines(),
-            default_provider: Some("copilot".into()),
             providers,
         }
     }
