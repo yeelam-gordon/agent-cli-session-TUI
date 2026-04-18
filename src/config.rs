@@ -16,6 +16,10 @@ pub struct AppConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_log_lines")]
     pub log_max_lines: usize,
+    /// Which provider to use when pressing 'n' for a new session.
+    /// Must match a key in [providers]. Defaults to first enabled provider.
+    #[serde(default)]
+    pub default_provider: Option<String>,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
 }
@@ -104,6 +108,7 @@ impl Default for AppConfig {
             db_path: default_db_path(),
             poll_interval_ms: default_poll_interval_ms(),
             log_max_lines: default_log_lines(),
+            default_provider: Some("copilot".into()),
             providers,
         }
     }

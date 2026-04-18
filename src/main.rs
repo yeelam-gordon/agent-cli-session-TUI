@@ -84,7 +84,14 @@ async fn main() -> Result<()> {
         supervisor.run(event_tx, cmd_rx).await;
     });
 
-    let app = App::new(enabled_keys, config.log_max_lines);
+    // Resolve default provider: config setting → first enabled provider
+    let default_provider = config.default_provider
+        .clone()
+        .filter(|p| enabled_keys.contains(p))
+        .or_else(|| enabled_keys.first().cloned())
+        .unwrap_or_default();
+
+    let app = App::new(enabled_keys, default_provider, config.log_max_lines);
     app.run(event_rx, cmd_tx).await?;
 
     Ok(())

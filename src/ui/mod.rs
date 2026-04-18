@@ -48,6 +48,7 @@ pub struct App {
     status_message: String,
     should_quit: bool,
     provider_keys: Vec<String>,
+    default_provider: String,
     detail_scroll: u16,
     search_active: bool,
     search_query: String,
@@ -55,7 +56,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(provider_keys: Vec<String>, log_max_lines: usize) -> Self {
+    pub fn new(provider_keys: Vec<String>, default_provider: String, log_max_lines: usize) -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         Self {
@@ -70,6 +71,7 @@ impl App {
             log_scroll: 0,
             status_message: String::new(),
             should_quit: false,
+            default_provider,
             provider_keys,
             detail_scroll: 0,
             search_active: false,
@@ -315,7 +317,8 @@ impl App {
                     self.search_query.clear();
                 }
                 KeyCode::Char('n') => {
-                    if let Some(key) = self.provider_keys.first() {
+                    let key = self.default_provider.clone();
+                    if self.provider_keys.contains(&key) {
                         let cwd = std::env::current_dir()
                             .unwrap_or_default()
                             .to_string_lossy()
@@ -324,7 +327,7 @@ impl App {
                             provider_key: key.clone(),
                             cwd,
                         });
-                        self.log_lines.push("Launching new session...".into());
+                        self.log_lines.push(format!("Launching new {} session...", key));
                     }
                 }
                 KeyCode::Char('r') | KeyCode::Enter => {
