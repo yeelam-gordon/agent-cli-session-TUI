@@ -358,7 +358,8 @@ impl Provider for GeminiProvider {
         for (pid, entry) in &processes {
             let cmd_lower = entry.command_line.to_lowercase();
             if cmd_lower.contains("gemini") && !cmd_lower.contains("agent-session-tui") {
-                let id = process_info::extract_flag_value(&entry.command_line, "--session-id");
+                let id = process_info::extract_flag_value(&entry.command_line, "--resume")
+                    .or_else(|| process_info::extract_flag_value(&entry.command_line, "--session-id"));
                 live.push((*pid, id));
             }
         }
