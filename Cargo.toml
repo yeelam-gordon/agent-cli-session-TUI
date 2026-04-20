@@ -2,7 +2,9 @@
 name = "agent-session-tui"
 version = "0.1.0"
 edition = "2021"
-description = "TUI for managing agent CLI sessions (Copilot CLI, Claude Code, etc.)"
+description = "TUI for managing agent CLI sessions (Copilot CLI, Claude Code, Codex, Qwen, Gemini)"
+license = "MIT"
+repository = "https://github.com/yeelam-gordon/agent-cli-session-TUI"
 
 [dependencies]
 # TUI — crossterm backend only, no extras

@@ -86,10 +86,16 @@ impl GeminiProvider {
                 }
 
                 let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                // Only track user/gemini as meaningful interaction events
-                // (skip "info", "tool_result", "system", "$set" metadata)
+                // Track user/gemini as interaction events.
+                // Also: "Request cancelled" info resets to waiting (cancels assistant work).
                 if event_type == "user" || event_type == "gemini" {
                     last_type = event_type.to_string();
+                } else if event_type == "info" {
+                    if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+                        if content.contains("cancelled") || content.contains("canceled") {
+                            last_type = "gemini".to_string(); // treat as assistant done → waiting
+                        }
+                    }
                 }
 
                 if event_type == "user" {
@@ -560,6 +566,23 @@ mod tests {
         ]);
         let id = GeminiProvider::read_session_id(&path);
         assert_eq!(id.as_deref(), Some("abc-123-def"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_cancelled_request_means_waiting() {
+        let dir = std::env::temp_dir().join("gemini-test-cancel");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "session.jsonl", &[
+            r#"{"sessionId":"test-4","startTime":"2026-01-01T00:00:00Z","kind":"main"}"#,
+            r#"{"id":"1","timestamp":"2026-01-01T00:01:00Z","type":"user","content":[{"text":"do it"}]}"#,
+            r#"{"id":"2","timestamp":"2026-01-01T00:02:00Z","type":"info","content":"Request cancelled."}"#,
+            r#"{"$set":{"lastUpdated":"2026-01-01T00:02:00Z"}}"#,
+        ]);
+        let provider = make_provider();
+        let scan = provider.scan_jsonl(&path);
+        assert!(scan.waiting_for_user, "Cancelled request after user → back to waiting");
+        assert!(!scan.assistant_working);
         let _ = fs::remove_dir_all(&dir);
     }
 }
