@@ -1,16 +1,16 @@
 # Agent CLI Session TUI
 
-A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, and extensible to others.
+A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, and extensible to others.
 <img width="2818" height="1608" alt="image" src="https://github.com/user-attachments/assets/28922190-474b-4019-be01-45d291954fe9" />
 
 ## Pain Points Solved
 
 - **Too many tabs** — see all sessions in one view with clear status badges
 - **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
-- **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later, no need to keep tabs open "just in case"
+- **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later
 - **Resume after reboot** — session summaries, last activity, work state help you decide what to pick up
-- **Fast search + resume** — `/` to search across all sessions by title, summary, CWD, then `Enter` → `r` to resume instantly
-- **One place to start them all** — launch new sessions or resume old ones in their original working directory
+- **Fast search + resume** — `/` to search across title, summary, CWD, provider, then `Enter` to resume
+- **One place for all agents** — manage Copilot, Claude, Codex, Qwen, Gemini sessions from a single TUI
 
 ## Architecture
 
@@ -19,18 +19,18 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 │ TUI (ratatui + crossterm)                                   │
 │  Session List  │  Session Detail  │  Activity Log           │
 ├─────────────────────────────────────────────────────────────┤
-│ Supervisor (tokio background task)                          │
+│ Supervisor (tokio — parallel provider scans)                │
 │  Discovery · Process matching · Launch/Resume (config-driven)│
 ├─────────────────────────────────────────────────────────────┤
 │ Provider plugins (data-only — read from each CLI's state)   │
-│  Copilot CLI │ Claude Code │ (extensible via Provider trait)│
+│  Copilot │ Claude │ Codex │ Qwen │ Gemini │ (extensible)   │
 ├─────────────────────────────────────────────────────────────┤
 │ Process detection (WMI on Windows, sysinfo on Linux/macOS)  │
 │ archived.json — simple list of hidden session IDs           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-No internal database. Providers read directly from each CLI's own state directory (read-only). The only file we write is `archived.json` for tracking hidden sessions.
+No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh. The only file we write is `archived.json` for tracking hidden sessions.
 
 ### Multi-Axis State Model
 
@@ -43,40 +43,53 @@ Sessions are tracked across four independent axes:
 | **Persistence** | Resumable · Ephemeral · Archived |
 | **Health** | Clean · Crashed · Orphaned |
 
-State is inferred from **multiple signals** (lock files, event streams, process liveness, file timestamps) with a confidence rating.
+User-facing states are simplified: 🟢 Running, 🟡 Waiting, 💤 Resumable, 🔴 Crashed.
 
 ## Keybindings
 
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` or `j`/`k` | Navigate sessions |
-| `Enter` or `r` | Resume selected session (in original CWD) |
-| `n` | New session |
+| `Enter` (⏎) | Open/resume selected session (in original CWD) |
+| `n` | New session (launches default provider) |
 | `a` | Archive session (instantly hidden) |
-| `/` | Search (type to filter, `↑`/`↓` to browse, `Enter` to lock, `Esc` to clear) |
+| `/` | Search (type to filter, `↑`/`↓` to browse, `Enter` to resume, `Esc` to cancel) |
 | `Shift+Tab` | Toggle between active and archived view |
 | `Tab` | Switch panel focus |
-| Mouse click | Select session |
-| Mouse scroll | Navigate session list |
-| `Esc` | Clear search filter |
+| `PgUp`/`PgDn` | Scroll detail panel |
+| `Esc` | Cancel search |
 | `q` / `Ctrl+C` | Quit |
+
+Native mouse text selection works (click-drag to highlight and copy).
+
+## Supported Providers
+
+| Provider | State Dir | Session Format |
+|----------|-----------|----------------|
+| **Copilot CLI** | `~/.copilot/session-state/` | `workspace.yaml` + `events.jsonl` + lock files |
+| **Claude Code** | `~/.claude/projects/` | `<encoded-cwd>/<session-id>.jsonl` |
+| **Codex CLI** | `~/.codex/sessions/` | Session directories with state files |
+| **Qwen CLI** | `~/.qwen/projects/` | `<encoded-cwd>/chats/<session-id>.jsonl` |
+| **Gemini CLI** | `~/.gemini/tmp/` | `<project>/chats/session-*.jsonl` + subdirs |
 
 ## Configuration
 
 Copy `config.toml.example` next to the binary and rename to `config.toml`:
 
 ```toml
+data_dir = '~/.local/share/agent-session-tui'
 poll_interval_ms = 2000
 log_max_lines = 500
 
 [providers.copilot]
 enabled = true
+default = true          # 'n' launches this provider
 command = "copilot"
 default_args = []
 state_dir = '~/.copilot/session-state'
 resume_flag = "--resume"
-# startup_dir = '/home/user/projects'
-launch_method = "wt"    # "wt" (Windows Terminal) | "cmd" | "pwsh"
+launch_method = "wt"    # "wt" | "wtai" | "pwsh" | "cmd"
+launch_fallback = "cmd" # optional — fallback if primary not found
 
 [providers.claude]
 enabled = true
@@ -86,6 +99,17 @@ state_dir = '~/.claude/projects'
 resume_flag = "--resume"
 launch_method = "wt"
 ```
+
+For full control over launch commands, use custom launcher fields:
+
+```toml
+launch_cmd = "wtai"
+launch_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k", "{command}"]
+launch_fallback_cmd = "wt"
+launch_fallback_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k", "{command}"]
+```
+
+Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI command.
 
 Config search order: next to exe → `%APPDATA%/agent-session-tui/config.toml` → built-in defaults.
 
@@ -100,8 +124,8 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     fn key(&self) -> &str;
     fn capabilities(&self) -> ProviderCapabilities;
-    fn discover_sessions(&self) -> Result<Vec<Session>>;       // scan CLI state dir
-    fn match_processes(&self, sessions: &mut [Session]) -> Result<()>; // match live processes
+    fn discover_sessions(&self) -> Result<Vec<Session>>;
+    fn match_processes(&self, sessions: &mut [Session]) -> Result<()>;
     // Optional: session_detail(), activity_sources(), infer_state()
 }
 ```
@@ -118,12 +142,18 @@ cargo build --release
 ## Testing
 
 ```bash
-# Run all provider integration tests
+# Unit tests only (runs on CI)
+cargo test --lib
+
+# All tests including provider integration tests (needs real session data)
 cargo test -- --nocapture
 
-# Run a specific provider's tests
+# Specific provider
 cargo test --test copilot_lifecycle_test -- --nocapture
 cargo test --test claude_lifecycle_test -- --nocapture
+cargo test --test qwen_lifecycle_test -- --nocapture
+cargo test --test gemini_lifecycle_test -- --nocapture
+cargo test --test codex_lifecycle_test -- --nocapture
 ```
 
 ## For Contributors & AI Agents

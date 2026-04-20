@@ -132,12 +132,10 @@ impl GeminiProvider {
     fn extract_content_text(val: &serde_json::Value) -> Option<String> {
         let content = val.get("content")?;
         
-        // Handle direct string
         if let Some(s) = content.as_str() {
             if !s.trim().is_empty() { return Some(s.trim().to_string()); }
         }
 
-        // Handle array of parts
         if let Some(arr) = content.as_array() {
             let mut texts = Vec::new();
             for item in arr {
@@ -150,6 +148,53 @@ impl GeminiProvider {
             if !texts.is_empty() { return Some(texts.join("\n")); }
         }
         None
+    }
+
+    /// Read session UUID from the first line of a JSONL file (the header).
+    fn read_session_id(path: &Path) -> Option<String> {
+        let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+        use std::io::BufRead;
+        let first_line = file.lines().next()?.ok()?;
+        let val: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+        val.get("sessionId").and_then(|v| v.as_str()).map(|s| s.to_string())
+    }
+
+    /// Find the most recently modified JSONL for a session (checks subdirectory too).
+    fn find_latest_jsonl(chats_dir: &Path, session_id: &str) -> Option<PathBuf> {
+        let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+        // Top-level session-*.jsonl files that contain this session ID
+        if let Ok(entries) = std::fs::read_dir(chats_dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.ends_with(".jsonl") && name.contains(&session_id[..8.min(session_id.len())]) {
+                    if let Ok(meta) = e.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            candidates.push((e.path(), mtime));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Subdirectory: <session-id>/*.jsonl
+        let sub_dir = chats_dir.join(session_id);
+        if sub_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&sub_dir) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".jsonl") {
+                        if let Ok(meta) = e.metadata() {
+                            if let Ok(mtime) = meta.modified() {
+                                candidates.push((e.path(), mtime));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        candidates.into_iter().max_by_key(|(_, t)| *t).map(|(p, _)| p)
     }
 }
 
@@ -217,23 +262,44 @@ impl Provider for GeminiProvider {
                 continue;
             }
 
-            let jsonl_files = match std::fs::read_dir(&chats_dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            // Group sessions by UUID (read from JSONL header)
+            // Each session may have: session-<ts>-<short>.jsonl + <uuid>/continuation.jsonl
+            let mut session_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
-            for file_entry in jsonl_files.flatten() {
-                let fname = file_entry.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".jsonl") || !fname.starts_with("session-") {
-                    continue;
+            if let Ok(dir_entries) = std::fs::read_dir(&chats_dir) {
+                for file_entry in dir_entries.flatten() {
+                    let fname = file_entry.file_name().to_string_lossy().to_string();
+                    if fname.ends_with(".jsonl") && fname.starts_with("session-") {
+                        // Read session UUID from first line
+                        if let Some(uuid) = Self::read_session_id(&file_entry.path()) {
+                            session_map.entry(uuid).or_default().push(file_entry.path());
+                        }
+                    }
+                    // Also check subdirectories (continuation files)
+                    if file_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        let sub_id = fname.clone();
+                        if let Ok(sub_entries) = std::fs::read_dir(file_entry.path()) {
+                            for sub_file in sub_entries.flatten() {
+                                let sub_name = sub_file.file_name().to_string_lossy().to_string();
+                                if sub_name.ends_with(".jsonl") {
+                                    session_map.entry(sub_id.clone()).or_default().push(sub_file.path());
+                                }
+                            }
+                        }
+                    }
                 }
+            }
 
-                let provider_id = fname.strip_prefix("session-")
-                    .and_then(|s| s.strip_suffix(".jsonl"))
-                    .unwrap_or(&fname)
-                    .to_string();
+            for (session_id, jsonl_files) in &session_map {
+                // Find the most recently modified JSONL for this session
+                let best_file = jsonl_files.iter()
+                    .filter_map(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()).map(|t| (p, t)))
+                    .max_by_key(|(_, t)| *t)
+                    .map(|(p, _)| p.clone());
 
-                let scan = self.scan_jsonl(&file_entry.path());
+                let Some(jsonl_path) = best_file else { continue };
+
+                let scan = self.scan_jsonl(&jsonl_path);
                 if !scan.has_user || scan.event_count < 2 {
                     continue;
                 }
@@ -251,16 +317,28 @@ impl Provider for GeminiProvider {
 
                 let title = scan.first_user_msg.as_ref()
                     .map(|m| truncate_str_safe(m.lines().next().unwrap_or(m), 60))
-                    .unwrap_or_else(|| provider_id[..8.min(provider_id.len())].to_string());
+                    .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
+
+                // Set interaction state from JSONL scan
+                let interaction = if scan.waiting_for_user {
+                    InteractionState::WaitingInput
+                } else if scan.assistant_working {
+                    InteractionState::Busy
+                } else {
+                    InteractionState::Unknown
+                };
 
                 sessions.push(Session {
-                    id: format!("gemini_{}_{}", proj_name, provider_id),
-                    provider_session_id: provider_id,
+                    id: format!("gemini_{}_{}", proj_name, session_id),
+                    provider_session_id: session_id.clone(),
                     provider_name: "gemini".into(),
                     cwd: cwd.clone(),
                     title,
                     summary,
-                    state: SessionState::default(),
+                    state: SessionState {
+                        interaction,
+                        ..SessionState::default()
+                    },
                     pid: None,
                     created_at,
                     updated_at: file_mtime,
@@ -275,12 +353,10 @@ impl Provider for GeminiProvider {
 
     fn match_processes(&self, sessions: &mut [Session]) -> Result<()> {
         let processes = process_info::discover_processes("gemini");
-        crate::log::info(&format!("Gemini match_processes: found {} potential processes", processes.len()));
         
         let mut live: Vec<(u32, Option<String>)> = Vec::new();
         for (pid, entry) in &processes {
             let cmd_lower = entry.command_line.to_lowercase();
-            // Match "gemini" but exclude the TUI itself
             if cmd_lower.contains("gemini") && !cmd_lower.contains("agent-session-tui") {
                 let id = process_info::extract_flag_value(&entry.command_line, "--session-id");
                 live.push((*pid, id));
@@ -290,18 +366,17 @@ impl Provider for GeminiProvider {
         let mut claimed_pids = HashSet::new();
 
         for session in sessions.iter_mut() {
-            // 1. Try matching by ID in command line
+            // 1. Try matching by session ID in command line
             let matched = live.iter().find(|(_, sid)| {
                 sid.as_ref().map(|s| s == &session.provider_session_id).unwrap_or(false)
             });
 
-            let mut current_pid = None;
             let process_alive = if let Some((pid, _)) = matched {
-                current_pid = Some(*pid);
+                session.pid = Some(*pid);
                 claimed_pids.insert(*pid);
                 true
             } else {
-                // 2. Fallback: Heuristic matching for the "current" session
+                // 2. Fallback: match unclaimed process if session was recently active
                 let updated_dt = session.updated_at.parse::<chrono::DateTime<chrono::FixedOffset>>().ok();
                 let recently_active = updated_dt.map(|dt| {
                     let age = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc)).num_seconds().abs();
@@ -310,62 +385,61 @@ impl Provider for GeminiProvider {
 
                 if recently_active {
                     if let Some((pid, _)) = live.iter().find(|(p, _)| !claimed_pids.contains(p)) {
-                        current_pid = Some(*pid);
+                        session.pid = Some(*pid);
                         claimed_pids.insert(*pid);
                         true
                     } else { false }
                 } else { false }
             };
 
-            session.pid = current_pid;
+            // Re-scan the most recent JSONL for fresh state
+            let scan = session.state_dir.as_ref()
+                .and_then(|d| Self::find_latest_jsonl(d, &session.provider_session_id))
+                .map(|p| self.scan_jsonl(&p))
+                .unwrap_or_default();
 
-            // Re-scan to get fresh signals
-            let jsonl_path = session.state_dir.as_ref().map(|d| d.join(format!("session-{}.jsonl", session.provider_session_id)));
-            let scan = jsonl_path.as_ref().map(|p| self.scan_jsonl(p)).unwrap_or_default();
-            
             if let Some(ref mtime) = scan.file_mtime {
                 session.updated_at = mtime.clone();
             }
 
-            let signals = StateSignals {
-                process_alive: Some(process_alive),
-                pid: session.pid,
-                lock_file_exists: None,
-                lock_file_pid: None,
-                last_event_age_secs: scan.last_event_age_secs,
-                has_unfinished_turn: Some(scan.assistant_working),
-                recent_tool_activity: None,
-                cpu_active: None,
+            // Determine interaction state from scan
+            let interaction = if scan.waiting_for_user {
+                InteractionState::WaitingInput
+            } else if scan.assistant_working {
+                InteractionState::Busy
+            } else {
+                session.state.interaction
             };
 
-            session.state = self.infer_state(&signals);
-
             if process_alive {
-                if scan.waiting_for_user {
-                    session.state.interaction = InteractionState::WaitingInput;
-                    session.state.confidence = Confidence::High;
-                } else if scan.assistant_working {
-                    session.state.interaction = InteractionState::Busy;
-                    session.state.confidence = Confidence::High;
-                }
+                session.state = SessionState {
+                    process: ProcessState::Running,
+                    interaction,
+                    persistence: PersistenceState::Resumable,
+                    health: HealthState::Clean,
+                    confidence: Confidence::High,
+                    reason: format!("process alive, waiting_for_user={}", scan.waiting_for_user),
+                };
             } else {
-                if scan.waiting_for_user {
-                    session.state.interaction = InteractionState::WaitingInput;
-                }
+                session.state = SessionState {
+                    process: ProcessState::Exited,
+                    interaction,
+                    persistence: PersistenceState::Resumable,
+                    health: HealthState::Clean,
+                    confidence: Confidence::High,
+                    reason: format!("no process, waiting_for_user={}", scan.waiting_for_user),
+                };
             }
-
-            session.state.reason = format!(
-                "process={} waiting={} working={} age={:?}s",
-                process_alive, scan.waiting_for_user, scan.assistant_working, scan.last_event_age_secs
-            );
         }
 
         Ok(())
     }
 
     fn session_detail(&self, session: &Session) -> Result<SessionDetail> {
-        let jsonl_path = session.state_dir.as_ref().map(|d| d.join(format!("session-{}.jsonl", session.provider_session_id)));
-        let scan = jsonl_path.as_ref().map(|p| self.scan_jsonl(p)).unwrap_or_default();
+        let scan = session.state_dir.as_ref()
+            .and_then(|d| Self::find_latest_jsonl(d, &session.provider_session_id))
+            .map(|p| self.scan_jsonl(&p))
+            .unwrap_or_default();
 
         Ok(SessionDetail {
             title: Some(session.title.clone()),
@@ -377,9 +451,8 @@ impl Provider for GeminiProvider {
     fn activity_sources(&self, session: &Session) -> Result<Vec<ActivitySource>> {
         let mut sources = Vec::new();
         if let Some(ref dir) = session.state_dir {
-            let jsonl = dir.join(format!("session-{}.jsonl", session.provider_session_id));
-            if jsonl.exists() {
-                sources.push(ActivitySource::EventStream(jsonl));
+            if let Some(path) = Self::find_latest_jsonl(dir, &session.provider_session_id) {
+                sources.push(ActivitySource::EventStream(path));
             }
         }
         Ok(sources)

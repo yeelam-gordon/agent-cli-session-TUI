@@ -360,11 +360,6 @@ impl Provider for CodexProvider {
         }
 
         let matched_by_id: Vec<_> = live.iter().filter(|(_, sid)| sid.is_some()).collect();
-        let unknown_pids: Vec<u32> = live
-            .iter()
-            .filter(|(_, sid)| sid.is_none())
-            .map(|(pid, _)| *pid)
-            .collect();
         let mut claimed_pids: HashSet<u32> = HashSet::new();
 
         for session in sessions.iter_mut() {
@@ -387,7 +382,7 @@ impl Provider for CodexProvider {
                     .unwrap_or(false)
             });
 
-            let recently_active = session
+            let _recently_active = session
                 .updated_at
                 .parse::<chrono::DateTime<chrono::FixedOffset>>()
                 .ok()
