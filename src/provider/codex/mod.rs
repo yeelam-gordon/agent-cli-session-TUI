@@ -399,19 +399,14 @@ impl Provider for CodexProvider {
                 })
                 .unwrap_or(false);
 
+            // Only treat the session as running if we can match a process
+            // by explicit session id in the command line. Avoid heuristic
+            // attachment of unrelated codex processes which caused false
+            // "running" states.
             let process_alive = if let Some((pid, _)) = matched {
                 session.pid = Some(*pid);
                 claimed_pids.insert(*pid);
                 true
-            } else if scan.active_task || recently_active {
-                if let Some(&pid) = unknown_pids.iter().find(|pid| !claimed_pids.contains(pid)) {
-                    session.pid = Some(pid);
-                    claimed_pids.insert(pid);
-                    true
-                } else {
-                    session.pid = None;
-                    false
-                }
             } else {
                 session.pid = None;
                 false
