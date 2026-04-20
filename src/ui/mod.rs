@@ -53,6 +53,8 @@ pub struct App {
     search_active: bool,
     search_query: String,
     log_max_lines: usize,
+    /// Sessions archived locally this cycle — filtered out until supervisor confirms.
+    pending_archives: Vec<String>,
 }
 
 impl App {
@@ -77,6 +79,7 @@ impl App {
             search_active: false,
             search_query: String::new(),
             log_max_lines,
+            pending_archives: Vec::new(),
         }
     }
 
@@ -166,7 +169,27 @@ impl App {
             // Drain supervisor events
             while let Ok(ev) = event_rx.try_recv() {
                 match ev {
-                    SupervisorEvent::SessionsUpdated { active, hidden } => {
+                    SupervisorEvent::SessionsUpdated { mut active, mut hidden } => {
+                        // Filter out sessions that were just archived locally
+                        // (supervisor may not have processed the command yet)
+                        if !self.pending_archives.is_empty() {
+                            let mut moved = Vec::new();
+                            active.retain(|s| {
+                                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                                if self.pending_archives.contains(&key) {
+                                    moved.push(s.clone());
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
+                            hidden.extend(moved);
+                            // Clear pending once supervisor confirms (session is in hidden list)
+                            self.pending_archives.retain(|k| {
+                                !hidden.iter().any(|s| format!("{}:{}", s.provider_name, s.provider_session_id) == *k)
+                            });
+                        }
+
                         let active_count = active.len();
                         let hidden_count = hidden.len();
 
@@ -354,11 +377,14 @@ impl App {
                     if let Some(session) = self.selected_session() {
                         let psid = session.provider_session_id.clone();
                         let pname = session.provider_name.clone();
+                        let key = format!("{}:{}", pname, psid);
                         let _ = cmd_tx.send(SupervisorCommand::ArchiveSession {
                             provider_session_id: psid.clone(),
                             provider_key: pname.clone(),
                         });
-                        // Instantly move from active to hidden (don't wait for refresh)
+                        // Track locally so incoming refreshes don't put it back
+                        self.pending_archives.push(key);
+                        // Instantly move from active to hidden
                         if self.view_mode == ViewMode::Active {
                             if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
                                 if idx < self.sessions.len() {
