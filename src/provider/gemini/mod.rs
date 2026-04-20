@@ -86,7 +86,9 @@ impl GeminiProvider {
                 }
 
                 let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if !event_type.is_empty() {
+                // Only track user/gemini as meaningful interaction events
+                // (skip "info", "tool_result", "system", "$set" metadata)
+                if event_type == "user" || event_type == "gemini" {
                     last_type = event_type.to_string();
                 }
 
