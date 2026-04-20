@@ -110,19 +110,27 @@ impl Supervisor {
     }
 
     fn scan_and_notify(&self, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
+        let providers: Vec<_> = self.registry.providers().iter()
+            .filter(|p| p.capabilities().supports_discovery)
+            .collect();
+
+        // Scan all providers in parallel
+        let results: Vec<Vec<Session>> = std::thread::scope(|s| {
+            let handles: Vec<_> = providers.iter().map(|provider| {
+                s.spawn(move || {
+                    let mut sessions = provider.discover_sessions().unwrap_or_default();
+                    let _ = provider.match_processes(&mut sessions);
+                    sessions
+                })
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+        });
+
         let mut active_sessions = Vec::new();
         let mut hidden_sessions = Vec::new();
+        let archive = self.archive.lock().ok();
 
-        for provider in self.registry.providers() {
-            if !provider.capabilities().supports_discovery {
-                continue;
-            }
-
-            let mut sessions = provider.discover_sessions().unwrap_or_default();
-            let _ = provider.match_processes(&mut sessions);
-
-            // Split into active vs hidden (archived)
-            let archive = self.archive.lock().ok();
+        for sessions in results {
             for s in sessions {
                 let is_archived = archive
                     .as_ref()
@@ -135,9 +143,6 @@ impl Supervisor {
                 }
             }
         }
-
-        // Also discover empty/filtered sessions for the hidden view
-        // (providers already skip these, but we can mark archived ones)
 
         active_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         hidden_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));

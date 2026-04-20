@@ -11,9 +11,16 @@ fn gemini_lifecycle() {
     let provider = GeminiProvider::new(pc);
     let mut runner = TestRunner::new("Gemini");
 
-    // Common scenarios work with any Provider
+    // 1. Static Discovery (Offline)
     scenarios::discover(&mut runner, &provider);
     scenarios::graceful(&mut runner, &provider);
+
+    // 2. Live Lifecycle (Requires a real gemini-cli installation)
+    // This will test: Launch -> Running (🟢) -> Waiting (🟡) -> Kill -> Resumable (💤)
+    // We check for "launch" anywhere in the args because libtest puts its own args first
+    if std::env::args().any(|arg| arg == "launch") {
+        scenarios::launch(&mut runner, &provider, pc);
+    }
 
     assert!(runner.summary(), "Tests failed");
 }
