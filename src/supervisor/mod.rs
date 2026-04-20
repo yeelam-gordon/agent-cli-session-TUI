@@ -333,7 +333,8 @@ fn launch_with_shortcut(
     #[cfg(windows)]
     {
         match method {
-            "wt" => {
+            // wt-compatible launchers: use -w 0 new-tab style args
+            m @ ("wt" | "wtai") => {
                 let mut args = vec!["-w".to_string(), "0".to_string(), "new-tab".to_string()];
                 if let Some(profile) = wt_profile {
                     args.push("--profile".to_string());
@@ -345,11 +346,11 @@ fn launch_with_shortcut(
                 args.push("/k".to_string());
                 args.push(cmd_str.to_string());
 
-                match std::process::Command::new("wt").args(&args).spawn() {
+                match std::process::Command::new(m).args(&args).spawn() {
                     Ok(_) => Ok(()),
                     Err(_) => {
                         let fb = fallback.unwrap_or("cmd");
-                        crate::log::warn(&format!("wt not found, falling back to {}", fb));
+                        crate::log::warn(&format!("{} not found, falling back to {}", m, fb));
                         launch_with_shortcut(cmd_str, cwd, fb, None, None)
                     }
                 }
