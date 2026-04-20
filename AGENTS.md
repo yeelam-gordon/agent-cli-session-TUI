@@ -12,8 +12,12 @@ Read these before making changes. They are in `.github/instructions/`:
 
 | File | Applies To | What It Covers |
 |------|-----------|----------------|
-| [`rust.instructions.md`](.github/instructions/rust.instructions.md) | `**/*.rs` | Rust conventions localized for this project: error handling, string safety, process detection, TUI patterns, testing |
-| [`plugin.instructions.md`](.github/instructions/plugin.instructions.md) | `src/provider/**/*.rs` | How to write a new provider plugin: trait to implement, process detection, config, testing |
+| [`rust.instructions.md`](.github/instructions/rust.instructions.md) | `**/*.rs` | Rust conventions: error handling, string safety, process detection, TUI patterns |
+| [`plugin.instructions.md`](.github/instructions/plugin.instructions.md) | `src/provider/**/*.rs` | How to write a new provider plugin |
+| [`security.instructions.md`](.github/instructions/security.instructions.md) | `**/*.rs`, `**/*.toml` | Command injection, path traversal, sensitive data, dependency auditing |
+| [`performance.instructions.md`](.github/instructions/performance.instructions.md) | `src/provider/**`, `src/supervisor/**`, `src/ui/**` | JSONL scanning, caching, render loop, release profile |
+| [`testing.instructions.md`](.github/instructions/testing.instructions.md) | `**/*.rs`, `tests/**` | Test categories, required provider tests, CI quality gates |
+| [`cross-platform.instructions.md`](.github/instructions/cross-platform.instructions.md) | `**/*.rs` | Path handling, process detection, terminal launch, Unix support |
 
 ## Project Structure
 
