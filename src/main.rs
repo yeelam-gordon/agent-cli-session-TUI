@@ -52,8 +52,10 @@ async fn main() -> Result<()> {
     ));
 
     // Simple JSON archive
+    let archive_path = config.data_dir.join("archived.json");
     std::fs::create_dir_all(&config.data_dir)?;
-    let archive = ArchiveStore::open(&config.data_dir.join("archived.json"))?;
+    log::info(&format!("Archive path: {:?}", archive_path));
+    let archive = ArchiveStore::open(&archive_path)?;
     let archive = Arc::new(Mutex::new(archive));
 
     // Build provider registry
