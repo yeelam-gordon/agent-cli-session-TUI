@@ -5,3 +5,7 @@ config.toml
 agent-session-tui.log
 archived.json
 sessions.json
+
+# Agent tool settings (local permissions)
+.qwen/
+.claude/
