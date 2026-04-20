@@ -24,7 +24,6 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub enabled: bool,
-    /// Mark as the default provider for 'n' (new session). Only one should be true.
     #[serde(default)]
     pub default: bool,
     /// The CLI command to invoke (e.g., "copilot", "claude").
@@ -35,9 +34,23 @@ pub struct ProviderConfig {
     pub resume_flag: Option<String>,
     #[serde(default)]
     pub startup_dir: Option<PathBuf>,
+    /// Launch method shortcut: "wt" | "pwsh" | "cmd". Ignored if launch_cmd is set.
     #[serde(default = "default_launch_method")]
     pub launch_method: String,
-    /// Fallback launch method if primary is not available (e.g., "cmd" if "wt" not found).
+    /// Custom launcher program (e.g., "wtai", "wt", "tmux"). Overrides launch_method.
+    #[serde(default)]
+    pub launch_cmd: Option<String>,
+    /// Custom launcher args template. Use {cwd} and {command} as placeholders.
+    /// Example: ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k", "{command}"]
+    #[serde(default)]
+    pub launch_args: Option<Vec<String>>,
+    /// Fallback launcher program if primary fails.
+    #[serde(default)]
+    pub launch_fallback_cmd: Option<String>,
+    /// Fallback launcher args template. Same placeholders as launch_args.
+    #[serde(default)]
+    pub launch_fallback_args: Option<Vec<String>>,
+    /// Legacy fallback shortcut: "wt" | "pwsh" | "cmd". Ignored if launch_fallback_cmd is set.
     #[serde(default)]
     pub launch_fallback: Option<String>,
     #[serde(default)]
@@ -78,6 +91,10 @@ impl Default for AppConfig {
                 resume_flag: Some("--resume".into()),
                 startup_dir: None,
                 launch_method: "wt".into(),
+                launch_cmd: None,
+                launch_args: None,
+                launch_fallback_cmd: None,
+                launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
             },
@@ -95,6 +112,10 @@ impl Default for AppConfig {
                 resume_flag: Some("--resume".into()),
                 startup_dir: None,
                 launch_method: "wt".into(),
+                launch_cmd: None,
+                launch_args: None,
+                launch_fallback_cmd: None,
+                launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
             },
@@ -112,6 +133,31 @@ impl Default for AppConfig {
                 resume_flag: Some("resume".into()),
                 startup_dir: None,
                 launch_method: "wt".into(),
+                launch_cmd: None,
+                launch_args: None,
+                launch_fallback_cmd: None,
+                launch_fallback_args: None,
+                launch_fallback: Some("cmd".into()),
+                wt_profile: None,
+            },
+        );
+
+        // Gemini CLI
+        providers.insert(
+            "gemini".into(),
+            ProviderConfig {
+                enabled: true,
+                default: false,
+                command: "gemini".into(),
+                default_args: vec![],
+                state_dir: dirs::home_dir().map(|h| h.join(".gemini")),
+                resume_flag: Some("--resume".into()),
+                startup_dir: None,
+                launch_method: "wt".into(),
+                launch_cmd: None,
+                launch_args: None,
+                launch_fallback_cmd: None,
+                launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
             },
@@ -182,4 +228,5 @@ impl AppConfig {
         Ok(())
     }
 }
+
 

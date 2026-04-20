@@ -6,6 +6,25 @@
 poll_interval_ms = 2000
 log_max_lines = 500
 
+# ─── Launch Configuration ───
+# Each provider can configure how sessions are launched in a terminal.
+#
+# Option 1: Shortcut (simple)
+#   launch_method = "wt"       # "wt" (Windows Terminal tab) | "pwsh" | "cmd"
+#   launch_fallback = "cmd"    # fallback if launch_method program not found
+#
+# Option 2: Custom command (full control)
+#   launch_cmd = "wtai"                    # any program
+#   launch_args = ["-w", "0", "new-tab",   # args with placeholders:
+#     "--startingDirectory", "{cwd}",       #   {cwd}     → working directory
+#     "cmd", "/k", "{command}"]             #   {command}  → the agent CLI command
+#   launch_fallback_cmd = "wt"             # fallback program
+#   launch_fallback_args = ["-w", "0", "new-tab",
+#     "--startingDirectory", "{cwd}",
+#     "cmd", "/k", "{command}"]
+#
+# Custom launch_cmd/args take priority over launch_method when set.
+
 # ─── Copilot CLI ───
 [providers.copilot]
 enabled = true
@@ -15,8 +34,8 @@ default_args = []
 state_dir = '~/.copilot/session-state'
 resume_flag = "--resume"
 # startup_dir = 'D:\'
-launch_method = "wt"           # "wt" | "pwsh" | "cmd"
-launch_fallback = "cmd"        # used if launch_method program not found
+launch_method = "wt"
+launch_fallback = "cmd"
 # wt_profile = "PowerShell"
 
 # ─── Claude Code ───
@@ -31,6 +50,7 @@ launch_method = "wt"
 launch_fallback = "cmd"
 # wt_profile = "PowerShell"
 
+# ─── Qwen CLI ───
 [providers.qwen]
 enabled = true
 command = "qwen"

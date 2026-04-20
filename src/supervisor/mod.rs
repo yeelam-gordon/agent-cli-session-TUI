@@ -185,16 +185,13 @@ impl Supervisor {
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| cwd.to_string());
-        let launch_method = config.launch_method.as_str();
-        let launch_fallback = config.launch_fallback.as_deref();
-        let wt_profile = config.wt_profile.as_deref();
 
         let cmd = Self::build_new_command(config);
         crate::log::info(&format!(
             "Launching new {}: {:?} in {}",
             provider_key, cmd, effective_cwd
         ));
-        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, launch_fallback, wt_profile) {
+        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, config) {
             crate::log::error(&format!("Failed to launch {}: {}", provider_key, e));
             let _ = event_tx.send(SupervisorEvent::Error(format!("Failed to launch: {}", e)));
         }
@@ -226,16 +223,13 @@ impl Supervisor {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string())
         };
-        let launch_method = config.launch_method.as_str();
-        let launch_fallback = config.launch_fallback.as_deref();
-        let wt_profile = config.wt_profile.as_deref();
 
         let cmd = Self::build_resume_command(config, provider_session_id);
         crate::log::info(&format!(
             "Resuming {} session {} in {:?}: {:?}",
             provider_key, provider_session_id, effective_cwd, cmd
         ));
-        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, launch_fallback, wt_profile) {
+        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, config) {
             crate::log::error(&format!("Failed to resume: {}", e));
             let _ = event_tx.send(SupervisorEvent::Error(format!("Failed to resume: {}", e)));
         }
@@ -264,19 +258,81 @@ impl Supervisor {
     }
 }
 
-/// Launch a command in a new terminal window using the configured method.
+/// Expand {cwd} and {command} placeholders in launch args.
+fn expand_launch_args(args: &[String], cwd: &str, command: &str) -> Vec<String> {
+    args.iter()
+        .map(|a| a.replace("{cwd}", cwd).replace("{command}", command))
+        .collect()
+}
+
+/// Try to launch with a program + args. Returns Ok if spawned, Err if program not found.
+fn try_launch(program: &str, args: &[String]) -> Result<()> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()?;
+    Ok(())
+}
+
+/// Launch a command in a new terminal. Tries custom launch_cmd/args first,
+/// then launch_method shortcut, then fallback chain.
 fn launch_in_terminal(
     cmd: &[String],
     cwd: &str,
-    launch_method: &str,
-    fallback: Option<&str>,
-    wt_profile: Option<&str>,
+    config: &crate::config::ProviderConfig,
 ) -> Result<()> {
     let cmd_str = cmd.join(" ");
 
+    // 1. Custom launch_cmd + launch_args (fully user-defined)
+    if let Some(ref launch_cmd) = config.launch_cmd {
+        if let Some(ref launch_args) = config.launch_args {
+            let args = expand_launch_args(launch_args, cwd, &cmd_str);
+            match try_launch(launch_cmd, &args) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    crate::log::warn(&format!("{} failed: {}, trying fallback", launch_cmd, e));
+                }
+            }
+        }
+    }
+
+    // 2. Custom fallback_cmd + fallback_args
+    if let (Some(ref fb_cmd), Some(ref fb_args)) = (&config.launch_fallback_cmd, &config.launch_fallback_args) {
+        let args = expand_launch_args(fb_args, cwd, &cmd_str);
+        match try_launch(fb_cmd, &args) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                crate::log::warn(&format!("Fallback {} failed: {}, trying shortcut", fb_cmd, e));
+            }
+        }
+    }
+
+    // 3. Shortcut-based launch (launch_method → launch_fallback)
+    let method = if config.launch_cmd.is_some() {
+        // Custom cmd already failed, skip to fallback shortcut
+        config.launch_fallback.as_deref().unwrap_or("cmd")
+    } else {
+        config.launch_method.as_str()
+    };
+    let fallback_method = if config.launch_cmd.is_some() {
+        None // already tried custom, don't loop
+    } else {
+        config.launch_fallback.as_deref()
+    };
+
+    launch_with_shortcut(&cmd_str, cwd, method, fallback_method, config.wt_profile.as_deref())
+}
+
+/// Launch using shortcut method names: "wt", "pwsh", "cmd".
+fn launch_with_shortcut(
+    cmd_str: &str,
+    cwd: &str,
+    method: &str,
+    fallback: Option<&str>,
+    wt_profile: Option<&str>,
+) -> Result<()> {
     #[cfg(windows)]
     {
-        match launch_method {
+        match method {
             "wt" => {
                 let mut args = vec!["-w".to_string(), "0".to_string(), "new-tab".to_string()];
                 if let Some(profile) = wt_profile {
@@ -287,38 +343,35 @@ fn launch_in_terminal(
                 args.push(cwd.to_string());
                 args.push("cmd".to_string());
                 args.push("/k".to_string());
-                args.push(cmd_str.clone());
+                args.push(cmd_str.to_string());
 
-                let result = std::process::Command::new("wt").args(&args).spawn();
-
-                match result {
+                match std::process::Command::new("wt").args(&args).spawn() {
                     Ok(_) => Ok(()),
                     Err(_) => {
                         let fb = fallback.unwrap_or("cmd");
                         crate::log::warn(&format!("wt not found, falling back to {}", fb));
-                        launch_in_terminal(cmd, cwd, fb, None, None)
+                        launch_with_shortcut(cmd_str, cwd, fb, None, None)
                     }
                 }
             }
             "pwsh" => {
-                let result = std::process::Command::new("pwsh")
-                    .args(["-NoExit", "-Command", &cmd_str])
+                match std::process::Command::new("pwsh")
+                    .args(["-NoExit", "-Command", cmd_str])
                     .current_dir(cwd)
-                    .spawn();
-                match result {
+                    .spawn()
+                {
                     Ok(_) => Ok(()),
                     Err(_) if fallback.is_some() => {
                         let fb = fallback.unwrap();
                         crate::log::warn(&format!("pwsh not found, falling back to {}", fb));
-                        launch_in_terminal(cmd, cwd, fb, None, None)
+                        launch_with_shortcut(cmd_str, cwd, fb, None, None)
                     }
                     Err(e) => Err(e.into()),
                 }
             }
             _ => {
-                // "cmd" or any other — no further fallback
                 std::process::Command::new("cmd")
-                    .args(["/c", "start", "cmd", "/k", &cmd_str])
+                    .args(["/c", "start", "cmd", "/k", cmd_str])
                     .current_dir(cwd)
                     .spawn()?;
                 Ok(())
@@ -328,7 +381,7 @@ fn launch_in_terminal(
 
     #[cfg(not(windows))]
     {
-        let _ = (launch_method, fallback, wt_profile);
+        let _ = (method, fallback, wt_profile);
         let shell_cmd = format!("cd {} && {}", cwd, cmd_str);
         std::process::Command::new("sh")
             .args(["-c", &format!("xterm -e '{}' &", shell_cmd)])

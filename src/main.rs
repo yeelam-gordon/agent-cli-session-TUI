@@ -18,6 +18,7 @@ use config::AppConfig;
 use provider::claude::ClaudeProvider;
 use provider::codex::CodexProvider;
 use provider::copilot::CopilotProvider;
+use provider::gemini::GeminiProvider;
 use provider::qwen::QwenProvider;
 use provider::ProviderRegistry;
 use supervisor::Supervisor;
@@ -33,6 +34,7 @@ fn create_provider(
         "claude" => Some(Box::new(ClaudeProvider::new(config))),
         "codex" => Some(Box::new(CodexProvider::new(config))),
         "qwen" => Some(Box::new(QwenProvider::new(config))),
+        "gemini" => Some(Box::new(GeminiProvider::new(config))),
         _ => None,
     }
 }
