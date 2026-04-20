@@ -186,6 +186,7 @@ impl Supervisor {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| cwd.to_string());
         let launch_method = config.launch_method.as_str();
+        let launch_fallback = config.launch_fallback.as_deref();
         let wt_profile = config.wt_profile.as_deref();
 
         let cmd = Self::build_new_command(config);
@@ -193,7 +194,7 @@ impl Supervisor {
             "Launching new {}: {:?} in {}",
             provider_key, cmd, effective_cwd
         ));
-        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, wt_profile) {
+        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, launch_fallback, wt_profile) {
             crate::log::error(&format!("Failed to launch {}: {}", provider_key, e));
             let _ = event_tx.send(SupervisorEvent::Error(format!("Failed to launch: {}", e)));
         }
@@ -226,6 +227,7 @@ impl Supervisor {
                 .unwrap_or_else(|| ".".to_string())
         };
         let launch_method = config.launch_method.as_str();
+        let launch_fallback = config.launch_fallback.as_deref();
         let wt_profile = config.wt_profile.as_deref();
 
         let cmd = Self::build_resume_command(config, provider_session_id);
@@ -233,7 +235,7 @@ impl Supervisor {
             "Resuming {} session {} in {:?}: {:?}",
             provider_key, provider_session_id, effective_cwd, cmd
         ));
-        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, wt_profile) {
+        if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, launch_fallback, wt_profile) {
             crate::log::error(&format!("Failed to resume: {}", e));
             let _ = event_tx.send(SupervisorEvent::Error(format!("Failed to resume: {}", e)));
         }
@@ -267,6 +269,7 @@ fn launch_in_terminal(
     cmd: &[String],
     cwd: &str,
     launch_method: &str,
+    fallback: Option<&str>,
     wt_profile: Option<&str>,
 ) -> Result<()> {
     let cmd_str = cmd.join(" ");
@@ -275,10 +278,6 @@ fn launch_in_terminal(
     {
         match launch_method {
             "wt" => {
-                // Windows Terminal: new tab in the EXISTING window.
-                // `-w 0` targets the most recently active WT window
-                // (without it, wt opens a brand new window when called
-                // from a process outside Windows Terminal).
                 let mut args = vec!["-w".to_string(), "0".to_string(), "new-tab".to_string()];
                 if let Some(profile) = wt_profile {
                     args.push("--profile".to_string());
@@ -295,20 +294,29 @@ fn launch_in_terminal(
                 match result {
                     Ok(_) => Ok(()),
                     Err(_) => {
-                        // Fallback to cmd if wt not available
-                        launch_in_terminal(cmd, cwd, "cmd", None)
+                        let fb = fallback.unwrap_or("cmd");
+                        crate::log::warn(&format!("wt not found, falling back to {}", fb));
+                        launch_in_terminal(cmd, cwd, fb, None, None)
                     }
                 }
             }
             "pwsh" => {
-                std::process::Command::new("pwsh")
+                let result = std::process::Command::new("pwsh")
                     .args(["-NoExit", "-Command", &cmd_str])
                     .current_dir(cwd)
-                    .spawn()?;
-                Ok(())
+                    .spawn();
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(_) if fallback.is_some() => {
+                        let fb = fallback.unwrap();
+                        crate::log::warn(&format!("pwsh not found, falling back to {}", fb));
+                        launch_in_terminal(cmd, cwd, fb, None, None)
+                    }
+                    Err(e) => Err(e.into()),
+                }
             }
             _ => {
-                // "cmd" or any other fallback
+                // "cmd" or any other — no further fallback
                 std::process::Command::new("cmd")
                     .args(["/c", "start", "cmd", "/k", &cmd_str])
                     .current_dir(cwd)
@@ -320,7 +328,7 @@ fn launch_in_terminal(
 
     #[cfg(not(windows))]
     {
-        let _ = (launch_method, wt_profile); // suppress unused warnings
+        let _ = (launch_method, fallback, wt_profile);
         let shell_cmd = format!("cd {} && {}", cwd, cmd_str);
         std::process::Command::new("sh")
             .args(["-c", &format!("xterm -e '{}' &", shell_cmd)])

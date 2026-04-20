@@ -15,7 +15,8 @@ default_args = []
 state_dir = '~/.copilot/session-state'
 resume_flag = "--resume"
 # startup_dir = 'D:\'
-launch_method = "wt"
+launch_method = "wt"           # "wt" | "pwsh" | "cmd"
+launch_fallback = "cmd"        # used if launch_method program not found
 # wt_profile = "PowerShell"
 
 # ─── Claude Code ───
@@ -27,15 +28,17 @@ state_dir = '~/.claude/projects'
 resume_flag = "--resume"
 # startup_dir = 'D:\'
 launch_method = "wt"
+launch_fallback = "cmd"
 # wt_profile = "PowerShell"
 
 [providers.qwen]
 enabled = true
 command = "qwen"
 default_args = []
-state_dir = '~/.qwen/session-state'
+state_dir = '~/.qwen/projects'
 resume_flag = "--resume"
 # startup_dir = 'D:\'
 launch_method = "wt"
+launch_fallback = "cmd"
 # wt_profile = "PowerShell"
 

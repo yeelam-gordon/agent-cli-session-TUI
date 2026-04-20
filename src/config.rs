@@ -37,6 +37,9 @@ pub struct ProviderConfig {
     pub startup_dir: Option<PathBuf>,
     #[serde(default = "default_launch_method")]
     pub launch_method: String,
+    /// Fallback launch method if primary is not available (e.g., "cmd" if "wt" not found).
+    #[serde(default)]
+    pub launch_fallback: Option<String>,
     #[serde(default)]
     pub wt_profile: Option<String>,
 }
@@ -75,6 +78,7 @@ impl Default for AppConfig {
                 resume_flag: Some("--resume".into()),
                 startup_dir: None,
                 launch_method: "wt".into(),
+                launch_fallback: Some("cmd".into()),
                 wt_profile: None,
             },
         );
@@ -91,6 +95,7 @@ impl Default for AppConfig {
                 resume_flag: Some("--resume".into()),
                 startup_dir: None,
                 launch_method: "wt".into(),
+                launch_fallback: Some("cmd".into()),
                 wt_profile: None,
             },
         );
@@ -107,6 +112,7 @@ impl Default for AppConfig {
                 resume_flag: Some("resume".into()),
                 startup_dir: None,
                 launch_method: "wt".into(),
+                launch_fallback: Some("cmd".into()),
                 wt_profile: None,
             },
         );
@@ -176,3 +182,4 @@ impl AppConfig {
         Ok(())
     }
 }
+
