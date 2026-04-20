@@ -119,6 +119,8 @@ impl Supervisor {
                         }
                         SupervisorCommand::ArchiveSession { provider_session_id, provider_key } => {
                             self.handle_archive(&provider_key, &provider_session_id, &event_tx);
+                            // Immediately re-scan so UI gets updated list without flicker
+                            let _ = self.scan_and_notify(&event_tx);
                         }
                     }
                 }

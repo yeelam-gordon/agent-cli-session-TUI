@@ -227,6 +227,13 @@ impl Provider for QwenProvider {
                     .map(|m| truncate_str_safe(m.lines().next().unwrap_or(m), 60))
                     .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
+                // Set interaction state from JSONL scan
+                let interaction = if scan.waiting_for_user {
+                    InteractionState::WaitingInput
+                } else {
+                    InteractionState::Busy
+                };
+
                 sessions.push(Session {
                     id: format!("qwen_{}_{}", proj_name, session_id),
                     provider_session_id: session_id,
@@ -234,7 +241,10 @@ impl Provider for QwenProvider {
                     cwd: cwd.clone(),
                     title,
                     summary,
-                    state: SessionState::default(),
+                    state: SessionState {
+                        interaction,
+                        ..SessionState::default()
+                    },
                     pid: None,
                     created_at,
                     updated_at: file_mtime,
@@ -254,17 +264,15 @@ impl Provider for QwenProvider {
             for (pid, proc) in &procs {
                 if proc.command_line.contains(&session.provider_session_id) {
                     session.pid = Some(*pid);
+                    // Keep interaction state from JSONL scan (WaitingInput vs Busy)
                     session.state = SessionState {
                         process: ProcessState::Running,
-                        interaction: if session.state.interaction == InteractionState::Unknown {
-                            InteractionState::Busy
-                        } else {
-                            session.state.interaction
-                        },
+                        interaction: session.state.interaction,
                         persistence: PersistenceState::Resumable,
                         health: HealthState::Clean,
-                        confidence: Confidence::Medium,
-                        reason: "process matched by session ID in command line".into(),
+                        confidence: Confidence::High,
+                        reason: format!("process alive, waiting_for_user={}",
+                            session.state.interaction == InteractionState::WaitingInput),
                     };
                     break;
                 }
