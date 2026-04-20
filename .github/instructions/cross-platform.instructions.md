@@ -27,7 +27,7 @@ globs: ["**/*.rs"]
 
 ## Provider Code
 
-- Claude/Qwen path decoding (`C--Users-yeelam` → `C:\Users\yeelam`) is Windows-specific. On Unix, paths would encode differently (e.g., `-home-user` → `/home/user`).
+- Claude/Qwen path decoding (`C--Users-john` → `C:\Users\john`) is Windows-specific. On Unix, paths would encode differently (e.g., `-home-user` → `/home/user`).
 - Copilot lock files (`inuse.<pid>.lock`) use Windows PID semantics — verify these exist on Unix too
 - Config defaults (`launch_method = "wt"`) are Windows-centric. Default should be platform-aware.
 

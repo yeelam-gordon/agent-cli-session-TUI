@@ -122,7 +122,7 @@ impl QwenProvider {
         if texts.is_empty() { None } else { Some(texts.join("\n")) }
     }
 
-    /// Decode project path: same encoding as Claude (C--Users-yeelam → C:\Users\yeelam)
+    /// Decode project path: same encoding as Claude (C--Users-john → C:\Users\john)
     fn decode_project_path(encoded: &str) -> PathBuf {
         let (drive, remainder) = match encoded.find("--") {
             Some(pos) => {
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn decode_project_path_windows() {
-        let path = QwenProvider::decode_project_path("C--Users-yeelam");
-        assert_eq!(path, PathBuf::from("C:\\Users\\yeelam"));
+        let path = QwenProvider::decode_project_path("C--Users-john");
+        assert_eq!(path, PathBuf::from("C:\\Users\\john"));
     }
 }
