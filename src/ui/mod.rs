@@ -498,78 +498,29 @@ impl App {
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
+        let hl = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
         let title = if self.search_active {
-            // Show search hint when in search mode
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " Agent Session Manager ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled("↑↓", Style::default().fg(Color::Yellow)),
-                Span::raw(": browse  "),
-                Span::styled(
-                    "Enter",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(": select  "),
-                Span::styled(
-                    "Esc",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(": cancel"),
+                Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw("  ↑↓ browse  "),
+                Span::styled("⏎", hl),
+                Span::raw(" open  "),
+                Span::styled("Esc", hl),
+                Span::raw(" cancel"),
             ]))
         } else {
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    " Agent Session Manager ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
-                Span::styled(
-                    "n",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("⏎", hl),
+                Span::raw(" open  "),
+                Span::styled("n", hl),
                 Span::raw("ew  "),
-                Span::styled(
-                    "enter",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(":resume  "),
-                Span::styled(
-                    "a",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("a", hl),
                 Span::raw("rchive  "),
-                Span::styled(
-                    "/",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("/", hl),
                 Span::raw("search  "),
-                Span::styled(
-                    "q",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("q", hl),
                 Span::raw("uit"),
             ]))
         };
