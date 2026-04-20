@@ -273,9 +273,27 @@ impl App {
                     self.apply_filter();
                 }
                 KeyCode::Enter => {
-                    // Lock the search and return to normal mode.
-                    // Filter stays active, 'r'/'a'/etc. now work on selected session.
+                    // Exit search and resume the selected session
                     self.search_active = false;
+                    if let Some(session) = self.selected_session() {
+                        let psid = session.provider_session_id.clone();
+                        let pname = session.provider_name.clone();
+                        let title = session.title.clone();
+                        let scwd = session.cwd.to_string_lossy().to_string();
+                        let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
+                            provider_session_id: psid.clone(),
+                            provider_key: pname,
+                            session_cwd: scwd,
+                        });
+                        self.status_message = format!(
+                            "▶ Resuming: {} ({})",
+                            title, &psid[..8.min(psid.len())]
+                        );
+                        self.log_lines.push(format!(
+                            "Resuming: {} ({})",
+                            title, &psid[..8.min(psid.len())]
+                        ));
+                    }
                 }
                 KeyCode::Up => {
                     // Navigate results while still in search mode
@@ -357,18 +375,25 @@ impl App {
                             .push(format!("Launching new {} session...", key));
                     }
                 }
-                KeyCode::Char('r') | KeyCode::Enter => {
+                KeyCode::Enter => {
                     if let Some(session) = self.selected_session() {
                         let psid = session.provider_session_id.clone();
                         let pname = session.provider_name.clone();
+                        let title = session.title.clone();
                         let scwd = session.cwd.to_string_lossy().to_string();
                         let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
                             provider_session_id: psid.clone(),
                             provider_key: pname,
                             session_cwd: scwd,
                         });
+                        self.status_message = format!(
+                            "▶ Resuming: {} ({})",
+                            title,
+                            &psid[..8.min(psid.len())]
+                        );
                         self.log_lines.push(format!(
-                            "Resuming session {}...",
+                            "Resuming: {} ({})",
+                            title,
                             &psid[..8.min(psid.len())]
                         ));
                     }
