@@ -61,18 +61,13 @@ impl SessionState {
     pub fn badge(&self) -> &'static str {
         match (self.process, self.interaction, self.health) {
             (ProcessState::Running, InteractionState::WaitingInput, _) => "🟡",
-            (ProcessState::Running, InteractionState::Busy, _) => "🟢",
             (ProcessState::Running, _, _) => "🟢",
             (_, _, HealthState::Crashed) => "🔴",
-            (_, _, HealthState::Orphaned) => "⚠️",
-            (ProcessState::Missing, _, _) | (ProcessState::Exited, _, _) => {
-                match self.persistence {
-                    PersistenceState::Resumable => "💤",
-                    PersistenceState::Archived => "📦",
-                    PersistenceState::Ephemeral => "⚪",
-                }
-            }
-            (ProcessState::StaleLock, _, _) => "⚠️",
+            _ => match self.persistence {
+                PersistenceState::Resumable => "💤",
+                PersistenceState::Archived => "📦",
+                PersistenceState::Ephemeral => "⚪",
+            },
         }
     }
 
@@ -84,13 +79,11 @@ impl SessionState {
             (ProcessState::Running, InteractionState::Idle, _) => "Idle",
             (ProcessState::Running, InteractionState::Unknown, _) => "Running",
             (_, _, HealthState::Crashed) => "Crashed",
-            (_, _, HealthState::Orphaned) => "Orphaned",
-            (ProcessState::Missing | ProcessState::Exited, _, _) => match self.persistence {
+            _ => match self.persistence {
                 PersistenceState::Resumable => "Resumable",
                 PersistenceState::Archived => "Archived",
                 PersistenceState::Ephemeral => "Stopped",
             },
-            (ProcessState::StaleLock, _, _) => "Stale",
         }
     }
 }
@@ -228,13 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn badge_orphaned() {
+    fn badge_orphaned_shows_as_resumable() {
+        // Orphaned sessions are resumable — no separate display state
         let state = SessionState {
             health: HealthState::Orphaned,
+            persistence: PersistenceState::Resumable,
             ..SessionState::default()
         };
-        assert_eq!(state.badge(), "⚠️");
-        assert_eq!(state.label(), "Orphaned");
+        assert_eq!(state.badge(), "💤");
+        assert_eq!(state.label(), "Resumable");
     }
 
     #[test]
