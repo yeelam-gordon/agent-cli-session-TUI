@@ -29,3 +29,13 @@ resume_flag = "--resume"
 launch_method = "wt"
 # wt_profile = "PowerShell"
 
+[providers.qwen]
+enabled = true
+command = "qwen"
+default_args = []
+state_dir = '~/.qwen/session-state'
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "wt"
+# wt_profile = "PowerShell"
+
