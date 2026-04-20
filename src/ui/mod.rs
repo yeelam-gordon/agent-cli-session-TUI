@@ -229,14 +229,6 @@ impl App {
                             shown, total, mode_label, hidden_count, now
                         );
                     }
-                    SupervisorEvent::SessionStateChanged {
-                        provider_session_id,
-                    } => {
-                        self.log_lines.push(format!(
-                            "State changed: {}",
-                            &provider_session_id[..8.min(provider_session_id.len())]
-                        ));
-                    }
                     SupervisorEvent::Error(e) => {
                         self.status_message = format!("Error: {}", e);
                         self.log_lines.push(format!("ERROR: {}", e));

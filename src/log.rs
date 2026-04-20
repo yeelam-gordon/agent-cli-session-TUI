@@ -14,11 +14,6 @@ pub fn init(path: PathBuf) {
     }
 }
 
-/// Get the log file path.
-pub fn path() -> Option<PathBuf> {
-    LOG_PATH.lock().ok().and_then(|g| g.clone())
-}
-
 fn write_entry(level: &str, msg: &str) {
     let path = match LOG_PATH.lock().ok().and_then(|g| g.clone()) {
         Some(p) => p,

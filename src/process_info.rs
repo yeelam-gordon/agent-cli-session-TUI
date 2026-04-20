@@ -12,7 +12,6 @@ use std::collections::HashMap;
 /// A discovered OS process with its full command line.
 #[derive(Debug, Clone)]
 pub struct ProcessEntry {
-    pub pid: u32,
     pub name: String,
     pub command_line: String,
 }
@@ -109,7 +108,6 @@ fn discover_via_wmi(name_filter: &str) -> HashMap<u32, ProcessEntry> {
             result.insert(
                 pid,
                 ProcessEntry {
-                    pid,
                     name,
                     command_line: cmd,
                 },
@@ -147,7 +145,6 @@ fn discover_via_sysinfo(name_filter: &str) -> HashMap<u32, ProcessEntry> {
             result.insert(
                 pid.as_u32(),
                 ProcessEntry {
-                    pid: pid.as_u32(),
                     name: name.to_string(),
                     command_line: cmd_line,
                 },

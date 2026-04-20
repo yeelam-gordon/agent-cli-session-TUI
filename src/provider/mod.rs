@@ -203,13 +203,6 @@ impl ProviderRegistry {
     pub fn providers(&self) -> &[Box<dyn Provider>] {
         &self.providers
     }
-
-    pub fn get(&self, key: &str) -> Option<&dyn Provider> {
-        self.providers
-            .iter()
-            .find(|p| p.key() == key)
-            .map(|p| p.as_ref())
-    }
 }
 
 // Re-export submodules

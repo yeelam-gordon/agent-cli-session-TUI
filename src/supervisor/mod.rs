@@ -14,44 +14,30 @@ use crate::provider::ProviderRegistry;
 /// Messages from the supervisor to the TUI.
 #[derive(Debug)]
 pub enum SupervisorEvent {
-    /// Full session list refresh: (active_sessions, hidden_sessions).
-    /// Hidden = archived + empty (filtered out during discovery).
     SessionsUpdated {
         active: Vec<Session>,
         hidden: Vec<Session>,
     },
-    /// A single session's state changed.
-    SessionStateChanged { provider_session_id: String },
-    /// Error during background work.
     Error(String),
 }
 
 /// Commands from the TUI to the supervisor.
 #[derive(Debug)]
 pub enum SupervisorCommand {
-    /// Force a full scan+reconcile now.
-    Refresh,
-    /// Launch a new session.
     NewSession { provider_key: String, cwd: String },
-    /// Resume an existing session.
     ResumeSession {
         provider_session_id: String,
         provider_key: String,
-        /// The session's original working directory (needed by CLIs like Claude
-        /// that tie sessions to a specific directory).
         session_cwd: String,
     },
-    /// Kill a running session's process.
     KillSession {
         provider_session_id: String,
         provider_key: String,
     },
-    /// Archive a session.
     ArchiveSession {
         provider_session_id: String,
         provider_key: String,
     },
-    /// Shut down the supervisor.
     Shutdown,
 }
 
@@ -103,11 +89,6 @@ impl Supervisor {
                 Some(cmd) = cmd_rx.recv() => {
                     match cmd {
                         SupervisorCommand::Shutdown => break,
-                        SupervisorCommand::Refresh => {
-                            if let Err(e) = self.scan_and_notify(&event_tx) {
-                                let _ = event_tx.send(SupervisorEvent::Error(e.to_string()));
-                            }
-                        }
                         SupervisorCommand::NewSession { provider_key, cwd } => {
                             self.handle_new_session(&provider_key, &cwd, &event_tx);
                         }
