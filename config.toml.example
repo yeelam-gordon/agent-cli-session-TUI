@@ -1,8 +1,8 @@
 # ─── Agent Session TUI — Configuration ───
 # Copy this file next to agent-session-tui.exe and edit paths for your system.
 
-# Where to store the archived session IDs list
-# archive_path = 'archived.json'
+# App data directory (archived.json stored here)
+# data_dir = '~/.local/share/agent-session-tui'
 poll_interval_ms = 2000
 log_max_lines = 500
 

@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    /// Path to the archived sessions JSON file.
-    #[serde(default = "default_archive_path")]
-    pub archive_path: PathBuf,
+    /// Directory for app data (archived.json, etc.)
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
     #[serde(default = "default_log_lines")]
@@ -45,11 +45,10 @@ fn default_launch_method() -> String {
     "wt".into()
 }
 
-fn default_archive_path() -> PathBuf {
+fn default_data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("agent-session-tui")
-        .join("archived.json")
 }
 
 fn default_poll_interval_ms() -> u64 {
@@ -113,7 +112,7 @@ impl Default for AppConfig {
         );
 
         Self {
-            archive_path: default_archive_path(),
+            data_dir: default_data_dir(),
             poll_interval_ms: default_poll_interval_ms(),
             log_max_lines: default_log_lines(),
             providers,
