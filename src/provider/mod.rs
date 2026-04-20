@@ -1,12 +1,8 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 
-use crate::models::{
-    ActivitySource, ProviderCapabilities, Session, SessionState, StateSignals,
-};
+use crate::models::{ActivitySource, ProviderCapabilities, Session, SessionState, StateSignals};
 
 // ---------------------------------------------------------------------------
 // Provider trait — DATA LAYER ONLY
@@ -122,7 +118,11 @@ fn default_state_inference(s: &StateSignals) -> SessionState {
     };
 
     let interaction = if process == ProcessState::Running {
-        match (s.has_unfinished_turn, s.recent_tool_activity, s.last_event_age_secs) {
+        match (
+            s.has_unfinished_turn,
+            s.recent_tool_activity,
+            s.last_event_age_secs,
+        ) {
             (Some(true), Some(false), Some(age)) if age > 30 => InteractionState::WaitingInput,
             (Some(false), _, Some(age)) if age > 60 => InteractionState::Idle,
             (_, Some(true), _) => InteractionState::Busy,
@@ -156,7 +156,11 @@ fn default_state_inference(s: &StateSignals) -> SessionState {
         _ => HealthState::Clean,
     };
 
-    let confidence = match (s.process_alive, s.has_unfinished_turn, s.last_event_age_secs) {
+    let confidence = match (
+        s.process_alive,
+        s.has_unfinished_turn,
+        s.last_event_age_secs,
+    ) {
         (Some(_), Some(_), Some(_)) => Confidence::High,
         (Some(_), _, Some(_)) => Confidence::Medium,
         _ => Confidence::Low,
@@ -201,10 +205,14 @@ impl ProviderRegistry {
     }
 
     pub fn get(&self, key: &str) -> Option<&dyn Provider> {
-        self.providers.iter().find(|p| p.key() == key).map(|p| p.as_ref())
+        self.providers
+            .iter()
+            .find(|p| p.key() == key)
+            .map(|p| p.as_ref())
     }
 }
 
 // Re-export submodules
-pub mod copilot;
 pub mod claude;
+pub mod codex;
+pub mod copilot;

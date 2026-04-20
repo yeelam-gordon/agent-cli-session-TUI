@@ -32,10 +32,7 @@ pub enum SupervisorCommand {
     /// Force a full scan+reconcile now.
     Refresh,
     /// Launch a new session.
-    NewSession {
-        provider_key: String,
-        cwd: String,
-    },
+    NewSession { provider_key: String, cwd: String },
     /// Resume an existing session.
     ResumeSession {
         provider_session_id: String,
@@ -129,10 +126,7 @@ impl Supervisor {
         }
     }
 
-    fn scan_and_notify(
-        &self,
-        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
-    ) -> Result<()> {
+    fn scan_and_notify(&self, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
         let mut active_sessions = Vec::new();
         let mut hidden_sessions = Vec::new();
 
@@ -147,7 +141,8 @@ impl Supervisor {
             // Split into active vs hidden (archived)
             let archive = self.archive.lock().ok();
             for s in sessions {
-                let is_archived = archive.as_ref()
+                let is_archived = archive
+                    .as_ref()
                     .map(|a| a.is_archived(&s.provider_name, &s.provider_session_id))
                     .unwrap_or(false);
                 if is_archived {
@@ -195,20 +190,26 @@ impl Supervisor {
         event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) {
         let Some(config) = self.provider_configs.get(provider_key) else {
-            let _ = event_tx.send(SupervisorEvent::Error(
-                format!("Provider '{}' not in config", provider_key),
-            ));
+            let _ = event_tx.send(SupervisorEvent::Error(format!(
+                "Provider '{}' not in config",
+                provider_key
+            )));
             return;
         };
 
-        let effective_cwd = config.startup_dir.as_ref()
+        let effective_cwd = config
+            .startup_dir
+            .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| cwd.to_string());
         let launch_method = config.launch_method.as_str();
         let wt_profile = config.wt_profile.as_deref();
 
         let cmd = Self::build_new_command(config);
-        crate::log::info(&format!("Launching new {}: {:?} in {}", provider_key, cmd, effective_cwd));
+        crate::log::info(&format!(
+            "Launching new {}: {:?} in {}",
+            provider_key, cmd, effective_cwd
+        ));
         if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, wt_profile) {
             crate::log::error(&format!("Failed to launch {}: {}", provider_key, e));
             let _ = event_tx.send(SupervisorEvent::Error(format!("Failed to launch: {}", e)));
@@ -223,9 +224,10 @@ impl Supervisor {
         event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) {
         let Some(config) = self.provider_configs.get(provider_key) else {
-            let _ = event_tx.send(SupervisorEvent::Error(
-                format!("Provider '{}' not in config", provider_key),
-            ));
+            let _ = event_tx.send(SupervisorEvent::Error(format!(
+                "Provider '{}' not in config",
+                provider_key
+            )));
             return;
         };
 
@@ -234,7 +236,9 @@ impl Supervisor {
         let effective_cwd = if !session_cwd.is_empty() && session_cwd != "." {
             session_cwd.to_string()
         } else {
-            config.startup_dir.as_ref()
+            config
+                .startup_dir
+                .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string())
         };
@@ -242,8 +246,10 @@ impl Supervisor {
         let wt_profile = config.wt_profile.as_deref();
 
         let cmd = Self::build_resume_command(config, provider_session_id);
-        crate::log::info(&format!("Resuming {} session {} in {:?}: {:?}",
-            provider_key, provider_session_id, effective_cwd, cmd));
+        crate::log::info(&format!(
+            "Resuming {} session {} in {:?}: {:?}",
+            provider_key, provider_session_id, effective_cwd, cmd
+        ));
         if let Err(e) = launch_in_terminal(&cmd, &effective_cwd, launch_method, wt_profile) {
             crate::log::error(&format!("Failed to resume: {}", e));
             let _ = event_tx.send(SupervisorEvent::Error(format!("Failed to resume: {}", e)));
@@ -274,7 +280,12 @@ impl Supervisor {
 }
 
 /// Launch a command in a new terminal window using the configured method.
-fn launch_in_terminal(cmd: &[String], cwd: &str, launch_method: &str, wt_profile: Option<&str>) -> Result<()> {
+fn launch_in_terminal(
+    cmd: &[String],
+    cwd: &str,
+    launch_method: &str,
+    wt_profile: Option<&str>,
+) -> Result<()> {
     let cmd_str = cmd.join(" ");
 
     #[cfg(windows)]
@@ -296,9 +307,7 @@ fn launch_in_terminal(cmd: &[String], cwd: &str, launch_method: &str, wt_profile
                 args.push("/k".to_string());
                 args.push(cmd_str.clone());
 
-                let result = std::process::Command::new("wt")
-                    .args(&args)
-                    .spawn();
+                let result = std::process::Command::new("wt").args(&args).spawn();
 
                 match result {
                     Ok(_) => Ok(()),

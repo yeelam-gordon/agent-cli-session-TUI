@@ -1,18 +1,18 @@
-//! Copilot CLI Provider — Lifecycle Detection Tests
+//! Codex CLI Provider - Lifecycle Detection Tests
 //!
 //! Uses the common test framework from `src/testing/`.
-//! Re-run after any change to `src/provider/copilot/`.
+//! Re-run after any change to `src/provider/codex/`.
 //!
-//! Run:  cargo test --test copilot_lifecycle_test -- --nocapture
+//! Run:  cargo test --test codex_lifecycle_test -- --nocapture
 //! Args: --scenario discover|launch|kill|graceful|all (default: all)
 
 use agent_session_tui::config::AppConfig;
-use agent_session_tui::provider::copilot::CopilotProvider;
+use agent_session_tui::provider::codex::CodexProvider;
 use agent_session_tui::testing::scenarios;
 use agent_session_tui::testing::TestRunner;
 
 #[test]
-fn copilot_lifecycle() {
+fn codex_lifecycle() {
     let args: Vec<String> = std::env::args().collect();
     let scenario = args
         .iter()
@@ -22,27 +22,29 @@ fn copilot_lifecycle() {
         .unwrap_or("all");
 
     println!("\n╔══════════════════════════════════════════════════════════╗");
-    println!("║  Copilot CLI Provider — Lifecycle Detection Tests       ║");
+    println!("║  Codex CLI Provider - Lifecycle Detection Tests         ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!("Scenario: {scenario}\n");
 
-    let config = AppConfig::load().expect("Failed to load config");
+    let config = AppConfig::load().unwrap_or_default();
     let pc = config
         .providers
-        .get("copilot")
-        .expect("'copilot' not in config");
-    let provider = CopilotProvider::new(pc);
-    let mut runner = TestRunner::new("Copilot");
+        .get("codex")
+        .cloned()
+        .or_else(|| AppConfig::default().providers.get("codex").cloned())
+        .expect("'codex' not in config or defaults");
+    let provider = CodexProvider::new(&pc);
+    let mut runner = TestRunner::new("Codex");
 
     match scenario {
         "discover" => scenarios::discover(&mut runner, &provider),
-        "launch" => scenarios::launch(&mut runner, &provider, pc),
+        "launch" => scenarios::launch(&mut runner, &provider, &pc),
         "kill" => scenarios::kill(&mut runner, &provider),
         "graceful" => scenarios::graceful(&mut runner, &provider),
         "all" => {
             scenarios::discover(&mut runner, &provider);
             scenarios::graceful(&mut runner, &provider);
-            println!("\n  ℹ Interactive: --scenario launch | --scenario kill");
+            println!("\n  Interactive: --scenario launch | --scenario kill");
         }
         other => panic!("Unknown scenario: {other}"),
     }

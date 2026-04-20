@@ -171,7 +171,8 @@ impl App {
                         let hidden_count = hidden.len();
 
                         // Preserve selection
-                        let prev_selected_id = self.selected_session()
+                        let prev_selected_id = self
+                            .selected_session()
                             .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
 
                         self.sessions = active;
@@ -205,7 +206,9 @@ impl App {
                             shown, total, mode_label, hidden_count, now
                         );
                     }
-                    SupervisorEvent::SessionStateChanged { provider_session_id } => {
+                    SupervisorEvent::SessionStateChanged {
+                        provider_session_id,
+                    } => {
                         self.log_lines.push(format!(
                             "State changed: {}",
                             &provider_session_id[..8.min(provider_session_id.len())]
@@ -327,7 +330,8 @@ impl App {
                             provider_key: key.clone(),
                             cwd,
                         });
-                        self.log_lines.push(format!("Launching new {} session...", key));
+                        self.log_lines
+                            .push(format!("Launching new {} session...", key));
                     }
                 }
                 KeyCode::Char('r') | KeyCode::Enter => {
@@ -364,7 +368,8 @@ impl App {
                                 }
                             }
                         }
-                        self.log_lines.push(format!("Archived: {}", &psid[..8.min(psid.len())]));
+                        self.log_lines
+                            .push(format!("Archived: {}", &psid[..8.min(psid.len())]));
                     }
                 }
                 KeyCode::BackTab => {
@@ -423,10 +428,10 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),  // Title bar
+                Constraint::Length(1), // Title bar
                 Constraint::Min(10),   // Main area
                 Constraint::Length(8), // Log viewer
-                Constraint::Length(1),  // Status bar
+                Constraint::Length(1), // Status bar
             ])
             .split(f.area());
 
@@ -436,10 +441,7 @@ impl App {
         // Main area: session list | detail
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(35),
-                Constraint::Percentage(65),
-            ])
+            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(chunks[1]);
 
         self.draw_session_list(f, main_chunks[0]);
@@ -466,9 +468,19 @@ impl App {
                 Span::raw("  "),
                 Span::styled("↑↓", Style::default().fg(Color::Yellow)),
                 Span::raw(": browse  "),
-                Span::styled("Enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(": select  "),
-                Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(": cancel"),
             ]))
         } else {
@@ -481,15 +493,40 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                Span::styled("n", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "n",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("ew  "),
-                Span::styled("r", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "r",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("esume  "),
-                Span::styled("a", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "a",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("rchive  "),
-                Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "/",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("search  "),
-                Span::styled("q", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "q",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("uit"),
             ]))
         };
@@ -505,8 +542,7 @@ impl App {
                 let s = &self.current_view_sessions()[session_idx];
                 let badge = s.state.badge();
                 let age = format_age(&s.updated_at);
-                let short_id = &s.provider_session_id
-                    [..8.min(s.provider_session_id.len())];
+                let short_id = &s.provider_session_id[..8.min(s.provider_session_id.len())];
 
                 let title_display = if s.title.is_empty() {
                     short_id.to_string()
@@ -524,7 +560,9 @@ impl App {
                     Span::styled(
                         title_display,
                         if list_idx == self.selected_index {
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Gray)
                         },
@@ -558,7 +596,13 @@ impl App {
         let title = if self.search_active {
             format!(" Search: {}▌ ", self.search_query)
         } else if !self.search_query.is_empty() {
-            format!(" {} ({}/{}) [{}] ", view_label, self.filtered_indices.len(), view_count, self.search_query)
+            format!(
+                " {} ({}/{}) [{}] ",
+                view_label,
+                self.filtered_indices.len(),
+                view_count,
+                self.search_query
+            )
         } else {
             format!(" {} ({}) ", view_label, self.filtered_indices.len())
         };
@@ -636,7 +680,11 @@ impl App {
             lines.push(Line::from(vec![
                 Span::styled("Updated: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{} ({})", &session.updated_at, format_age(&session.updated_at)),
+                    format!(
+                        "{} ({})",
+                        &session.updated_at,
+                        format_age(&session.updated_at)
+                    ),
                     Style::default().fg(Color::White),
                 ),
             ]));
@@ -679,11 +727,14 @@ impl App {
                         span.content = span.content.replace('\t', "    ").into();
                     }
                 }
-                let display_width: usize = line.spans.iter()
+                let display_width: usize = line
+                    .spans
+                    .iter()
                     .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
                 if display_width < inner_width {
-                    line.spans.push(Span::raw(" ".repeat(inner_width - display_width)));
+                    line.spans
+                        .push(Span::raw(" ".repeat(inner_width - display_width)));
                 }
             }
             // Pad remaining rows with full-width space lines
@@ -734,7 +785,10 @@ impl App {
                 if l.starts_with("ERROR:") {
                     Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Red)))
                 } else {
-                    Line::from(Span::styled(l.as_str(), Style::default().fg(Color::DarkGray)))
+                    Line::from(Span::styled(
+                        l.as_str(),
+                        Style::default().fg(Color::DarkGray),
+                    ))
                 }
             })
             .collect();
@@ -775,9 +829,9 @@ impl App {
 
 fn state_color(state: &crate::models::SessionState) -> Style {
     match (state.process, state.interaction) {
-        (ProcessState::Running, InteractionState::WaitingInput) => {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        }
+        (ProcessState::Running, InteractionState::WaitingInput) => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
         (ProcessState::Running, _) => Style::default().fg(Color::Green),
         _ => match state.persistence {
             PersistenceState::Resumable => Style::default().fg(Color::Blue),
@@ -790,7 +844,8 @@ fn format_age(iso_timestamp: &str) -> String {
     let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_timestamp) else {
         // Try parsing other common formats — assume UTC for naive timestamps
         // (timestamps may lack timezone info)
-        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(iso_timestamp, "%Y-%m-%d %H:%M:%S") {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(iso_timestamp, "%Y-%m-%d %H:%M:%S")
+        {
             let dt_utc = naive.and_utc();
             let duration = chrono::Utc::now().signed_duration_since(dt_utc);
             return format_duration(duration);
@@ -837,50 +892,76 @@ mod ui_invariant_tests {
     #[test]
     fn no_mouse_capture() {
         let code = code_section();
-        assert!(!code.contains("EnableMouseCapture"),
-            "No mouse capture — native click-drag text selection must work");
-        assert!(!code.contains("DisableMouseCapture"),
-            "No DisableMouseCapture needed when capture is not enabled");
-        assert!(!code.contains("Event::Mouse"),
-            "No mouse event handling — terminal handles mouse natively");
-        assert!(!code.contains("fn handle_mouse"),
-            "No handle_mouse method — no mouse capture");
+        assert!(
+            !code.contains("EnableMouseCapture"),
+            "No mouse capture — native click-drag text selection must work"
+        );
+        assert!(
+            !code.contains("DisableMouseCapture"),
+            "No DisableMouseCapture needed when capture is not enabled"
+        );
+        assert!(
+            !code.contains("Event::Mouse"),
+            "No mouse event handling — terminal handles mouse natively"
+        );
+        assert!(
+            !code.contains("fn handle_mouse"),
+            "No handle_mouse method — no mouse capture"
+        );
     }
 
     #[test]
     fn detail_panel_pads_lines_to_fill() {
         let code = code_section();
-        assert!(code.contains("inner_width"),
-            "draw_session_detail must pad lines to fill panel width (prevents ghost characters)");
-        assert!(code.contains("inner_height"),
-            "draw_session_detail must pad rows to fill panel height");
+        assert!(
+            code.contains("inner_width"),
+            "draw_session_detail must pad lines to fill panel width (prevents ghost characters)"
+        );
+        assert!(
+            code.contains("inner_height"),
+            "draw_session_detail must pad rows to fill panel height"
+        );
     }
 
     #[test]
     fn no_clear_widget_in_detail() {
         let code = code_section();
-        assert!(!code.contains("render_widget(Clear"),
-            "Do NOT use Clear widget — causes flicker by resetting all cells every frame");
+        assert!(
+            !code.contains("render_widget(Clear"),
+            "Do NOT use Clear widget — causes flicker by resetting all cells every frame"
+        );
     }
 
     #[test]
     fn no_terminal_clear_for_redraw() {
         let code = code_section();
         let clear_count = code.matches("terminal.clear()").count();
-        assert!(clear_count <= 1, "terminal.clear() only at startup — found {clear_count}");
-        assert!(!code.contains("needs_full_redraw"), "No full-screen redraw machinery");
+        assert!(
+            clear_count <= 1,
+            "terminal.clear() only at startup — found {clear_count}"
+        );
+        assert!(
+            !code.contains("needs_full_redraw"),
+            "No full-screen redraw machinery"
+        );
     }
 
     #[test]
     fn only_press_events_handled() {
         let src = ui_source();
-        assert!(src.contains("KeyEventKind::Press"), "Filter to Press only (Windows double/triple)");
+        assert!(
+            src.contains("KeyEventKind::Press"),
+            "Filter to Press only (Windows double/triple)"
+        );
     }
 
     #[test]
     fn terminal_restored_on_quit_and_panic() {
         let code = code_section();
         let leave_count = code.matches("LeaveAlternateScreen").count();
-        assert!(leave_count >= 2, "LeaveAlternateScreen in quit + panic (found {leave_count})");
+        assert!(
+            leave_count >= 2,
+            "LeaveAlternateScreen in quit + panic (found {leave_count})"
+        );
     }
 }

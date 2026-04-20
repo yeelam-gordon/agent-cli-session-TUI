@@ -27,19 +27,22 @@ impl ArchiveStore {
 
     /// Check if a session is archived.
     pub fn is_archived(&self, provider_name: &str, provider_session_id: &str) -> bool {
-        self.archived.contains(&Self::key(provider_name, provider_session_id))
+        self.archived
+            .contains(&Self::key(provider_name, provider_session_id))
     }
 
     /// Archive a session.
     pub fn archive(&mut self, provider_name: &str, provider_session_id: &str) -> Result<()> {
-        self.archived.insert(Self::key(provider_name, provider_session_id));
+        self.archived
+            .insert(Self::key(provider_name, provider_session_id));
         self.save()
     }
 
     /// Unarchive a session.
     #[allow(dead_code)]
     pub fn unarchive(&mut self, provider_name: &str, provider_session_id: &str) -> Result<()> {
-        self.archived.remove(&Self::key(provider_name, provider_session_id));
+        self.archived
+            .remove(&Self::key(provider_name, provider_session_id));
         self.save()
     }
 

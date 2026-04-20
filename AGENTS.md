@@ -32,7 +32,8 @@ agent-session-tui/
 │   ├── provider/
 │   │   ├── mod.rs          # Provider trait + ProviderRegistry + default state inference
 │   │   ├── copilot/mod.rs  # Copilot CLI plugin
-│   │   └── claude/mod.rs   # Claude Code plugin
+│   │   ├── claude/mod.rs   # Claude Code plugin
+│   │   └── codex/mod.rs    # Codex CLI plugin
 │   ├── supervisor/mod.rs   # Background tokio task: scan, reconcile, launch, archive
 │   ├── testing/
 │   │   ├── mod.rs          # TestRunner (shared by all provider tests)
@@ -40,7 +41,8 @@ agent-session-tui/
 │   └── ui/mod.rs           # ratatui TUI: session list, detail, log viewer, search, keybindings
 ├── tests/
 │   ├── copilot_lifecycle_test.rs   # Copilot provider integration test
-│   └── claude_lifecycle_test.rs    # Claude provider integration test
+│   ├── claude_lifecycle_test.rs    # Claude provider integration test
+│   └── codex_lifecycle_test.rs     # Codex provider integration test
 ├── config.toml             # User config (lives next to exe at runtime)
 ├── Cargo.toml              # Dependencies and build profile
 └── rust-toolchain.toml     # Pins stable MSVC toolchain
@@ -72,6 +74,7 @@ cargo test -- --nocapture
 # Run a specific provider's tests
 cargo test --test copilot_lifecycle_test -- --nocapture
 cargo test --test claude_lifecycle_test -- --nocapture
+cargo test --test codex_lifecycle_test -- --nocapture
 ```
 
 Tests use the shared framework in `src/testing/`. Each test file is a thin wrapper that creates its provider and calls shared scenarios. See `plugin.instructions.md` for details.

@@ -5,9 +5,7 @@ use sysinfo::System;
 
 use crate::config::ProviderConfig;
 use crate::models::*;
-use crate::provider::{
-    ActivitySource, PlanItem, Provider, ProviderCapabilities, SessionDetail,
-};
+use crate::provider::{ActivitySource, PlanItem, Provider, ProviderCapabilities, SessionDetail};
 use crate::util::truncate_str_safe;
 
 /// GitHub Copilot CLI provider.
@@ -138,7 +136,6 @@ impl CopilotProvider {
         results
     }
 
-
     /// Read plan.md from session state dir.
     fn read_plan_md(&self, session_dir: &Path) -> Option<Vec<PlanItem>> {
         let plan_path = session_dir.join("plan.md");
@@ -146,7 +143,10 @@ impl CopilotProvider {
         let mut items = Vec::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("- [x]").or_else(|| trimmed.strip_prefix("- [X]")) {
+            if let Some(rest) = trimmed
+                .strip_prefix("- [x]")
+                .or_else(|| trimmed.strip_prefix("- [X]"))
+            {
                 items.push(PlanItem {
                     title: rest.trim().to_string(),
                     done: true,
@@ -203,7 +203,12 @@ impl CopilotProvider {
 
         let text = match std::fs::read_to_string(&events_path) {
             Ok(t) => t,
-            Err(_) => return EventsState { file_mtime, ..Default::default() },
+            Err(_) => {
+                return EventsState {
+                    file_mtime,
+                    ..Default::default()
+                }
+            }
         };
 
         // Forward scan through the tail (last ~100 lines) for correct ordering
@@ -213,8 +218,8 @@ impl CopilotProvider {
         let mut last_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
         let mut last_meaningful_event: Option<String> = None;
         // Track the last turn boundary state
-        let mut assistant_working = false;  // true between turn_start and turn_end
-        let mut user_responded = false;     // true if user.message after last turn_end
+        let mut assistant_working = false; // true between turn_start and turn_end
+        let mut user_responded = false; // true if user.message after last turn_end
 
         for line in &lines[scan_start..] {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
@@ -231,7 +236,9 @@ impl CopilotProvider {
                             user_responded = false;
                             last_meaningful_event = Some(event_type.to_string());
                         }
-                        "assistant.turn_end" | "assistant.turn_complete" | "session.task_complete" => {
+                        "assistant.turn_end"
+                        | "assistant.turn_complete"
+                        | "session.task_complete" => {
                             assistant_working = false;
                             user_responded = false;
                             last_meaningful_event = Some(event_type.to_string());
@@ -240,7 +247,9 @@ impl CopilotProvider {
                             user_responded = true;
                             last_meaningful_event = Some(event_type.to_string());
                         }
-                        "tool.execution_start" | "tool.execution_complete" | "assistant.message" => {
+                        "tool.execution_start"
+                        | "tool.execution_complete"
+                        | "assistant.message" => {
                             last_meaningful_event = Some(event_type.to_string());
                         }
                         _ => {}
@@ -258,7 +267,8 @@ impl CopilotProvider {
         // assistant_working=true → assistant is actively processing (Busy)
         // assistant_working=false && !user_responded → ball is in user's court (WaitingInput)
         // assistant_working=false && user_responded → shouldn't happen at steady state
-        let waiting_for_user = !assistant_working && !user_responded
+        let waiting_for_user = !assistant_working
+            && !user_responded
             && last_meaningful_event.as_deref() != Some("session.start");
 
         EventsState {
@@ -294,11 +304,7 @@ impl CopilotProvider {
                 if event_type == "user.message" || event_type == "human.message" {
                     if let Some(msg) = val
                         .get("data")
-                        .and_then(|d| {
-                            d.get("content")
-                                .or(d.get("message"))
-                                .or(d.get("text"))
-                        })
+                        .and_then(|d| d.get("content").or(d.get("message")).or(d.get("text")))
                         .and_then(|v| v.as_str())
                     {
                         let trimmed = msg.trim();
@@ -409,7 +415,11 @@ impl Provider for CopilotProvider {
             } else if let Some(ref items) = plan_items {
                 let done = items.iter().filter(|i| i.done).count();
                 let total = items.len();
-                let current = items.iter().find(|i| !i.done).map(|i| i.title.as_str()).unwrap_or("(all done)");
+                let current = items
+                    .iter()
+                    .find(|i| !i.done)
+                    .map(|i| i.title.as_str())
+                    .unwrap_or("(all done)");
                 format!("Plan: {}/{} done. Current: {}", done, total, current)
             } else {
                 String::new()
@@ -441,7 +451,8 @@ impl Provider for CopilotProvider {
             };
 
             // CWD from workspace.yaml
-            let cwd_path = workspace.as_ref()
+            let cwd_path = workspace
+                .as_ref()
                 .and_then(|w| w.cwd.clone())
                 .unwrap_or_else(|| PathBuf::from("."));
 
@@ -477,9 +488,8 @@ impl Provider for CopilotProvider {
                 || (entry.command_line.to_lowercase().contains("copilot")
                     && !entry.command_line.to_lowercase().contains("claude"));
             if is_copilot {
-                let session_id = crate::process_info::extract_flag_value(
-                    &entry.command_line, "--resume",
-                );
+                let session_id =
+                    crate::process_info::extract_flag_value(&entry.command_line, "--resume");
                 live.push((*pid, session_id));
             }
         }
@@ -570,7 +580,9 @@ impl Provider for CopilotProvider {
     }
 
     fn session_detail(&self, session: &Session) -> Result<SessionDetail> {
-        let workspace = session.state_dir.as_ref()
+        let workspace = session
+            .state_dir
+            .as_ref()
             .and_then(|dir| self.read_workspace_yaml(dir));
         let plan_items = session
             .state_dir
@@ -579,7 +591,8 @@ impl Provider for CopilotProvider {
             .unwrap_or_default();
 
         Ok(SessionDetail {
-            title: workspace.as_ref()
+            title: workspace
+                .as_ref()
                 .and_then(|w| w.summary.as_ref())
                 .map(|s| truncate_str_safe(s.lines().next().unwrap_or(""), 60)),
             summary: workspace.and_then(|w| w.summary),
@@ -610,4 +623,3 @@ impl Provider for CopilotProvider {
         Ok(sources)
     }
 }
-

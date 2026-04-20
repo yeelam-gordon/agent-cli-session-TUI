@@ -156,5 +156,6 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 |----------|------|-------------|
 | Copilot CLI | `src/provider/copilot/mod.rs` | `workspace.yaml`, `events.jsonl`, `inuse.<pid>.lock` files, `plan.md` |
 | Claude Code | `src/provider/claude/mod.rs` | `~/.claude/projects/<encoded-path>/<session-id>.jsonl` |
+| Codex CLI | `src/provider/codex/mod.rs` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 
 Study these for patterns on summary extraction, state inference, and edge case handling.

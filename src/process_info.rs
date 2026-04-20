@@ -93,10 +93,7 @@ fn discover_via_wmi(name_filter: &str) -> HashMap<u32, ProcessEntry> {
     };
 
     for entry in entries {
-        let pid = entry
-            .get("ProcessId")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let pid = entry.get("ProcessId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let name = entry
             .get("Name")
             .and_then(|v| v.as_str())

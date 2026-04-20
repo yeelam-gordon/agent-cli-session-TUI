@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use archive::ArchiveStore;
 use config::AppConfig;
 use provider::claude::ClaudeProvider;
+use provider::codex::CodexProvider;
 use provider::copilot::CopilotProvider;
 use provider::ProviderRegistry;
 use supervisor::Supervisor;
@@ -29,6 +30,7 @@ fn create_provider(
     match key {
         "copilot" => Some(Box::new(CopilotProvider::new(config))),
         "claude" => Some(Box::new(ClaudeProvider::new(config))),
+        "codex" => Some(Box::new(CodexProvider::new(config))),
         _ => None,
     }
 }
@@ -42,11 +44,13 @@ async fn main() -> Result<()> {
 
     let config = AppConfig::load()?;
     config.write_default_if_missing()?;
-    log::info(&format!("Config loaded from {:?}", AppConfig::config_path()));
+    log::info(&format!(
+        "Config loaded from {:?}",
+        AppConfig::config_path()
+    ));
 
     // Simple JSON archive
-    let archive_path = config.db_path.with_extension("json");
-    let archive = ArchiveStore::open(&archive_path)?;
+    let archive = ArchiveStore::open(&config.archive_path)?;
     let archive = Arc::new(Mutex::new(archive));
 
     // Build provider registry
@@ -85,7 +89,9 @@ async fn main() -> Result<()> {
     });
 
     // Resolve default provider: find the one with default=true, else first enabled
-    let default_provider = config.providers.iter()
+    let default_provider = config
+        .providers
+        .iter()
         .find(|(k, v)| v.enabled && v.default && enabled_keys.contains(k))
         .map(|(k, _)| k.clone())
         .or_else(|| enabled_keys.first().cloned())

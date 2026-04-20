@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 use crate::config::ProviderConfig;
 use crate::models::*;
 use crate::process_info;
-use crate::provider::{
-    ActivitySource, Provider, ProviderCapabilities, SessionDetail,
-};
+use crate::provider::{ActivitySource, Provider, ProviderCapabilities, SessionDetail};
 use crate::util::truncate_str_safe;
 
 /// Claude Code provider.
@@ -54,7 +52,12 @@ impl ClaudeProvider {
 
         let text = match std::fs::read_to_string(jsonl_path) {
             Ok(t) => t,
-            Err(_) => return JsonlScanResult { file_mtime, ..Default::default() },
+            Err(_) => {
+                return JsonlScanResult {
+                    file_mtime,
+                    ..Default::default()
+                }
+            }
         };
 
         let lines: Vec<&str> = text.lines().collect();
@@ -295,7 +298,11 @@ impl Provider for ClaudeProvider {
             .with_context(|| format!("Cannot read projects dir: {:?}", self.projects_dir))?;
 
         for proj_entry in project_dirs.flatten() {
-            if !proj_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            if !proj_entry
+                .file_type()
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -329,7 +336,10 @@ impl Provider for ClaudeProvider {
                 }
 
                 let file_mtime = scan.file_mtime.clone().unwrap_or_default();
-                let created_at = scan.first_timestamp.clone().unwrap_or_else(|| file_mtime.clone());
+                let created_at = scan
+                    .first_timestamp
+                    .clone()
+                    .unwrap_or_else(|| file_mtime.clone());
                 let first_msg = scan.first_user_msg.clone();
                 let last_assistant = scan.last_assistant_msg.clone();
 
@@ -379,7 +389,9 @@ impl Provider for ClaudeProvider {
             let cmd_lower = entry.command_line.to_lowercase();
             let is_claude = entry.name.to_lowercase().contains("claude")
                 || (cmd_lower.contains("claude") && !cmd_lower.contains("copilot"));
-            if !is_claude { continue; }
+            if !is_claude {
+                continue;
+            }
 
             let session_id = process_info::extract_flag_value(&entry.command_line, "--session-id")
                 .or_else(|| process_info::extract_flag_value(&entry.command_line, "--continue"))
@@ -387,21 +399,27 @@ impl Provider for ClaudeProvider {
 
             crate::log::info(&format!(
                 "Claude process: pid={} name={} session_id={:?} cmd={}",
-                pid, entry.name, session_id, truncate_str_safe(&cmd_lower, 120)
+                pid,
+                entry.name,
+                session_id,
+                truncate_str_safe(&cmd_lower, 120)
             ));
             live.push((*pid, session_id));
         }
 
         crate::log::info(&format!(
             "Claude match_processes: {} sessions, {} live",
-            sessions.len(), live.len()
+            sessions.len(),
+            live.len()
         ));
 
         // Match processes to sessions
         let matched_by_id: Vec<_> = live.iter().filter(|(_, sid)| sid.is_some()).collect();
-        let unknown_pids: Vec<u32> = live.iter()
+        let unknown_pids: Vec<u32> = live
+            .iter()
             .filter(|(_, sid)| sid.is_none())
-            .map(|(pid, _)| *pid).collect();
+            .map(|(pid, _)| *pid)
+            .collect();
         let mut claimed_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
         for session in sessions.iter_mut() {
@@ -420,10 +438,13 @@ impl Provider for ClaudeProvider {
                 //    session ID, check if THIS session's JSONL was very recently
                 //    modified (within 10s = actively being written to).
                 //    Only claim one unknown PID per session, and don't reuse PIDs.
-                let recently_active = session.updated_at.parse::<chrono::DateTime<chrono::FixedOffset>>()
+                let recently_active = session
+                    .updated_at
+                    .parse::<chrono::DateTime<chrono::FixedOffset>>()
                     .ok()
                     .map(|dt| {
-                        let age = chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc));
+                        let age = chrono::Utc::now()
+                            .signed_duration_since(dt.with_timezone(&chrono::Utc));
                         age.num_seconds() < 10
                     })
                     .unwrap_or(false);
@@ -491,8 +512,11 @@ impl Provider for ClaudeProvider {
 
             session.state.reason = format!(
                 "process={} waiting_for_user={} working={} last_event_age={:?}s last_type={}",
-                process_alive, scan.waiting_for_user, scan.assistant_working,
-                scan.last_event_age_secs, scan.last_event_type
+                process_alive,
+                scan.waiting_for_user,
+                scan.assistant_working,
+                scan.last_event_age_secs,
+                scan.last_event_type
             );
         }
         Ok(())
@@ -510,9 +534,10 @@ impl Provider for ClaudeProvider {
             .unwrap_or_default();
 
         Ok(SessionDetail {
-            title: scan.first_user_msg.as_ref().map(|m| {
-                truncate_str_safe(m.lines().next().unwrap_or(m), 60)
-            }),
+            title: scan
+                .first_user_msg
+                .as_ref()
+                .map(|m| truncate_str_safe(m.lines().next().unwrap_or(m), 60)),
             summary: scan.first_user_msg,
             plan_items: vec![],
         })
@@ -529,4 +554,3 @@ impl Provider for ClaudeProvider {
         Ok(sources)
     }
 }
-

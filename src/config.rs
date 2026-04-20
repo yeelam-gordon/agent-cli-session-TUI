@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    #[serde(default = "default_db_path")]
-    pub db_path: PathBuf,
+    /// Path to the archived sessions JSON file.
+    #[serde(default = "default_archive_path")]
+    pub archive_path: PathBuf,
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
     #[serde(default = "default_log_lines")]
@@ -44,11 +45,11 @@ fn default_launch_method() -> String {
     "wt".into()
 }
 
-fn default_db_path() -> PathBuf {
+fn default_archive_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("agent-session-tui")
-        .join("sessions.db")
+        .join("archived.json")
 }
 
 fn default_poll_interval_ms() -> u64 {
@@ -95,8 +96,24 @@ impl Default for AppConfig {
             },
         );
 
+        // Codex CLI
+        providers.insert(
+            "codex".into(),
+            ProviderConfig {
+                enabled: true,
+                default: false,
+                command: "codex".into(),
+                default_args: vec![],
+                state_dir: dirs::home_dir().map(|h| h.join(".codex").join("sessions")),
+                resume_flag: Some("resume".into()),
+                startup_dir: None,
+                launch_method: "wt".into(),
+                wt_profile: None,
+            },
+        );
+
         Self {
-            db_path: default_db_path(),
+            archive_path: default_archive_path(),
             poll_interval_ms: default_poll_interval_ms(),
             log_max_lines: default_log_lines(),
             providers,
@@ -124,7 +141,10 @@ impl AppConfig {
     pub fn config_path() -> PathBuf {
         // 1. Next to the executable
         if let Ok(exe) = std::env::current_exe() {
-            let beside_exe = exe.parent().unwrap_or(std::path::Path::new(".")).join("config.toml");
+            let beside_exe = exe
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("config.toml");
             if beside_exe.exists() {
                 return beside_exe;
             }
