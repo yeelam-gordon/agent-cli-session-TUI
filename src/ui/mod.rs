@@ -544,12 +544,12 @@ impl App {
                 ),
                 Span::raw("ew  "),
                 Span::styled(
-                    "r",
+                    "enter",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("esume  "),
+                Span::raw(":resume  "),
                 Span::styled(
                     "a",
                     Style::default()
