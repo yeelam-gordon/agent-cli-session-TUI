@@ -554,3 +554,72 @@ impl Provider for ClaudeProvider {
         Ok(sources)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    fn write_jsonl(dir: &std::path::Path, name: &str, lines: &[&str]) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        for line in lines { writeln!(f, "{}", line).unwrap(); }
+        path
+    }
+
+    fn make_provider() -> ClaudeProvider {
+        ClaudeProvider {
+            config: crate::config::ProviderConfig {
+                enabled: true, default: false, command: "claude".into(),
+                default_args: vec![], state_dir: None, resume_flag: None,
+                startup_dir: None, launch_method: "cmd".into(),
+                launch_cmd: None, launch_args: None,
+                launch_fallback_cmd: None, launch_fallback_args: None,
+                launch_fallback: None, wt_profile: None,
+            },
+            projects_dir: PathBuf::from("."),
+        }
+    }
+
+    #[test]
+    fn scan_detects_waiting_for_user() {
+        let dir = std::env::temp_dir().join("claude-test-waiting");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "s.jsonl", &[
+            r#"{"timestamp":"2026-01-01T00:01:00Z","type":"user","message":{"role":"user","content":"hello"}}"#,
+            r#"{"timestamp":"2026-01-01T00:02:00Z","type":"assistant","message":{"role":"assistant","content":"Hi!"}}"#,
+        ]);
+        let scan = make_provider().scan_jsonl(&path);
+        assert!(scan.waiting_for_user, "Last role is assistant → waiting for user");
+        assert!(!scan.assistant_working);
+        assert_eq!(scan.first_user_msg.as_deref(), Some("hello"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_detects_assistant_working() {
+        let dir = std::env::temp_dir().join("claude-test-busy");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "s.jsonl", &[
+            r#"{"timestamp":"2026-01-01T00:01:00Z","type":"user","message":{"role":"user","content":"do it"}}"#,
+        ]);
+        let scan = make_provider().scan_jsonl(&path);
+        assert!(scan.assistant_working, "Last role is user → assistant working");
+        assert!(!scan.waiting_for_user);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_extracts_array_content() {
+        let dir = std::env::temp_dir().join("claude-test-array");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "s.jsonl", &[
+            r#"{"timestamp":"2026-01-01T00:01:00Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"array msg"}]}}"#,
+        ]);
+        let scan = make_provider().scan_jsonl(&path);
+        assert_eq!(scan.first_user_msg.as_deref(), Some("array msg"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

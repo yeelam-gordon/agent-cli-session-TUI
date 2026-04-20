@@ -59,10 +59,9 @@ pub struct SessionState {
 impl SessionState {
     /// User-facing badge for the session list.
     pub fn badge(&self) -> &'static str {
-        match (self.process, self.interaction, self.health) {
-            (ProcessState::Running, InteractionState::WaitingInput, _) => "🟡",
-            (ProcessState::Running, _, _) => "🟢",
-            (_, _, HealthState::Crashed) => "🔴",
+        match (self.process, self.interaction) {
+            (ProcessState::Running, InteractionState::WaitingInput) => "🟡",
+            (ProcessState::Running, _) => "🟢",
             _ => match self.persistence {
                 PersistenceState::Resumable => "💤",
                 PersistenceState::Archived => "📦",
@@ -73,12 +72,11 @@ impl SessionState {
 
     /// Short label for display.
     pub fn label(&self) -> &'static str {
-        match (self.process, self.interaction, self.health) {
-            (ProcessState::Running, InteractionState::WaitingInput, _) => "Waiting",
-            (ProcessState::Running, InteractionState::Busy, _) => "Running",
-            (ProcessState::Running, InteractionState::Idle, _) => "Idle",
-            (ProcessState::Running, InteractionState::Unknown, _) => "Running",
-            (_, _, HealthState::Crashed) => "Crashed",
+        match (self.process, self.interaction) {
+            (ProcessState::Running, InteractionState::WaitingInput) => "Waiting",
+            (ProcessState::Running, InteractionState::Busy) => "Running",
+            (ProcessState::Running, InteractionState::Idle) => "Idle",
+            (ProcessState::Running, InteractionState::Unknown) => "Running",
             _ => match self.persistence {
                 PersistenceState::Resumable => "Resumable",
                 PersistenceState::Archived => "Archived",
@@ -233,13 +231,15 @@ mod tests {
     }
 
     #[test]
-    fn badge_crashed() {
+    fn badge_crashed_shows_as_resumable() {
+        // Crashed sessions are resumable — no separate display state
         let state = SessionState {
             health: HealthState::Crashed,
+            persistence: PersistenceState::Resumable,
             ..SessionState::default()
         };
-        assert_eq!(state.badge(), "🔴");
-        assert_eq!(state.label(), "Crashed");
+        assert_eq!(state.badge(), "💤");
+        assert_eq!(state.label(), "Resumable");
     }
 
     #[test]

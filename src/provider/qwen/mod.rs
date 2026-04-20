@@ -296,3 +296,64 @@ impl Provider for QwenProvider {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    fn write_jsonl(dir: &std::path::Path, name: &str, lines: &[&str]) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        for line in lines { writeln!(f, "{}", line).unwrap(); }
+        path
+    }
+
+    fn make_provider() -> QwenProvider {
+        QwenProvider {
+            config: crate::config::ProviderConfig {
+                enabled: true, default: false, command: "qwen".into(),
+                default_args: vec![], state_dir: None, resume_flag: None,
+                startup_dir: None, launch_method: "cmd".into(),
+                launch_cmd: None, launch_args: None,
+                launch_fallback_cmd: None, launch_fallback_args: None,
+                launch_fallback: None, wt_profile: None,
+            },
+            projects_dir: PathBuf::from("."),
+        }
+    }
+
+    #[test]
+    fn scan_detects_waiting_for_user() {
+        let dir = std::env::temp_dir().join("qwen-test-waiting");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "s.jsonl", &[
+            r#"{"timestamp":"2026-01-01T00:01:00Z","type":"user","message":{"role":"user","parts":[{"text":"hello"}]}}"#,
+            r#"{"timestamp":"2026-01-01T00:02:00Z","type":"assistant","message":{"role":"model","parts":[{"text":"Hi!"}]}}"#,
+        ]);
+        let scan = make_provider().scan_jsonl(&path);
+        assert!(scan.waiting_for_user, "Last role is assistant → waiting for user");
+        assert_eq!(scan.first_user_msg.as_deref(), Some("hello"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_detects_assistant_working() {
+        let dir = std::env::temp_dir().join("qwen-test-busy");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "s.jsonl", &[
+            r#"{"timestamp":"2026-01-01T00:01:00Z","type":"user","message":{"role":"user","parts":[{"text":"do it"}]}}"#,
+        ]);
+        let scan = make_provider().scan_jsonl(&path);
+        assert!(!scan.waiting_for_user, "Last role is user → not waiting");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decode_project_path_windows() {
+        let path = QwenProvider::decode_project_path("C--Users-yeelam");
+        assert_eq!(path, PathBuf::from("C:\\Users\\yeelam"));
+    }
+}

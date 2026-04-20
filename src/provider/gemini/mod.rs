@@ -461,3 +461,105 @@ impl Provider for GeminiProvider {
         Ok(sources)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    fn write_jsonl(dir: &std::path::Path, name: &str, lines: &[&str]) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        for line in lines {
+            writeln!(f, "{}", line).unwrap();
+        }
+        path
+    }
+
+    fn make_provider() -> GeminiProvider {
+        GeminiProvider {
+            config: crate::config::ProviderConfig {
+                enabled: true,
+                default: false,
+                command: "gemini".into(),
+                default_args: vec![],
+                state_dir: None,
+                resume_flag: None,
+                startup_dir: None,
+                launch_method: "cmd".into(),
+                launch_cmd: None,
+                launch_args: None,
+                launch_fallback_cmd: None,
+                launch_fallback_args: None,
+                launch_fallback: None,
+                wt_profile: None,
+            },
+            state_dir: PathBuf::from("."),
+        }
+    }
+
+    #[test]
+    fn scan_detects_waiting_for_user() {
+        let dir = std::env::temp_dir().join("gemini-test-waiting");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "session.jsonl", &[
+            r#"{"sessionId":"test-1","startTime":"2026-01-01T00:00:00Z","kind":"main"}"#,
+            r#"{"id":"1","timestamp":"2026-01-01T00:01:00Z","type":"user","content":[{"text":"hello"}]}"#,
+            r#"{"id":"2","timestamp":"2026-01-01T00:02:00Z","type":"gemini","content":"Hi there!"}"#,
+        ]);
+        let provider = make_provider();
+        let scan = provider.scan_jsonl(&path);
+        assert!(scan.waiting_for_user, "Last event is gemini → should be waiting for user");
+        assert!(!scan.assistant_working);
+        assert!(scan.has_user);
+        assert_eq!(scan.first_user_msg.as_deref(), Some("hello"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_detects_assistant_working() {
+        let dir = std::env::temp_dir().join("gemini-test-busy");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "session.jsonl", &[
+            r#"{"sessionId":"test-2","startTime":"2026-01-01T00:00:00Z","kind":"main"}"#,
+            r#"{"id":"1","timestamp":"2026-01-01T00:01:00Z","type":"user","content":[{"text":"do something"}]}"#,
+        ]);
+        let provider = make_provider();
+        let scan = provider.scan_jsonl(&path);
+        assert!(scan.assistant_working, "Last event is user → assistant should be working");
+        assert!(!scan.waiting_for_user);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_ignores_info_events_for_state() {
+        let dir = std::env::temp_dir().join("gemini-test-info");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "session.jsonl", &[
+            r#"{"sessionId":"test-3","startTime":"2026-01-01T00:00:00Z","kind":"main"}"#,
+            r#"{"id":"1","timestamp":"2026-01-01T00:01:00Z","type":"user","content":[{"text":"hi"}]}"#,
+            r#"{"id":"2","timestamp":"2026-01-01T00:02:00Z","type":"gemini","content":"done"}"#,
+            r#"{"id":"3","timestamp":"2026-01-01T00:03:00Z","type":"info","content":"Request cancelled."}"#,
+            r#"{"$set":{"lastUpdated":"2026-01-01T00:03:00Z"}}"#,
+        ]);
+        let provider = make_provider();
+        let scan = provider.scan_jsonl(&path);
+        assert!(scan.waiting_for_user, "Info/metadata after gemini → still waiting for user");
+        assert!(!scan.assistant_working);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_session_id_from_header() {
+        let dir = std::env::temp_dir().join("gemini-test-header");
+        let _ = fs::remove_dir_all(&dir);
+        let path = write_jsonl(&dir, "session.jsonl", &[
+            r#"{"sessionId":"abc-123-def","startTime":"2026-01-01T00:00:00Z","kind":"main"}"#,
+        ]);
+        let id = GeminiProvider::read_session_id(&path);
+        assert_eq!(id.as_deref(), Some("abc-123-def"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
