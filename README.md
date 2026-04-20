@@ -43,7 +43,7 @@ Sessions are tracked across four independent axes:
 | **Persistence** | Resumable · Ephemeral · Archived |
 | **Health** | Clean · Crashed · Orphaned |
 
-User-facing states are simplified: 🟢 Running, 🟡 Waiting, 💤 Resumable.
+Internally tracked for diagnostics; user-facing states are simplified to just: 🟢 Running, 🟡 Waiting, 💤 Resumable.
 
 ## Keybindings
 

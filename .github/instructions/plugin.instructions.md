@@ -5,7 +5,7 @@ applyTo: 'src/provider/**/*.rs'
 
 # Writing a Provider Plugin
 
-A provider plugin teaches the TUI how to discover, monitor, and launch sessions for a specific agent CLI (e.g., Copilot CLI, Claude Code, Codex CLI).
+A provider plugin teaches the TUI how to discover, monitor, and launch sessions for a specific agent CLI (e.g., Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI).
 
 ## Quick Start
 
@@ -52,7 +52,7 @@ Sessions have four independent state axes:
 | `ProcessState` | Running, Exited, Missing, StaleLock | Is the OS process alive? |
 | `InteractionState` | Busy, WaitingInput, Idle, Unknown | What is the session doing? |
 | `PersistenceState` | Resumable, Ephemeral, Archived | Can it be resumed? |
-| `HealthState` | Clean, Crashed, Orphaned | Is it healthy? |
+| `HealthState` | Clean, Crashed, Orphaned | Is it healthy? (all display as Resumable to user) |
 
 Plus `Confidence` (Low, Medium, High) and a `reason` string for diagnostics.
 
@@ -148,7 +148,7 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 | `discover` | Session count > 0, live processes found, reconcile produces correct state, running sessions have PIDs, waiting sessions have ≥Medium confidence |
 | `graceful` | Clean-exited sessions are Resumable+Clean, orphaned sessions have no PID, resumable sessions have summaries |
 | `launch` | Detects Running, Busy, WaitingInput transitions over 60s |
-| `kill` | After kill: process not Running, session is Resumable or Orphaned |
+| `kill` | After kill: process not Running, session is Resumable |
 
 ## Existing Providers as Reference
 
@@ -157,5 +157,7 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 | Copilot CLI | `src/provider/copilot/mod.rs` | `workspace.yaml`, `events.jsonl`, `inuse.<pid>.lock` files, `plan.md` |
 | Claude Code | `src/provider/claude/mod.rs` | `~/.claude/projects/<encoded-path>/<session-id>.jsonl` |
 | Codex CLI | `src/provider/codex/mod.rs` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Qwen CLI | `src/provider/qwen/mod.rs` | `~/.qwen/projects/<encoded-path>/chats/<session-id>.jsonl` |
+| Gemini CLI | `src/provider/gemini/mod.rs` | `~/.gemini/tmp/<project>/chats/session-*.jsonl` + subdirs |
 
 Study these for patterns on summary extraction, state inference, and edge case handling.

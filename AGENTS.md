@@ -4,7 +4,7 @@
 
 ## What This Project Is
 
-A Rust TUI that manages agent CLI sessions (Copilot CLI, Claude Code, and extensible to others). It discovers sessions from each CLI's state directory, monitors running processes, and provides a unified view with search, resume, and archive capabilities.
+A Rust TUI that manages agent CLI sessions (**Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, and extensible to others). It discovers sessions from each CLI's state directory, monitors running processes, and provides a unified view with search, resume, and archive capabilities.
 
 ## Instruction Files
 
@@ -19,31 +19,37 @@ Read these before making changes. They are in `.github/instructions/`:
 
 ```
 agent-session-tui/
-├── .github/instructions/   # Copilot/agent instruction files (READ THESE)
+├── .github/
+│   ├── instructions/       # Copilot/agent instruction files (READ THESE)
+│   └── workflows/          # CI (rust.yml) + Release (release.yml)
 ├── src/
 │   ├── main.rs             # Entry point — config, provider registration, supervisor + TUI startup
 │   ├── lib.rs              # Library re-exports (all pub mod) for use by tests
 │   ├── config.rs           # TOML config loading (AppConfig, ProviderConfig)
 │   ├── models.rs           # Core types: Session, SessionState (4-axis), StateSignals
 │   ├── archive.rs          # JSON-based archive store
-│   ├── log.rs              # File-based logging (next to exe)
+│   ├── log.rs              # File-based logging (%TEMP%/agent-session-tui.log)
 │   ├── process_info.rs     # Shared process discovery (WMI on Windows + sysinfo fallback)
 │   ├── util.rs             # UTF-8 safe string truncation
 │   ├── provider/
 │   │   ├── mod.rs          # Provider trait + ProviderRegistry + default state inference
 │   │   ├── copilot/mod.rs  # Copilot CLI plugin
 │   │   ├── claude/mod.rs   # Claude Code plugin
-│   │   └── codex/mod.rs    # Codex CLI plugin
-│   ├── supervisor/mod.rs   # Background tokio task: scan, reconcile, launch, archive
+│   │   ├── codex/mod.rs    # Codex CLI plugin
+│   │   ├── qwen/mod.rs     # Qwen CLI plugin
+│   │   └── gemini/mod.rs   # Gemini CLI plugin
+│   ├── supervisor/mod.rs   # Background tokio task: parallel scan, reconcile, launch, archive
 │   ├── testing/
 │   │   ├── mod.rs          # TestRunner (shared by all provider tests)
 │   │   └── scenarios.rs    # Provider-agnostic test scenarios (discover, graceful, launch, kill)
 │   └── ui/mod.rs           # ratatui TUI: session list, detail, log viewer, search, keybindings
 ├── tests/
-│   ├── copilot_lifecycle_test.rs   # Copilot provider integration test
-│   ├── claude_lifecycle_test.rs    # Claude provider integration test
-│   └── codex_lifecycle_test.rs     # Codex provider integration test
-├── config.toml             # User config (lives next to exe at runtime)
+│   ├── copilot_lifecycle_test.rs
+│   ├── claude_lifecycle_test.rs
+│   ├── codex_lifecycle_test.rs
+│   ├── qwen_lifecycle_test.rs
+│   └── gemini_lifecycle_test.rs
+├── config.toml.example     # Template config (copy and rename to config.toml)
 ├── Cargo.toml              # Dependencies and build profile
 └── rust-toolchain.toml     # Pins stable MSVC toolchain
 ```
@@ -54,7 +60,7 @@ agent-session-tui/
 # Debug build (fast, for development)
 cargo build
 
-# Release build (optimized, ~1.9 MB binary)
+# Release build (optimized, ~1.1 MB binary)
 cargo build --release
 
 # On Windows with MSVC toolchain explicitly
@@ -63,21 +69,26 @@ cargo +stable-x86_64-pc-windows-msvc build --release
 
 Output: `target/release/agent-session-tui.exe`
 
-The `config.toml` file must be next to the exe (or at `%APPDATA%\agent-session-tui\config.toml`).
+Config search order: next to exe → `%APPDATA%\agent-session-tui\config.toml` → built-in defaults.
 
 ## How to Run Tests
 
 ```bash
-# Run ALL integration tests (non-interactive scenarios only)
+# Unit tests only (34 tests — runs on CI)
+cargo test --lib
+
+# All tests including provider integration tests (needs real session data)
 cargo test -- --nocapture
 
-# Run a specific provider's tests
+# Specific provider
 cargo test --test copilot_lifecycle_test -- --nocapture
 cargo test --test claude_lifecycle_test -- --nocapture
 cargo test --test codex_lifecycle_test -- --nocapture
+cargo test --test qwen_lifecycle_test -- --nocapture
+cargo test --test gemini_lifecycle_test -- --nocapture
 ```
 
-Tests use the shared framework in `src/testing/`. Each test file is a thin wrapper that creates its provider and calls shared scenarios. See `plugin.instructions.md` for details.
+Tests use the shared framework in `src/testing/`. Each test file is a thin wrapper that creates its provider and calls shared scenarios. Provider scanner tests (state detection with fixture JSONL) are in each provider's `mod.rs` under `#[cfg(test)]`.
 
 ## How to Add a New Provider
 
@@ -89,17 +100,19 @@ Quick summary:
 3. Add `pub mod <name>;` in `src/provider/mod.rs`
 4. Add `[providers.<name>]` section in `config.toml`
 5. Create `tests/<name>_lifecycle_test.rs` using the shared test framework
-6. Build and run: `cargo test --test <name>_lifecycle_test -- --nocapture`
+6. Add unit tests for state detection (waiting vs busy) in your provider's `mod.rs`
+7. Build and run: `cargo test --test <name>_lifecycle_test -- --nocapture`
 
 ## Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| **Multi-axis state model** | Process, Interaction, Persistence, Health are independent axes — avoids ambiguous flat enums |
+| **Multi-axis state model** | Process, Interaction, Persistence, Health are independent axes — avoids ambiguous flat enums. User-facing display simplified to Running/Waiting/Resumable. |
 | **WMI for process detection** | sysinfo can't read command-line args for some Windows processes; WMI is reliable |
-| **No internal DB** | We read from each CLI's own state (read-only). Only an `archived.json` for hide/show. No sync issues. |
+| **No internal DB** | We read from each CLI's own state (read-only). Only `archived.json` for hide/show. No sync issues. |
+| **Parallel provider scans** | All providers scan concurrently via `std::thread::scope` for fast refresh |
 | **Provider trait** | Each CLI is a plugin. Discovery, state inference, and launch are provider-specific. Common test scenarios validate any provider. |
-| **File-based logging** | `agent-session-tui.log` next to exe. Panics are logged with file:line before terminal restore. |
+| **File-based logging** | `%TEMP%/agent-session-tui.log`. Panics are logged with file:line before terminal restore. |
 
 ## Common Pitfalls
 

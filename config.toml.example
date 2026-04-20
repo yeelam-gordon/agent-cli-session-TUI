@@ -62,3 +62,26 @@ launch_method = "wt"
 launch_fallback = "cmd"
 # wt_profile = "PowerShell"
 
+# ─── Codex CLI ───
+[providers.codex]
+enabled = true
+command = "codex"
+default_args = []
+state_dir = '~/.codex/sessions'
+resume_flag = "resume"
+# startup_dir = 'D:\'
+launch_method = "wt"
+launch_fallback = "cmd"
+
+# ─── Gemini CLI ───
+[providers.gemini]
+enabled = true
+command = "gemini"
+default_args = []
+state_dir = '~/.gemini'
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "wt"
+launch_fallback = "cmd"
+# wt_profile = "PowerShell"
+

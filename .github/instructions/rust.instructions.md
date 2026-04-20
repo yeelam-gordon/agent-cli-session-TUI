@@ -13,7 +13,7 @@ Based on [The Rust Book](https://doc.rust-lang.org/book/) and [Rust API Guidelin
 - Use `anyhow::Result` for application-level errors (main, supervisor, providers).
 - Use `Option<T>` when data may be absent (session metadata, lock files).
 - **Never panic** on user data — session files may be corrupt, truncated, or have unexpected encoding. Always handle gracefully.
-- Use `crate::log::error()` / `crate::log::warn()` for diagnostics (log file lives next to the exe).
+- Use `crate::log::error()` / `crate::log::warn()` for diagnostics (log file at `%TEMP%/agent-session-tui.log`).
 
 ### String Handling (Critical)
 - **Never slice strings by byte index** (`&s[..200]`). Always use `is_char_boundary()` or the `util::truncate_str_safe()` helper. Session data contains multi-byte characters (Chinese, emoji, etc.).
