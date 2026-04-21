@@ -35,6 +35,134 @@ impl CopilotProvider {
         }
     }
 
+    /// List all session candidate dirs sorted by recency (most recent first).
+    /// Uses events.jsonl mtime as the sort key (cheap stat, no parsing).
+    /// Returns (dir_path, mtime_string) pairs.
+    fn list_candidates_by_recency(&self) -> Result<Vec<(PathBuf, String)>> {
+        let entries = std::fs::read_dir(&self.state_dir)
+            .with_context(|| format!("Cannot read state dir: {:?}", self.state_dir))?;
+
+        let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir = entry.path();
+            // Use events.jsonl mtime as the recency signal (most accurate)
+            let mtime = dir
+                .join("events.jsonl")
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .or_else(|| {
+                    // Fallback to workspace.yaml mtime
+                    dir.join("workspace.yaml")
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                })
+                .or_else(|| {
+                    // Fallback to dir mtime
+                    dir.metadata().ok().and_then(|m| m.modified().ok())
+                });
+
+            if let Some(t) = mtime {
+                let dt: chrono::DateTime<chrono::Local> = t.into();
+                candidates.push((dir, dt.to_rfc3339()));
+            }
+        }
+
+        // Sort most recent first
+        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(candidates)
+    }
+
+    /// Parse a single session directory into a Session (or None if empty/invalid).
+    fn parse_session_dir(&self, dir: &Path, mtime: &str) -> Option<Session> {
+        let dir_name = dir.file_name()?.to_string_lossy().to_string();
+
+        let workspace = self.read_workspace_yaml(dir);
+        let plan_items = self.read_plan_md(dir);
+
+        let (first_msg_events, last_assistant_events, has_user_events, _event_count) =
+            self.read_user_messages_from_events(dir);
+
+        let first_message = first_msg_events;
+        let last_assistant = last_assistant_events;
+
+        let ws_summary = workspace.as_ref().and_then(|w| w.summary.as_ref());
+        let has_ws_content = ws_summary.is_some_and(|s| !s.is_empty());
+        let has_turns = first_message.is_some();
+        let has_plan = plan_items.is_some();
+
+        // Skip sessions with zero user interaction
+        if !has_ws_content && !has_turns && !has_plan && !has_user_events {
+            return None;
+        }
+
+        // Build summary
+        let mut summary = if let Some(s) = ws_summary.filter(|s| !s.is_empty()) {
+            s.clone()
+        } else if let Some(ref msg) = first_message {
+            format!("User asked: {}", msg)
+        } else if let Some(ref items) = plan_items {
+            let done = items.iter().filter(|i| i.done).count();
+            let total = items.len();
+            let current = items
+                .iter()
+                .find(|i| !i.done)
+                .map(|i| i.title.as_str())
+                .unwrap_or("(all done)");
+            format!("Plan: {}/{} done. Current: {}", done, total, current)
+        } else {
+            String::new()
+        };
+
+        if let Some(ref msg) = first_message {
+            summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+        }
+        if let Some(ref msg) = last_assistant {
+            summary = format!("{}\n\n--- Last Copilot response ---\n{}", summary, msg);
+        }
+
+        // Build title
+        let title = if let Some(s) = ws_summary.filter(|s| !s.is_empty()) {
+            truncate_str_safe(s.lines().next().unwrap_or(""), 60)
+        } else if let Some(ref msg) = first_message {
+            let short = msg.lines().next().unwrap_or(msg);
+            truncate_str_safe(short, 60)
+        } else if let Some(ref items) = plan_items {
+            items
+                .iter()
+                .find(|i| !i.done)
+                .or(items.last())
+                .map(|i| i.title.clone())
+                .unwrap_or_else(|| crate::util::short_id(&dir_name, 8).to_string())
+        } else {
+            crate::util::short_id(&dir_name, 8).to_string()
+        };
+
+        let cwd_path = workspace
+            .as_ref()
+            .and_then(|w| w.cwd.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        Some(Session {
+            id: format!("copilot_{}", dir_name),
+            provider_session_id: dir_name,
+            provider_name: "copilot".into(),
+            cwd: cwd_path,
+            title,
+            tab_title: None,
+            summary,
+            state: SessionState::default(),
+            pid: None,
+            created_at: mtime.to_string(),
+            updated_at: mtime.to_string(),
+            state_dir: Some(dir.to_path_buf()),
+        })
+    }
+
     /// Read summary and CWD from workspace.yaml.
     fn read_workspace_yaml(&self, session_dir: &Path) -> Option<WorkspaceInfo> {
         let ws_path = session_dir.join("workspace.yaml");

@@ -57,9 +57,18 @@ impl QwenProvider {
         let mut first_timestamp: Option<String> = None;
         let mut last_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
         let mut last_role = String::new();
+        let mut cwd: Option<PathBuf> = None;
 
         for line in &lines {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                // Extract CWD from the first event that has it
+                if cwd.is_none() {
+                    if let Some(c) = val.get("cwd").and_then(|v| v.as_str()) {
+                        if !c.is_empty() {
+                            cwd = Some(PathBuf::from(c));
+                        }
+                    }
+                }
                 if let Some(ts) = val.get("timestamp").and_then(|v| v.as_str()) {
                     if first_timestamp.is_none() {
                         first_timestamp = Some(ts.to_string());
@@ -105,6 +114,7 @@ impl QwenProvider {
             last_event_age_secs,
             waiting_for_user,
             file_mtime,
+            cwd,
         }
     }
 
@@ -151,6 +161,8 @@ struct JsonlScanResult {
     last_event_age_secs: Option<u64>,
     waiting_for_user: bool,
     file_mtime: Option<String>,
+    /// CWD extracted from the first event's "cwd" field (most reliable).
+    cwd: Option<PathBuf>,
 }
 
 impl Provider for QwenProvider {
@@ -190,7 +202,7 @@ impl Provider for QwenProvider {
             }
 
             let proj_name = proj_entry.file_name().to_string_lossy().to_string();
-            let cwd = Self::decode_project_path(&proj_name);
+            let fallback_cwd = Self::decode_project_path(&proj_name);
 
             // Qwen stores sessions in chats/ subdirectory
             let chats_dir = proj_entry.path().join("chats");
@@ -207,6 +219,13 @@ impl Provider for QwenProvider {
 
                 let session_id = fname.trim_end_matches(".jsonl").to_string();
                 let scan = self.scan_jsonl(&file_entry.path());
+
+                if !scan.has_user || scan.event_count < 3 {
+                    continue;
+                }
+
+                // Use CWD from JSONL events (reliable), fall back to dir name decode
+                let cwd = scan.cwd.unwrap_or_else(|| fallback_cwd.clone());
 
                 if !scan.has_user || scan.event_count < 3 {
                     continue;

@@ -52,6 +52,32 @@ pub trait Provider: Send + Sync {
     /// Sessions with no user interaction should be filtered out here.
     fn discover_sessions(&self) -> Result<Vec<Session>>;
 
+    /// Paginated discovery — return sessions sorted by recency (most recent first).
+    ///
+    /// `offset` is the number of sessions to skip, `limit` is the max to return.
+    /// Returns a `PagedSessions` with the sessions and whether more remain.
+    ///
+    /// The default implementation calls `discover_sessions()` and slices.
+    /// Providers with many sessions (e.g., Copilot with 500+) should override
+    /// this with an optimized implementation that:
+    ///   1. Lists candidate dirs/files cheaply (stat mtime, no content parsing)
+    ///   2. Sorts by recency (e.g., events.jsonl mtime)
+    ///   3. Only parses the requested slice
+    ///
+    /// The supervisor calls this in phases: page 1 from all providers (blocking),
+    /// then remaining pages in background. The viewmodel merges incrementally.
+    fn discover_sessions_paged(&self, offset: usize, limit: usize) -> Result<PagedSessions> {
+        let all = self.discover_sessions()?;
+        let total = all.len();
+        let sessions: Vec<Session> = all.into_iter().skip(offset).take(limit).collect();
+        let has_more = offset + sessions.len() < total;
+        Ok(PagedSessions {
+            sessions,
+            total,
+            has_more,
+        })
+    }
+
     /// Match live OS processes to discovered sessions.
     ///
     /// Called after `discover_sessions()`. Receives the sessions and should:
@@ -99,6 +125,20 @@ pub trait Provider: Send + Sync {
     fn tab_title(&self, _session: &Session) -> Option<String> {
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// PagedSessions — result from paginated discovery
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct PagedSessions {
+    /// Sessions for this page, sorted by recency (most recent first).
+    pub sessions: Vec<Session>,
+    /// Total known candidates (may be approximate — some get filtered during parsing).
+    pub total: usize,
+    /// Whether more sessions remain beyond this page.
+    pub has_more: bool,
 }
 
 // ---------------------------------------------------------------------------
