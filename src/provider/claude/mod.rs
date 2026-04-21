@@ -106,7 +106,7 @@ impl ClaudeProvider {
                 // Track last assistant message (for summary)
                 if event_type == "assistant" && role == "assistant" {
                     if let Some(content) = Self::extract_message_content(&val) {
-                        last_assistant_msg = Some(truncate_str_safe(&content, 500));
+                        last_assistant_msg = Some(content);
                     }
                 }
             }

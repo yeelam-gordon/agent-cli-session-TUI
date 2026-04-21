@@ -107,7 +107,7 @@ impl GeminiProvider {
 
                 if event_type == "gemini" {
                     if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
-                        last_gemini_msg = Some(truncate_str_safe(content, 500));
+                        last_gemini_msg = Some(content.to_string());
                     }
                 }
             }

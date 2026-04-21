@@ -92,7 +92,7 @@ impl QwenProvider {
                 if event_type == "assistant" {
                     last_role = "assistant".into();
                     if let Some(content) = Self::extract_text_parts(&val) {
-                        last_assistant_msg = Some(truncate_str_safe(&content, 500));
+                        last_assistant_msg = Some(content);
                     }
                 }
             }

@@ -239,36 +239,38 @@ impl App {
                             });
 
                         if data_changed {
-                            // Preserve selection if user has interacted
-                            let prev_selected_id = if self.selected_index > 0 || self.search_active {
-                                self.selected_session()
-                                    .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
-                            } else {
-                                None
-                            };
-                            let prev_top_id = prev_selected_id.clone();
+                            let prev_selected_id = self.selected_session()
+                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
+
+                            // Check if the session SET changed (add/remove) vs just field updates
+                            let set_changed = active.len() != self.sessions.len()
+                                || active.iter().zip(self.sessions.iter()).any(|(new, old)| new.id != old.id);
 
                             self.sessions = active;
                             self.hidden_sessions = hidden;
-                            self.apply_filter();
 
-                            // Restore selection
-                            if let Some((prev_provider, prev_id)) = prev_selected_id {
-                                let view = self.current_view_sessions();
-                                if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
-                                    let s = &view[idx];
-                                    s.provider_name == prev_provider && s.provider_session_id == prev_id
-                                }) {
-                                    self.selected_index = pos;
-                                    self.list_state.select(Some(pos));
+                            // Only re-filter if sessions were added/removed OR no search active.
+                            // State/title changes during active search don't change ranking.
+                            if set_changed || !self.search_active {
+                                self.apply_filter();
+
+                                // Restore selection if user had navigated
+                                if let Some((prev_provider, prev_id)) = &prev_selected_id {
+                                    let view = self.current_view_sessions();
+                                    if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
+                                        let s = &view[idx];
+                                        &s.provider_name == prev_provider && &s.provider_session_id == prev_id
+                                    }) {
+                                        self.selected_index = pos;
+                                        self.list_state.select(Some(pos));
+                                    }
                                 }
                             }
 
                             // Reset detail scroll if selected session changed
-                            let new_top_id = self
-                                .selected_session()
+                            let new_selected_id = self.selected_session()
                                 .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
-                            if new_top_id != prev_top_id {
+                            if new_selected_id != prev_selected_id {
                                 self.detail_scroll = 0;
                             }
 

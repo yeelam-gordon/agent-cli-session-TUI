@@ -184,7 +184,7 @@ impl CodexProvider {
             }
             "assistant" => {
                 if let Some(text) = content {
-                    scan.last_assistant_msg = Some(truncate_str_safe(text.trim(), 500));
+                    scan.last_assistant_msg = Some(text.trim().to_string());
                 }
                 scan.last_role = Some("assistant".into());
                 scan.last_activity_kind = Some("assistant".into());

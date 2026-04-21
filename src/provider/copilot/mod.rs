@@ -501,7 +501,7 @@ impl CopilotProvider {
                         let trimmed = msg.trim();
                         if !trimmed.is_empty() {
                             // Keep full last response (up to 3000 chars) for detail + semantic
-                            last_assistant_msg = Some(truncate_str_safe(trimmed, 3000));
+                            last_assistant_msg = Some(trimmed.to_string());
                         }
                     }
                 }
