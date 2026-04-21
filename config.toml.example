@@ -14,7 +14,7 @@ log_max_lines = 500
 #   launch_fallback = "cmd"    # fallback if launch_method program not found
 #
 # Option 2: Custom command (full control)
-#   launch_cmd = "wtai"                    # any program
+#   launch_cmd = "wt"                      # any program
 #   launch_args = ["-w", "0", "new-tab",   # args with placeholders:
 #     "--startingDirectory", "{cwd}",       #   {cwd}     → working directory
 #     "cmd", "/k", "{command}"]             #   {command}  → the agent CLI command
@@ -36,6 +36,8 @@ enabled = true
 default = true
 command = "copilot"
 default_args = []
+# default_args = ["--agent=memory-assistant"]
+# default_args = ["--model", "claude-sonnet-4"]
 state_dir = '~/.copilot/session-state'
 resume_flag = "--resume"
 # startup_dir = 'D:\'
@@ -48,6 +50,8 @@ launch_fallback = "cmd"
 enabled = true
 command = "claude"
 default_args = []
+# default_args = ["--model", "claude-sonnet-4"]
+# default_args = ["--allow-dangerously-skip-permissions"]
 state_dir = '~/.claude/projects'
 resume_flag = "--resume"
 # startup_dir = 'D:\'
@@ -60,7 +64,7 @@ launch_fallback = "cmd"
 enabled = true
 command = "qwen"
 default_args = []
-state_dir = '~/.qwen/projects'
+# default_args = ["--model", "qwen-max"]
 resume_flag = "--resume"
 # startup_dir = 'D:\'
 launch_method = "wt"
@@ -72,6 +76,7 @@ launch_fallback = "cmd"
 enabled = true
 command = "codex"
 default_args = []
+# default_args = ["--model", "o4-mini"]
 state_dir = '~/.codex/sessions'
 resume_flag = "resume"
 # startup_dir = 'D:\'
@@ -83,6 +88,7 @@ launch_fallback = "cmd"
 enabled = true
 command = "gemini"
 default_args = []
+# default_args = ["--model", "gemini-2.5-pro"]
 state_dir = '~/.gemini'
 resume_flag = "--resume"
 # startup_dir = 'D:\'

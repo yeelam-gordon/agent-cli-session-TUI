@@ -105,10 +105,10 @@ launch_method = "wt"
 For full control over launch commands, use custom launcher fields:
 
 ```toml
-launch_cmd = "wtai"
+launch_cmd = "wt"
 launch_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k", "{command}"]
-launch_fallback_cmd = "wt"
-launch_fallback_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k", "{command}"]
+launch_fallback_cmd = "cmd"
+launch_fallback_args = ["/k", "{command}"]
 ```
 
 Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI command.
@@ -193,9 +193,11 @@ cargo test --test gemini_lifecycle_test -- --nocapture
 cargo test --test codex_lifecycle_test -- --nocapture
 ```
 
-## For Contributors & AI Agents
+## Contributing
 
-Read [`AGENTS.md`](AGENTS.md) first — it covers project structure, how to build, how to add providers, key design decisions, and common pitfalls.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to get started — adding providers, building the semantic plugin, and code standards.
+
+For project internals, design decisions, and AI agent context, see [`AGENTS.md`](AGENTS.md).
 
 ## License
 
