@@ -119,16 +119,20 @@ impl App {
     }
 
     /// Rebuild the filtered indices based on the search query.
-    /// Uses tiered ranking: exact match → word match → partial match → state label.
-    /// Semantic search is NOT used during interactive typing (too expensive per-keystroke).
-    /// It will be used via pre-computed embeddings in a future update.
+    /// Uses tiered ranking: exact → fuzzy → semantic (from cached embeddings).
     fn apply_filter(&mut self) {
         let view = self.current_view_sessions();
         if self.search_query.is_empty() {
             self.filtered_indices = (0..view.len()).collect();
         } else {
-            // Keyword + fuzzy only during interactive typing (instant)
-            let results = crate::search::ranked_search(view, &self.search_query, None);
+            // Pass semantic plugin for queries ≥5 chars (uses cached vectors, instant)
+            let sem = if self.search_query.len() >= 5 {
+                self.semantic.lock().ok()
+            } else {
+                None
+            };
+            let sem_ref = sem.as_deref();
+            let results = crate::search::ranked_search(view, &self.search_query, sem_ref);
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
         if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {
@@ -238,6 +242,17 @@ impl App {
                             "{}/{} {} · {} hidden · refreshed {}",
                             shown, total, mode_label, hidden_count, now
                         );
+
+                        // Trigger background semantic indexing for new/changed sessions
+                        let sem_clone = self.semantic.clone();
+                        let all_sessions: Vec<Session> = self.sessions.clone();
+                        std::thread::spawn(move || {
+                            if let Ok(mut sem) = sem_clone.lock() {
+                                if sem.lib.is_some() {
+                                    sem.index_sessions(&all_sessions);
+                                }
+                            }
+                        });
                     }
                     SupervisorEvent::Error(e) => {
                         self.status_message = format!("Error: {}", e);
@@ -833,8 +848,14 @@ impl App {
         };
         let sem_status = self.semantic.lock().map(|s| s.status().clone()).unwrap_or(crate::search::SemanticStatus::Unavailable);
         let sem_indicator = match sem_status {
-            crate::search::SemanticStatus::Ready => Span::styled("🧠 Semantic ", Style::default().fg(Color::Green)),
-            crate::search::SemanticStatus::Loading => Span::styled("⏳ Loading model... ", Style::default().fg(Color::Yellow)),
+            crate::search::SemanticStatus::Ready { count } => Span::styled(
+                format!("🧠 {} ", count),
+                Style::default().fg(Color::Green),
+            ),
+            crate::search::SemanticStatus::Indexing { done, total } => Span::styled(
+                format!("⏳ {}/{} ", done, total),
+                Style::default().fg(Color::Yellow),
+            ),
             crate::search::SemanticStatus::Failed(_) => Span::styled("⚠ Semantic failed ", Style::default().fg(Color::Red)),
             crate::search::SemanticStatus::Unavailable => Span::raw(""),
         };

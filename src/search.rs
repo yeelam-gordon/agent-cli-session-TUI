@@ -19,7 +19,8 @@ pub struct SearchResult {
 }
 
 /// Rank sessions against a query. Returns indices sorted by relevance (highest first).
-/// If a `SemanticPlugin` is provided and ready, semantic similarity boosts scores.
+/// If a `SemanticPlugin` is provided and ready, semantic similarity boosts scores
+/// using pre-computed cached embeddings (no embedding during search).
 pub fn ranked_search(
     sessions: &[Session],
     query: &str,
@@ -34,10 +35,16 @@ pub fn ranked_search(
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
-    // Pre-compute query embedding if semantic plugin is ready
-    let query_embedding = semantic
-        .filter(|s| s.is_ready())
-        .and_then(|s| s.embed(query));
+    // Tier 3: pre-compute semantic matches from cached embeddings
+    // Only one embed call (the query) — session vectors are already cached
+    let semantic_scores: HashMap<String, f32> = if query.len() >= 5 {
+        semantic
+            .filter(|s| s.is_ready())
+            .map(|s| s.search_cached(query, 0.4).into_iter().collect())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
 
     let mut results: Vec<SearchResult> = sessions
         .iter()
@@ -45,18 +52,10 @@ pub fn ranked_search(
         .filter_map(|(i, s)| {
             let mut score = score_session(s, &query_lower, &query_words);
 
-            // Tier 3: semantic boost (additive, never overrides keyword matches)
-            if let Some(ref q_emb) = query_embedding {
-                let sem = semantic.expect("checked above");
-                let session_text = format!("{} {}", s.title, s.summary);
-                if let Some(s_emb) = sem.embed(&session_text) {
-                    if let Some(sim) = sem.cosine(q_emb, &s_emb) {
-                        if sim > 0.4 {
-                            let boost = ((sim - 0.4) * 333.0).min(200.0) as u32;
-                            score = score.saturating_add(boost);
-                        }
-                    }
-                }
+            // Tier 3: semantic boost from cached vectors (instant lookup)
+            if let Some(&sim) = semantic_scores.get(&s.id) {
+                let boost = ((sim - 0.4) * 333.0).min(200.0) as u32;
+                score = score.saturating_add(boost);
             }
 
             if score > 0 { Some(SearchResult { index: i, score }) } else { None }
@@ -119,38 +118,66 @@ fn score_session(session: &Session, query: &str, query_words: &[&str]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Semantic search plugin (optional DLL) — future integration point
+// Semantic search plugin with embedding cache
 // ---------------------------------------------------------------------------
 
+use std::collections::HashMap;
+
 /// Status of the semantic search plugin.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SemanticStatus {
     /// Not available (DLL not found).
     Unavailable,
-    /// Loading model (first use).
-    Loading,
-    /// Ready for queries.
-    Ready,
+    /// DLL loaded, indexing session embeddings.
+    Indexing { done: usize, total: usize },
+    /// Embeddings computed and searchable.
+    Ready { count: usize },
     /// Failed to load.
     Failed(String),
 }
 
+/// Cached embedding entry: text hash + vector.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CachedEmbedding {
+    text_hash: u64,
+    vector: Vec<f32>,
+}
+
+/// Persistent embedding cache — JSON file on disk.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct EmbeddingCache {
+    entries: HashMap<String, CachedEmbedding>,
+}
+
+impl EmbeddingCache {
+    fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        if let Ok(json) = serde_json::to_string(self) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
+fn hash_text(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Semantic search plugin — loads a shared library at runtime.
-///
-/// The DLL must export these C functions:
-/// ```c
-/// int32_t semantic_init(const char* model_dir);
-/// int32_t semantic_embed(const char* text, float* out_vec, int32_t max_dim);
-/// int32_t semantic_embed_dim();
-/// ```
-///
-/// If the DLL is not present, all operations return gracefully.
-#[allow(dead_code)]
 pub struct SemanticPlugin {
     status: SemanticStatus,
-    lib: Option<libloading::Library>,
+    pub(crate) lib: Option<libloading::Library>,
     dim: i32,
+    cache: EmbeddingCache,
+    cache_path: Option<std::path::PathBuf>,
 }
 
 impl Default for SemanticPlugin {
@@ -165,6 +192,8 @@ impl SemanticPlugin {
             status: SemanticStatus::Unavailable,
             lib: None,
             dim: 0,
+            cache: EmbeddingCache::default(),
+            cache_path: None,
         }
     }
 
@@ -173,7 +202,7 @@ impl SemanticPlugin {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.status == SemanticStatus::Ready
+        matches!(self.status, SemanticStatus::Ready { .. })
     }
 
     /// Try to load the semantic search DLL from next to the executable.
@@ -202,7 +231,7 @@ impl SemanticPlugin {
         }
 
         crate::log::info(&format!("Loading semantic plugin: {:?}", dll_path));
-        self.status = SemanticStatus::Loading;
+        self.status = SemanticStatus::Indexing { done: 0, total: 0 };
 
         let lib = match unsafe { libloading::Library::new(&dll_path) } {
             Ok(l) => l,
@@ -257,8 +286,108 @@ impl SemanticPlugin {
 
         self.dim = dim;
         self.lib = Some(lib);
-        self.status = SemanticStatus::Ready;
-        crate::log::info(&format!("Semantic plugin ready (dim={})", dim));
+
+        // Load embedding cache from disk
+        let cache_file = std::path::PathBuf::from(cache_dir).join("embeddings_cache.json");
+        self.cache = EmbeddingCache::load(&cache_file);
+        self.cache_path = Some(cache_file);
+
+        let cached_count = self.cache.entries.len();
+        self.status = if cached_count > 0 {
+            SemanticStatus::Ready { count: cached_count }
+        } else {
+            SemanticStatus::Indexing { done: 0, total: 0 }
+        };
+        crate::log::info(&format!(
+            "Semantic plugin loaded (dim={}, cached={})",
+            dim, cached_count
+        ));
+    }
+
+    /// Index sessions: compute embeddings for new/changed sessions.
+    /// Only embeds sessions whose title+summary hash changed. Saves cache to disk.
+    /// Returns (newly_embedded, total_cached).
+    pub fn index_sessions(&mut self, sessions: &[Session]) -> (usize, usize) {
+        if self.lib.is_none() || self.dim <= 0 {
+            return (0, 0);
+        }
+
+        let total = sessions.len();
+        let mut newly_embedded = 0usize;
+
+        for (i, session) in sessions.iter().enumerate() {
+            let text = format!("{} {}", session.title, session.summary);
+            let text_hash = hash_text(&text);
+
+            // Skip if already cached with same hash
+            if let Some(cached) = self.cache.entries.get(&session.id) {
+                if cached.text_hash == text_hash {
+                    continue;
+                }
+            }
+
+            // Embed this session
+            if let Some(vec) = self.embed(&text) {
+                self.cache.entries.insert(
+                    session.id.clone(),
+                    CachedEmbedding {
+                        text_hash,
+                        vector: vec,
+                    },
+                );
+                newly_embedded += 1;
+
+                // Update status periodically
+                if newly_embedded.is_multiple_of(10) {
+                    self.status = SemanticStatus::Indexing {
+                        done: i + 1,
+                        total,
+                    };
+                }
+            }
+        }
+
+        let count = self.cache.entries.len();
+        self.status = SemanticStatus::Ready { count };
+
+        // Flush cache to disk (async-safe: write then rename would be better, but this works)
+        if newly_embedded > 0 {
+            if let Some(ref path) = self.cache_path {
+                self.cache.save(path);
+                crate::log::info(&format!(
+                    "Semantic index: {} new embeddings, {} total cached",
+                    newly_embedded, count
+                ));
+            }
+        }
+
+        (newly_embedded, count)
+    }
+
+    /// Search cached embeddings for sessions similar to the query.
+    /// Returns (session_id, cosine_similarity) pairs above the threshold.
+    pub fn search_cached(&self, query: &str, threshold: f32) -> Vec<(String, f32)> {
+        let query_vec = match self.embed(query) {
+            Some(v) => v,
+            None => return vec![],
+        };
+
+        let mut results: Vec<(String, f32)> = self
+            .cache
+            .entries
+            .iter()
+            .filter_map(|(id, cached)| {
+                let sim = cosine_similarity(&query_vec, &cached.vector);
+                if sim > threshold {
+                    Some((id.clone(), sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
     }
 
     /// Embed a single text string. Returns None if plugin not ready.
@@ -286,7 +415,8 @@ impl SemanticPlugin {
         }
     }
 
-    /// Compute cosine similarity between two embedding vectors.
+    /// Compute cosine similarity between two embedding vectors via DLL.
+    #[allow(dead_code)]
     pub fn cosine(&self, a: &[f32], b: &[f32]) -> Option<f32> {
         let lib = self.lib.as_ref()?;
         if a.len() != b.len() || a.is_empty() {
@@ -302,6 +432,20 @@ impl SemanticPlugin {
 
         if sim <= -2.0 { None } else { Some(sim) }
     }
+}
+
+/// Pure-Rust cosine similarity (no DLL needed — for cached vector search).
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a < 1e-10 || norm_b < 1e-10 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
 }
 
 #[allow(dead_code)]
