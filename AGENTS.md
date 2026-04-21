@@ -86,7 +86,7 @@ Config search order: next to exe → `%APPDATA%\agent-session-tui\config.toml` �
 ## How to Run Tests
 
 ```bash
-# Unit tests only (56 tests — runs on CI)
+# Unit tests only (100 tests — runs on CI)
 cargo test --lib
 
 # All tests including provider integration tests (needs real session data)

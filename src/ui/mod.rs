@@ -1110,6 +1110,559 @@ fn format_duration(d: chrono::Duration) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Unit tests — test UI logic with mock data (no terminal needed).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod ui_logic_tests {
+    use super::*;
+    use crate::models::*;
+    use std::path::PathBuf;
+
+    /// Build a mock session with configurable state axes.
+    fn mock_session(
+        id: &str,
+        title: &str,
+        summary: &str,
+        provider: &str,
+        process: ProcessState,
+        interaction: InteractionState,
+        persistence: PersistenceState,
+    ) -> Session {
+        Session {
+            id: id.into(),
+            provider_session_id: id.into(),
+            provider_name: provider.into(),
+            cwd: PathBuf::from("D:\\Demo"),
+            title: title.into(),
+            tab_title: None,
+            summary: summary.into(),
+            state: SessionState {
+                process,
+                interaction,
+                persistence,
+                health: HealthState::Clean,
+                confidence: Confidence::High,
+                reason: "mock".into(),
+            },
+            pid: if process == ProcessState::Running { Some(1234) } else { None },
+            created_at: "2025-01-15T10:00:00Z".into(),
+            updated_at: "2025-01-15T10:30:00Z".into(),
+            state_dir: None,
+        }
+    }
+
+    fn mock_running(id: &str, title: &str) -> Session {
+        mock_session(id, title, "doing work", "copilot",
+            ProcessState::Running, InteractionState::Busy, PersistenceState::Ephemeral)
+    }
+
+    fn mock_waiting(id: &str, title: &str) -> Session {
+        mock_session(id, title, "needs input", "copilot",
+            ProcessState::Running, InteractionState::WaitingInput, PersistenceState::Ephemeral)
+    }
+
+    fn mock_resumable(id: &str, title: &str) -> Session {
+        mock_session(id, title, "paused work", "copilot",
+            ProcessState::Exited, InteractionState::Idle, PersistenceState::Resumable)
+    }
+
+    fn make_app(sessions: Vec<Session>) -> App {
+        let mut app = App::new(vec!["copilot".into()], "copilot".into(), 100);
+        app.sessions = sessions;
+        app.initial_load_complete = true;
+        app.apply_filter();
+        app
+    }
+
+    // ── format_age / format_duration ─────────────────────────────────
+
+    #[test]
+    fn format_duration_seconds() {
+        let d = chrono::Duration::seconds(45);
+        assert_eq!(format_duration(d), "45s ago");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        let d = chrono::Duration::seconds(125);
+        assert_eq!(format_duration(d), "2m ago");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        let d = chrono::Duration::seconds(7200);
+        assert_eq!(format_duration(d), "2h ago");
+    }
+
+    #[test]
+    fn format_duration_days() {
+        let d = chrono::Duration::seconds(172800);
+        assert_eq!(format_duration(d), "2d ago");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        let d = chrono::Duration::seconds(0);
+        assert_eq!(format_duration(d), "0s ago");
+    }
+
+    #[test]
+    fn format_age_invalid_timestamp_returns_as_is() {
+        assert_eq!(format_age("not-a-date"), "not-a-date");
+    }
+
+    #[test]
+    fn format_age_naive_timestamp_parses() {
+        // Should parse and return a duration string (not the raw input)
+        let result = format_age("2020-01-01 00:00:00");
+        assert!(result.ends_with(" ago"), "expected duration, got: {}", result);
+    }
+
+    #[test]
+    fn format_age_rfc3339_parses() {
+        let result = format_age("2020-01-01T00:00:00Z");
+        assert!(result.ends_with(" ago"), "expected duration, got: {}", result);
+    }
+
+    // ── state_color ──────────────────────────────────────────────────
+
+    #[test]
+    fn state_color_running_waiting_is_yellow_bold() {
+        let state = SessionState {
+            process: ProcessState::Running,
+            interaction: InteractionState::WaitingInput,
+            ..SessionState::default()
+        };
+        let style = state_color(&state);
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn state_color_running_busy_is_green() {
+        let state = SessionState {
+            process: ProcessState::Running,
+            interaction: InteractionState::Busy,
+            ..SessionState::default()
+        };
+        assert_eq!(state_color(&state).fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn state_color_resumable_is_blue() {
+        let state = SessionState {
+            process: ProcessState::Exited,
+            persistence: PersistenceState::Resumable,
+            ..SessionState::default()
+        };
+        assert_eq!(state_color(&state).fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn state_color_ephemeral_is_dark_gray() {
+        let state = SessionState::default(); // Ephemeral + Missing
+        assert_eq!(state_color(&state).fg, Some(Color::DarkGray));
+    }
+
+    // ── App::new initial state ───────────────────────────────────────
+
+    #[test]
+    fn app_new_starts_empty() {
+        let app = App::new(vec!["copilot".into()], "copilot".into(), 100);
+        assert!(app.sessions.is_empty());
+        assert!(!app.search_active);
+        assert_eq!(app.selected_index, 0);
+        assert!(!app.should_quit);
+        assert!(!app.initial_load_complete);
+    }
+
+    // ── apply_filter ─────────────────────────────────────────────────
+
+    #[test]
+    fn apply_filter_empty_query_shows_all() {
+        let app = make_app(vec![
+            mock_running("1", "Fix auth"),
+            mock_waiting("2", "Add tests"),
+            mock_resumable("3", "Refactor UI"),
+        ]);
+        assert_eq!(app.filtered_indices.len(), 3);
+    }
+
+    #[test]
+    fn apply_filter_with_query_narrows_results() {
+        let mut app = make_app(vec![
+            mock_running("1", "Fix auth bug"),
+            mock_waiting("2", "Add search tests"),
+            mock_resumable("3", "Refactor UI layout"),
+        ]);
+        app.search_query = "auth".into();
+        app.apply_filter();
+        assert!(app.filtered_indices.len() < 3, "search should filter sessions");
+        // The "Fix auth bug" session should be in results
+        let view = app.current_view_sessions();
+        let matched: Vec<_> = app.filtered_indices.iter()
+            .map(|&i| view[i].title.as_str())
+            .collect();
+        assert!(matched.contains(&"Fix auth bug"), "auth session should match");
+    }
+
+    #[test]
+    fn apply_filter_no_match_returns_empty() {
+        let mut app = make_app(vec![
+            mock_running("1", "Fix auth"),
+            mock_waiting("2", "Add tests"),
+        ]);
+        app.search_query = "zzzznonexistent".into();
+        app.apply_filter();
+        assert_eq!(app.filtered_indices.len(), 0);
+    }
+
+    #[test]
+    fn apply_filter_resets_selection_to_zero() {
+        let mut app = make_app(vec![
+            mock_running("1", "A"),
+            mock_waiting("2", "B"),
+            mock_resumable("3", "C"),
+        ]);
+        app.selected_index = 2;
+        app.search_query = "A".into();
+        app.apply_filter();
+        assert_eq!(app.selected_index, 0, "filter should reset selection to top");
+    }
+
+    // ── Navigation ───────────────────────────────────────────────────
+
+    #[test]
+    fn navigate_down_increments_selection() {
+        let mut app = make_app(vec![
+            mock_running("1", "A"),
+            mock_waiting("2", "B"),
+            mock_resumable("3", "C"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.selected_index, 1);
+        assert!(app.user_navigated);
+    }
+
+    #[test]
+    fn navigate_up_at_top_stays_at_zero() {
+        let mut app = make_app(vec![
+            mock_running("1", "A"),
+            mock_waiting("2", "B"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn navigate_down_at_bottom_stays() {
+        let mut app = make_app(vec![
+            mock_running("1", "A"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.selected_index, 0, "can't go below last item");
+    }
+
+    #[test]
+    fn j_and_k_navigate_like_arrows() {
+        let mut app = make_app(vec![
+            mock_running("1", "A"),
+            mock_waiting("2", "B"),
+            mock_resumable("3", "C"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.selected_index, 1, "j should move down");
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.selected_index, 0, "k should move up");
+    }
+
+    // ── Search mode ──────────────────────────────────────────────────
+
+    #[test]
+    fn slash_enters_search_mode() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert!(!app.search_active);
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &tx);
+        assert!(app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+
+    #[test]
+    fn search_typing_updates_query() {
+        let mut app = make_app(vec![
+            mock_running("1", "Fix auth"),
+            mock_waiting("2", "Add tests"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), &tx);
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE), &tx);
+        assert_eq!(app.search_query, "au");
+    }
+
+    #[test]
+    fn search_backspace_removes_char() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.search_active = true;
+        app.search_query = "abc".into();
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &tx);
+        assert_eq!(app.search_query, "ab");
+    }
+
+    #[test]
+    fn search_esc_exits_and_clears() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.search_active = true;
+        app.search_query = "test".into();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &tx);
+        assert!(!app.search_active);
+        assert!(app.search_query.is_empty());
+    }
+
+    // ── Focus cycling ────────────────────────────────────────────────
+
+    #[test]
+    fn tab_cycles_focus_forward() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert_eq!(app.focus, Focus::SessionList);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+        assert_eq!(app.focus, Focus::Detail);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+        assert_eq!(app.focus, Focus::Logs);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
+        assert_eq!(app.focus, Focus::SessionList);
+    }
+
+    #[test]
+    fn backtab_in_detail_goes_to_session_list() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.focus = Focus::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.focus, Focus::SessionList);
+    }
+
+    // ── View mode toggle ─────────────────────────────────────────────
+
+    #[test]
+    fn shift_tab_toggles_view_mode() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        app.hidden_sessions = vec![mock_resumable("2", "Hidden")];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        assert_eq!(app.view_mode, ViewMode::Active);
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.view_mode, ViewMode::Hidden);
+        assert_eq!(app.filtered_indices.len(), 1, "should show hidden sessions");
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &tx);
+        assert_eq!(app.view_mode, ViewMode::Active);
+    }
+
+    // ── handle_enter dispatch ────────────────────────────────────────
+
+    #[test]
+    fn enter_on_running_with_tab_title_sends_focus() {
+        let mut session = mock_running("1", "Active task");
+        session.tab_title = Some("Fixing auth".into());
+        let mut app = make_app(vec![session]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        match rx.try_recv() {
+            Ok(SupervisorCommand::FocusSession { tab_title, .. }) => {
+                assert_eq!(tab_title, Some("Fixing auth".into()));
+            }
+            other => panic!("expected FocusSession, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enter_on_running_without_tab_title_shows_warning() {
+        let app_session = mock_running("1", "Active task");
+        let mut app = make_app(vec![app_session]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        // No command should be sent (tab_title is None)
+        assert!(rx.try_recv().is_err(), "no command when tab_title is None");
+        assert!(app.status_message.contains("not available"));
+    }
+
+    #[test]
+    fn enter_on_resumable_sends_resume() {
+        let mut app = make_app(vec![mock_resumable("1", "Paused task")]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        match rx.try_recv() {
+            Ok(SupervisorCommand::ResumeSession { provider_session_id, .. }) => {
+                assert_eq!(provider_session_id, "1");
+            }
+            other => panic!("expected ResumeSession, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enter_on_empty_list_does_nothing() {
+        let mut app = make_app(vec![]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(rx.try_recv().is_err(), "no command on empty list");
+    }
+
+    // ── Quit ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn q_sets_should_quit() {
+        let mut app = make_app(vec![]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &tx);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_sets_should_quit() {
+        let mut app = make_app(vec![]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &tx);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_in_search_mode_also_quits() {
+        let mut app = make_app(vec![]);
+        app.search_active = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &tx);
+        assert!(app.should_quit);
+    }
+
+    // ── Detail scroll ────────────────────────────────────────────────
+
+    #[test]
+    fn detail_scroll_up_down() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.focus = Focus::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 2);
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 1);
+    }
+
+    #[test]
+    fn detail_scroll_home_resets() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.focus = Focus::Detail;
+        app.detail_scroll = 50;
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[test]
+    fn detail_scroll_end_sets_max() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.focus = Focus::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, u16::MAX);
+    }
+
+    #[test]
+    fn detail_page_up_down() {
+        let mut app = make_app(vec![mock_running("1", "A")]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.focus = Focus::Detail;
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 20);
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 0);
+    }
+
+    // ── Log scroll ───────────────────────────────────────────────────
+
+    #[test]
+    fn log_scroll_respects_bounds() {
+        let mut app = make_app(vec![]);
+        app.focus = Focus::Logs;
+        app.log_lines = vec!["line1".into(), "line2".into(), "line3".into()];
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Can scroll down
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.log_scroll, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.log_scroll, 2);
+        // Can't scroll past end
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.log_scroll, 2, "should not scroll past last line");
+        // Can scroll back up
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
+        assert_eq!(app.log_scroll, 1);
+    }
+
+    // ── selected_session ─────────────────────────────────────────────
+
+    #[test]
+    fn selected_session_returns_correct_item() {
+        let app = make_app(vec![
+            mock_running("1", "First"),
+            mock_waiting("2", "Second"),
+        ]);
+        let s = app.selected_session().expect("should have selection");
+        assert_eq!(s.title, "First");
+    }
+
+    #[test]
+    fn selected_session_after_navigate() {
+        let mut app = make_app(vec![
+            mock_running("1", "First"),
+            mock_waiting("2", "Second"),
+            mock_resumable("3", "Third"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        let s = app.selected_session().expect("should have selection");
+        assert_eq!(s.title, "Second");
+    }
+
+    // ── Navigation resets detail scroll ──────────────────────────────
+
+    #[test]
+    fn navigate_resets_detail_scroll() {
+        let mut app = make_app(vec![
+            mock_running("1", "A"),
+            mock_waiting("2", "B"),
+        ]);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.detail_scroll = 10;
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
+        assert_eq!(app.detail_scroll, 0, "navigating should reset detail scroll");
+    }
+
+    // ── New session command ──────────────────────────────────────────
+
+    #[test]
+    fn n_key_sends_new_session() {
+        let mut app = make_app(vec![]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &tx);
+        match rx.try_recv() {
+            Ok(SupervisorCommand::NewSession { provider_key, .. }) => {
+                assert_eq!(provider_key, "copilot");
+            }
+            other => panic!("expected NewSession, got {:?}", other),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Regression tests — enforce UI invariants so future changes can't silently
 // break rendering or terminal cleanup.
 // These read the source file and assert critical patterns are present.
