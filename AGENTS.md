@@ -18,6 +18,7 @@ Read these before making changes. They are in `.github/instructions/`:
 | [`performance.instructions.md`](.github/instructions/performance.instructions.md) | `src/provider/**`, `src/supervisor/**`, `src/ui/**` | JSONL scanning, caching, render loop, release profile |
 | [`testing.instructions.md`](.github/instructions/testing.instructions.md) | `**/*.rs`, `tests/**` | Test categories, required provider tests, CI quality gates |
 | [`cross-platform.instructions.md`](.github/instructions/cross-platform.instructions.md) | `**/*.rs` | Path handling, process detection, terminal launch, Unix support |
+| [`tab-focus.instructions.md`](.github/instructions/tab-focus.instructions.md) | `src/focus/**/*.rs` | Windows UI Automation for finding & focusing terminal tabs via COM |
 
 ## Project Structure
 
@@ -85,7 +86,7 @@ Config search order: next to exe → `%APPDATA%\agent-session-tui\config.toml` �
 ## How to Run Tests
 
 ```bash
-# Unit tests only (34 tests — runs on CI)
+# Unit tests only (56 tests — runs on CI)
 cargo test --lib
 
 # All tests including provider integration tests (needs real session data)

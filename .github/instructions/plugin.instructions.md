@@ -97,11 +97,11 @@ This uses WMI on Windows (reliable) with sysinfo fallback.
 
 1. **Data only** — providers discover and interpret sessions. Launch/resume/kill are handled by the framework from `config.toml`.
 2. **Read-only** — never write to the agent CLI's state directory.
-2. **UTF-8 safe** — always use `util::truncate_str_safe()` for string truncation. Session data can contain any Unicode.
-3. **Skip empty sessions** — filter out sessions with no user interaction during discovery.
-4. **File mtime for "last activity"** — don't rely on timestamps inside files. Use the file's modification time as the real-time activity indicator.
-5. **Log diagnostics** — use `crate::log::info/warn/error()` for troubleshooting. Log file is next to the exe.
-6. **Graceful degradation** — if a session file is corrupt or unreadable, skip it and continue. Never crash the TUI.
+3. **UTF-8 safe** — always use `util::truncate_str_safe()` for string truncation. Session data can contain any Unicode.
+4. **Skip empty sessions** — filter out sessions with no user interaction during discovery.
+5. **File mtime for "last activity"** — don't rely on timestamps inside files. Use the file's modification time as the real-time activity indicator.
+6. **Log diagnostics** — use `crate::log::info/warn/error()` for troubleshooting. Log file is next to the exe.
+7. **Graceful degradation** — if a session file is corrupt or unreadable, skip it and continue. Never crash the TUI.
 
 ## Tab Title Extraction (Optional)
 
@@ -129,10 +129,10 @@ Some agent CLIs dynamically set the terminal tab title to reflect their current 
 fn tab_title(&self, session: &Session) -> Option<String> {
     let dir = session.state_dir.as_ref()?;
     let path = dir.join("events.jsonl");
-    // Tail-read: seek to last 32KB, not read_to_string on multi-MB file
+    // Tail-read: seek to last 512KB, not read_to_string on multi-MB file
     let file = std::fs::File::open(&path).ok()?;
     let len = file.metadata().ok()?.len();
-    let tail_start = len.saturating_sub(32 * 1024);
+    let tail_start = len.saturating_sub(512 * 1024);
     let mut reader = std::io::BufReader::new(file);
     std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(tail_start)).ok()?;
     let mut latest_intent: Option<String> = None;
@@ -256,8 +256,8 @@ Each CLI stores its last meaningful assistant response differently. Use these pa
 |----------|-------|--------|
 | Copilot CLI | `events.jsonl` | `assistant.message` content field; check `toolRequests` array for `task_complete` entries with `result.summary` |
 | Claude Code | `<session>.jsonl` | `message.content[]` — array of text blocks, concatenate `.text` fields |
-| Codex CLI | `rollout-*.jsonl` | `payload.content[]` — filter for `type: "output_text"`, read `.text` |
+| Codex CLI | `rollout-*.jsonl` | `payload.content[]` — filter `response_item` records with `type: "message"`, flatten content array |
 | Gemini CLI | `session-*.jsonl` | `content` field directly on the response object |
 | Qwen CLI | `<session>.jsonl` | `message.parts[].text` — array of text parts |
 
-**Copilot `task_complete` pattern:** The Copilot CLI signals task completion via a `task_complete` tool call in the `toolRequests` array of an assistant turn. Extract `arguments.result.summary` for a one-line task summary. This is more reliable than parsing the full assistant message.
+**Copilot `task_complete` pattern:** The Copilot CLI signals task completion via a `task_complete` tool call in the `toolRequests` array of an assistant turn. Extract `arguments.summary` for a one-line task summary. This is more reliable than parsing the full assistant message.
