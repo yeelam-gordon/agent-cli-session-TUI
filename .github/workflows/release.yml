@@ -16,16 +16,8 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: agent-session-tui.exe
             archive_ext: zip
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            artifact: agent-session-tui.exe
-            archive_ext: zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: agent-session-tui
-            archive_ext: tar.gz
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
             artifact: agent-session-tui
             archive_ext: tar.gz
           - os: macos-latest
@@ -42,7 +34,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
+    - name: Install MSVC toolchain (Windows)
+      if: runner.os == 'Windows'
+      run: rustup default stable-x86_64-pc-windows-msvc
+
+    - name: Install Rust target
       run: rustup target add ${{ matrix.target }}
 
     - name: Build release
@@ -55,7 +51,7 @@ jobs:
         cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
         cp config.toml.example dist/
         cp README.md dist/
-        if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
+        if [ "${{ runner.os }}" != "Windows" ]; then
           chmod +x dist/${{ matrix.artifact }}
         fi
 
@@ -82,18 +78,8 @@ jobs:
             core_artifact: agent-session-tui.exe
             dll_artifact: semantic_search_plugin.dll
             archive_ext: zip
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            core_artifact: agent-session-tui.exe
-            dll_artifact: semantic_search_plugin.dll
-            archive_ext: zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            core_artifact: agent-session-tui
-            dll_artifact: libsemantic_search_plugin.so
-            archive_ext: tar.gz
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
             core_artifact: agent-session-tui
             dll_artifact: libsemantic_search_plugin.so
             archive_ext: tar.gz
@@ -113,7 +99,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
+    - name: Install MSVC toolchain (Windows)
+      if: runner.os == 'Windows'
+      run: rustup default stable-x86_64-pc-windows-msvc
+
+    - name: Install Rust target
       run: rustup target add ${{ matrix.target }}
 
     - name: Build core
@@ -131,7 +121,7 @@ jobs:
         cp semantic-plugin/target/${{ matrix.target }}/release/${{ matrix.dll_artifact }} dist/
         cp config.toml.example dist/
         cp README.md dist/
-        if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
+        if [ "${{ runner.os }}" != "Windows" ]; then
           chmod +x dist/${{ matrix.core_artifact }}
         fi
 

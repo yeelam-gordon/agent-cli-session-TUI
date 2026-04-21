@@ -19,6 +19,10 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Install MSVC toolchain (Windows)
+      if: matrix.os == 'windows-latest'
+      run: rustup default stable-x86_64-pc-windows-msvc
+
     - name: Clippy
       run: cargo clippy -- -D warnings
 
