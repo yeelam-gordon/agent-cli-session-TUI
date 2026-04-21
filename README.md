@@ -35,18 +35,17 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 
 No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh (non-blocking — `AtomicBool` scan guard prevents overlapping scans). The `SessionViewModel` merges results incrementally per-provider for progressive loading. The only file we write is `archived.json` for tracking hidden sessions.
 
-### Multi-Axis State Model
+### Session States
 
-Sessions are tracked across four independent axes:
+At a glance, every session shows one of three states:
 
-| Axis | Values |
-|------|--------|
-| **Process** | Running · Exited · Missing · StaleLock |
-| **Interaction** | Busy · WaitingInput · Idle · Unknown |
-| **Persistence** | Resumable · Ephemeral · Archived |
-| **Health** | Clean · Crashed · Orphaned |
+| Badge | State | Meaning |
+|-------|-------|---------|
+| 🟢 | **Running** | Agent is actively working |
+| 🟡 | **Waiting** | Agent finished — waiting for your input |
+| 💤 | **Resumable** | Session stopped — can be resumed anytime |
 
-Internally tracked for diagnostics; user-facing states are simplified to just: 🟢 Running, 🟡 Waiting, 💤 Resumable.
+Press `Enter` on Running/Waiting to jump to its terminal tab. Press `Enter` on Resumable to relaunch it.
 
 ## Keybindings
 
