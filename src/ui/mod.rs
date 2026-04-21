@@ -127,14 +127,14 @@ impl App {
     /// Rebuild the filtered indices based on the search query.
     /// Uses tiered ranking: exact → fuzzy → semantic (from cached embeddings).
     fn apply_filter(&mut self) {
-        self.semantic_matches.clear();
-
         let query = self.search_query.clone();
         if query.is_empty() {
+            self.semantic_matches.clear();
             let len = self.current_view_sessions().len();
             self.filtered_indices = (0..len).collect();
         } else {
             // try_lock: skip semantic if indexer holds the lock (never block UI)
+            // Keep previous semantic_matches if lock unavailable (avoids sparkle flicker)
             let sem = if query.len() >= 5 {
                 self.semantic.try_lock().ok()
             } else {
@@ -143,17 +143,20 @@ impl App {
             let sem_ref = sem.as_deref();
             let view = self.current_view_sessions();
             let results = crate::search::ranked_search(view, &query, sem_ref);
-            for r in &results {
-                if r.semantic_match {
-                    self.semantic_matches.insert(r.index);
+            // Only update semantic matches if we actually ran semantic search
+            if sem_ref.is_some() {
+                self.semantic_matches.clear();
+                for r in &results {
+                    if r.semantic_match {
+                        self.semantic_matches.insert(r.index);
+                    }
                 }
             }
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
-        if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {
-            self.selected_index = 0;
-        }
-        self.list_state.select(Some(self.selected_index));
+        // Always select the top result after filtering
+        self.selected_index = 0;
+        self.list_state.select(Some(0));
     }
 
     pub async fn run(
@@ -227,16 +230,22 @@ impl App {
                         let active_count = active.len();
                         let hidden_count = hidden.len();
 
-                        // Preserve selection
-                        let prev_selected_id = self
-                            .selected_session()
-                            .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
+                        // Preserve selection only if user has interacted
+                        let prev_selected_id = if self.selected_index > 0 || self.search_active {
+                            self.selected_session()
+                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
+                        } else {
+                            None
+                        };
 
                         self.sessions = active;
                         self.hidden_sessions = hidden;
+
+                        // Track if the top session changed (for detail pane scroll reset)
+                        let prev_top_id = prev_selected_id.clone();
                         self.apply_filter();
 
-                        // Restore selection
+                        // Restore selection only if user had navigated
                         if let Some((prev_provider, prev_id)) = prev_selected_id {
                             let view = self.current_view_sessions();
                             if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
@@ -246,6 +255,14 @@ impl App {
                                 self.selected_index = pos;
                                 self.list_state.select(Some(pos));
                             }
+                        }
+
+                        // Reset detail scroll if the selected session changed
+                        let new_top_id = self
+                            .selected_session()
+                            .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
+                        if new_top_id != prev_top_id {
+                            self.detail_scroll = 0;
                         }
 
                         let now = chrono::Local::now().format("%H:%M:%S");
