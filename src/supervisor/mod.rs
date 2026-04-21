@@ -126,14 +126,20 @@ impl Supervisor {
             .filter(|p| p.capabilities().supports_discovery)
             .collect();
 
-        // Scan all providers in parallel
-        let results: Vec<Vec<Session>> = std::thread::scope(|s| {
-            let handles: Vec<_> = providers.iter().map(|provider| {
+        let archive = self.archive.lock().ok();
+        let mut all_active: Vec<Session> = Vec::new();
+        let mut all_hidden: Vec<Session> = Vec::new();
+
+        // Scan providers in parallel, sending progressive updates as each completes
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel::<Vec<Session>>();
+
+            for provider in &providers {
+                let tx = tx.clone();
                 s.spawn(move || {
                     let pstart = std::time::Instant::now();
                     let mut sessions = provider.discover_sessions().unwrap_or_default();
                     let _ = provider.match_processes(&mut sessions);
-                    // Extract tab titles for running sessions
                     for session in &mut sessions {
                         if session.state.process == crate::models::ProcessState::Running {
                             let tt_start = std::time::Instant::now();
@@ -151,36 +157,35 @@ impl Supervisor {
                         "Provider '{}' scan: {} sessions in {:?}",
                         provider.key(), sessions.len(), pstart.elapsed()
                     ));
-                    sessions
-                })
-            }).collect();
-            handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
-        });
-
-        let mut active_sessions = Vec::new();
-        let mut hidden_sessions = Vec::new();
-        let archive = self.archive.lock().ok();
-
-        for sessions in results {
-            for s in sessions {
-                let is_archived = archive
-                    .as_ref()
-                    .map(|a| a.is_archived(&s.provider_name, &s.provider_session_id))
-                    .unwrap_or(false);
-                if is_archived {
-                    hidden_sessions.push(s);
-                } else {
-                    active_sessions.push(s);
-                }
+                    let _ = tx.send(sessions);
+                });
             }
-        }
+            drop(tx); // Close sender so rx iterator ends when all threads finish
 
-        active_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        hidden_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
-            active: active_sessions,
-            hidden: hidden_sessions,
+            // Process results as each provider completes — send progressive updates
+            for sessions in rx {
+                for s in sessions {
+                    let is_archived = archive
+                        .as_ref()
+                        .map(|a| a.is_archived(&s.provider_name, &s.provider_session_id))
+                        .unwrap_or(false);
+                    if is_archived {
+                        all_hidden.push(s);
+                    } else {
+                        all_active.push(s);
+                    }
+                }
+
+                // Sort and send partial update — UI renders immediately
+                all_active.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                all_hidden.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
+                    active: all_active.clone(),
+                    hidden: all_hidden.clone(),
+                });
+            }
         });
+
         Ok(())
     }
 
