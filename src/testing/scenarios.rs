@@ -195,7 +195,6 @@ pub fn graceful(r: &mut TestRunner, p: &dyn Provider) {
 pub fn launch(r: &mut TestRunner, p: &dyn Provider, config: &crate::config::ProviderConfig) {
     println!("\n▸ LAUNCH — start session, poll for Running→Busy→Waiting");
 
-    let cwd = std::env::current_dir().unwrap_or_default();
     let mut cmd = vec![config.command.clone()];
     cmd.extend(config.default_args.iter().cloned());
     r.record(
@@ -215,6 +214,7 @@ pub fn launch(r: &mut TestRunner, p: &dyn Provider, config: &crate::config::Prov
     println!("    Launching: {}", cmd.join(" "));
     #[cfg(windows)]
     {
+        let cwd = std::env::current_dir().unwrap_or_default();
         let cmd_str = cmd.join(" ");
         let _ = std::process::Command::new("wt")
             .args([
