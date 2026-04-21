@@ -16,8 +16,16 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: agent-session-tui.exe
             archive_ext: zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: agent-session-tui.exe
+            archive_ext: zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            artifact: agent-session-tui
+            archive_ext: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
             artifact: agent-session-tui
             archive_ext: tar.gz
           - os: macos-latest
@@ -37,6 +45,14 @@ jobs:
     - name: Install MSVC toolchain (Windows)
       if: runner.os == 'Windows'
       run: rustup default stable-x86_64-pc-windows-msvc
+
+    - name: Install cross-compiler (Linux arm64)
+      if: matrix.target == 'aarch64-unknown-linux-gnu'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+        echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
     - name: Install Rust target
       run: rustup target add ${{ matrix.target }}
