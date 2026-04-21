@@ -523,23 +523,14 @@ impl CopilotProvider {
                 }
 
                 if event_type == "assistant.message" {
-                    // Resolve effective message for this assistant event
                     let mut effective_msg: Option<String> = None;
-
-                    // Check direct content field
-                    if let Some(msg) = val
+                    let has_tool_requests = val
                         .get("data")
-                        .and_then(|d| d.get("content"))
-                        .and_then(|v| v.as_str())
-                    {
-                        let trimmed = msg.trim();
-                        if !trimmed.is_empty() {
-                            effective_msg = Some(trimmed.to_string());
-                        }
-                    }
+                        .and_then(|d| d.get("toolRequests"))
+                        .and_then(|r| r.as_array())
+                        .is_some_and(|arr| !arr.is_empty());
 
-                    // Check for task_complete summary in toolRequests
-                    // (the real result — content field is often just "Task complete.")
+                    // Check for task_complete summary (always the most meaningful)
                     if let Some(requests) = val
                         .get("data")
                         .and_then(|d| d.get("toolRequests"))
@@ -557,6 +548,26 @@ impl CopilotProvider {
                                         effective_msg = Some(trimmed.to_string());
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Check direct content — only if it's a real response to the user
+                    // (skip tool dispatch messages that have toolRequests + brief content)
+                    if effective_msg.is_none() {
+                        if let Some(msg) = val
+                            .get("data")
+                            .and_then(|d| d.get("content"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let trimmed = msg.trim();
+                            // Only treat as a real response if:
+                            // - No tool requests (pure text response), OR
+                            // - Content is substantial (>100 chars, not just a brief status)
+                            if !trimmed.is_empty()
+                                && (!has_tool_requests || trimmed.len() > 100)
+                            {
+                                effective_msg = Some(trimmed.to_string());
                             }
                         }
                     }
