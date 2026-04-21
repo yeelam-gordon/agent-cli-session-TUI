@@ -75,23 +75,37 @@ impl Supervisor {
         event_tx: mpsc::UnboundedSender<SupervisorEvent>,
         mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
     ) {
-        // Initial scan
+        // Initial scan (blocking — UI shows progressive results via try_recv)
         if let Err(e) = self.scan_and_notify(&event_tx) {
             crate::log::error(&format!("Initial scan failed: {}", e));
             let _ = event_tx.send(SupervisorEvent::Error(e.to_string()));
         }
 
         let mut interval = tokio::time::interval(self.poll_interval);
+        let scanning = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let scan_start = std::time::Instant::now();
-                    if let Err(e) = self.scan_and_notify(&event_tx) {
-                        crate::log::warn(&format!("Scan error: {}", e));
-                        let _ = event_tx.send(SupervisorEvent::Error(e.to_string()));
+                    // Skip if a scan is already running in background
+                    if scanning.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
                     }
-                    crate::log::info(&format!("Scan cycle: {:?}", scan_start.elapsed()));
+                    // Run scan in background thread so commands aren't blocked
+                    let registry = self.registry.clone();
+                    let archive = self.archive.clone();
+                    let tx = event_tx.clone();
+                    let scan_flag = scanning.clone();
+                    scan_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let scan_start = std::time::Instant::now();
+                        if let Err(e) = Self::scan_providers(&registry, &archive, &tx) {
+                            crate::log::warn(&format!("Scan error: {}", e));
+                            let _ = tx.send(SupervisorEvent::Error(e.to_string()));
+                        }
+                        crate::log::info(&format!("Scan cycle: {:?}", scan_start.elapsed()));
+                        scan_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                    });
                 }
                 Some(cmd) = cmd_rx.recv() => {
                     let cmd_start = std::time::Instant::now();
@@ -108,7 +122,13 @@ impl Supervisor {
                         }
                         SupervisorCommand::ArchiveSession { provider_session_id, provider_key } => {
                             self.handle_archive(&provider_key, &provider_session_id, &event_tx);
-                            let _ = self.scan_and_notify(&event_tx);
+                            // Trigger an immediate background scan
+                            let registry = self.registry.clone();
+                            let archive_c = self.archive.clone();
+                            let tx = event_tx.clone();
+                            std::thread::spawn(move || {
+                                let _ = Self::scan_providers(&registry, &archive_c, &tx);
+                            });
                         }
                         SupervisorCommand::FocusSession { tab_title, title, provider_session_id } => {
                             crate::log::info(&format!("FocusSession cmd received after {:?}", cmd_start.elapsed()));
@@ -122,11 +142,20 @@ impl Supervisor {
     }
 
     fn scan_and_notify(&self, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
-        let providers: Vec<_> = self.registry.providers().iter()
+        Self::scan_providers(&self.registry, &self.archive, event_tx)
+    }
+
+    /// Static scan function — can run on any thread without borrowing &self.
+    fn scan_providers(
+        registry: &Arc<ProviderRegistry>,
+        archive: &Arc<Mutex<ArchiveStore>>,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+    ) -> Result<()> {
+        let providers: Vec<_> = registry.providers().iter()
             .filter(|p| p.capabilities().supports_discovery)
             .collect();
 
-        let archive = self.archive.lock().ok();
+        let archive = archive.lock().ok();
         let mut all_active: Vec<Session> = Vec::new();
         let mut all_hidden: Vec<Session> = Vec::new();
 
