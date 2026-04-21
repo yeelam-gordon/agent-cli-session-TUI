@@ -5,7 +5,7 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 
 ## Pain Points Solved
 
-- **Where is my running agent?** — press `Enter` on any 🟡 Waiting or 🟢 Running session to instantly focus its terminal tab (native Windows UI Automation — sub-second, no PowerShell)
+- **Where is my running agent?** — press `Enter` on any 🟡 Waiting or 🟢 Running session to instantly focus its terminal tab
 - **Too many tabs** — see all sessions in one view with clear status badges
 - **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
 - **Finding that one session** — `/` to search with tiered ranking: exact match → fuzzy word match → ✨ semantic similarity (optional). Results ranked by relevance, not just recency
