@@ -105,10 +105,13 @@ launch_method = "wt"
 For full control over launch commands, use custom launcher fields:
 
 ```toml
+# Windows — open in a new Windows Terminal tab
 launch_cmd = "wt"
 launch_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k", "{command}"]
-launch_fallback_cmd = "cmd"
-launch_fallback_args = ["/k", "{command}"]
+
+# Linux/macOS — open in a new tmux window
+# launch_cmd = "tmux"
+# launch_args = ["new-window", "-c", "{cwd}", "{command}"]
 ```
 
 Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI command.
