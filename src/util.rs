@@ -10,6 +10,19 @@ pub fn truncate_str_safe(s: &str, max_bytes: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// Get the first N characters of a string, safe for multi-byte.
+/// Returns a slice (no allocation) for ASCII, owned String for multi-byte.
+pub fn short_id(s: &str, max_chars: usize) -> &str {
+    if s.len() <= max_chars {
+        return s;
+    }
+    let mut end = max_chars;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

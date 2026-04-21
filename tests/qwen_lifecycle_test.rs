@@ -14,6 +14,11 @@ fn qwen_lifecycle() {
         resume_flag: Some("--resume".into()),
         startup_dir: None,
         launch_method: "wt".into(),
+        launch_cmd: None,
+        launch_args: None,
+        launch_fallback_cmd: None,
+        launch_fallback_args: None,
+        launch_fallback: None,
         wt_profile: None,
     };
     let provider = QwenProvider::new(&pc);

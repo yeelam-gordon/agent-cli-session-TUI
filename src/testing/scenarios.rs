@@ -30,7 +30,7 @@ pub fn discover(r: &mut TestRunner, p: &dyn Provider) {
                 println!(
                     "    {} {} — {}",
                     s.state.badge(),
-                    &s.provider_session_id[..8.min(s.provider_session_id.len())],
+                    crate::util::short_id(&s.provider_session_id, 8),
                     trunc(&s.title, 50)
                 );
             }
@@ -86,7 +86,7 @@ pub fn discover(r: &mut TestRunner, p: &dyn Provider) {
             "    {} {} {} [{:?}] PID={:?} — {}",
             s.state.badge(),
             s.state.label(),
-            &s.provider_session_id[..8.min(s.provider_session_id.len())],
+            crate::util::short_id(&s.provider_session_id, 8),
             s.state.confidence,
             s.pid,
             trunc(&s.title, 40)
@@ -151,7 +151,7 @@ pub fn graceful(r: &mut TestRunner, p: &dyn Provider) {
         println!(
             "    {} {} — {}",
             s.state.badge(),
-            &s.provider_session_id[..8.min(s.provider_session_id.len())],
+            crate::util::short_id(&s.provider_session_id, 8),
             trunc(&s.title, 40)
         );
     }
@@ -201,7 +201,7 @@ pub fn launch(r: &mut TestRunner, p: &dyn Provider, config: &crate::config::Prov
     r.record(
         "build_command",
         true,
-        &format!("{}", cmd.join(" ")),
+        &cmd.join(" ").to_string(),
         Duration::ZERO,
     );
 
@@ -342,7 +342,7 @@ pub fn kill(r: &mut TestRunner, p: &dyn Provider) {
     let sid = s.provider_session_id.clone();
     println!(
         "    Target: {} PID={} — {}",
-        &sid[..8.min(sid.len())],
+        crate::util::short_id(&sid, 8),
         pid,
         trunc(&s.title, 40)
     );

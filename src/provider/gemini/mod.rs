@@ -98,13 +98,12 @@ impl GeminiProvider {
                     }
                 }
 
-                if event_type == "user" {
-                    if first_user_msg.is_none() {
+                if event_type == "user"
+                    && first_user_msg.is_none() {
                         if let Some(content) = Self::extract_content_text(&val) {
                             first_user_msg = Some(truncate_str_safe(&content, 300));
                         }
                     }
-                }
 
                 if event_type == "gemini" {
                     if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
@@ -175,7 +174,7 @@ impl GeminiProvider {
         if let Ok(entries) = std::fs::read_dir(chats_dir) {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
-                if name.ends_with(".jsonl") && name.contains(&session_id[..8.min(session_id.len())]) {
+                if name.ends_with(".jsonl") && name.contains(crate::util::short_id(session_id, 8)) {
                     if let Ok(meta) = e.metadata() {
                         if let Ok(mtime) = meta.modified() {
                             candidates.push((e.path(), mtime));
@@ -325,7 +324,7 @@ impl Provider for GeminiProvider {
 
                 let title = scan.first_user_msg.as_ref()
                     .map(|m| truncate_str_safe(m.lines().next().unwrap_or(m), 60))
-                    .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
+                    .unwrap_or_else(|| crate::util::short_id(session_id, 8).to_string());
 
                 // Set interaction state from JSONL scan
                 let interaction = if scan.waiting_for_user {

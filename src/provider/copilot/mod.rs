@@ -399,7 +399,7 @@ impl Provider for CopilotProvider {
 
             // Skip sessions with zero user interaction
             let ws_summary = workspace.as_ref().and_then(|w| w.summary.as_ref());
-            let has_ws_content = ws_summary.map_or(false, |s| !s.is_empty());
+            let has_ws_content = ws_summary.is_some_and(|s| !s.is_empty());
             let has_turns = first_message.is_some();
             let has_plan = plan_items.is_some();
 
@@ -445,9 +445,9 @@ impl Provider for CopilotProvider {
                     .find(|i| !i.done)
                     .or(items.last())
                     .map(|i| i.title.clone())
-                    .unwrap_or_else(|| dir_name[..8.min(dir_name.len())].to_string())
+                    .unwrap_or_else(|| crate::util::short_id(&dir_name, 8).to_string())
             } else {
-                dir_name[..8.min(dir_name.len())].to_string()
+                crate::util::short_id(&dir_name, 8).to_string()
             };
 
             // CWD from workspace.yaml

@@ -147,7 +147,7 @@ fn default_state_inference(s: &StateSignals) -> SessionState {
     let health = match process {
         ProcessState::StaleLock => HealthState::Orphaned,
         ProcessState::Exited => {
-            if s.last_event_age_secs.map_or(false, |a| a < 5) {
+            if s.last_event_age_secs.is_some_and(|a| a < 5) {
                 HealthState::Crashed
             } else {
                 HealthState::Clean
@@ -187,6 +187,12 @@ fn default_state_inference(s: &StateSignals) -> SessionState {
 
 pub struct ProviderRegistry {
     providers: Vec<Box<dyn Provider>>,
+}
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProviderRegistry {

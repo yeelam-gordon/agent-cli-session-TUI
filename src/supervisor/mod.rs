@@ -368,7 +368,7 @@ fn launch_with_shortcut(
                 {
                     Ok(_) => Ok(()),
                     Err(_) if fallback.is_some() => {
-                        let fb = fallback.unwrap();
+                        let fb = fallback.expect("checked is_some above");
                         crate::log::warn(&format!("pwsh not found, falling back to {}", fb));
                         launch_with_shortcut(cmd_str, cwd, fb, None, None)
                     }

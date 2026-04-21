@@ -155,14 +155,11 @@ impl App {
 
             // Handle events (non-blocking with timeout)
             if event::poll(tick_rate)? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        // Only handle Press to avoid double/triple on Windows
-                        if key.kind == KeyEventKind::Press {
-                            self.handle_key(key, &cmd_tx);
-                        }
+                if let Event::Key(key) = event::read()? {
+                    // Only handle Press to avoid double/triple on Windows
+                    if key.kind == KeyEventKind::Press {
+                        self.handle_key(key, &cmd_tx);
                     }
-                    _ => {}
                 }
             }
 
@@ -279,11 +276,11 @@ impl App {
                         });
                         self.status_message = format!(
                             "▶ Resuming: {} ({})",
-                            title, &psid[..8.min(psid.len())]
+                            title, crate::util::short_id(&psid, 8)
                         );
                         self.log_lines.push(format!(
                             "Resuming: {} ({})",
-                            title, &psid[..8.min(psid.len())]
+                            title, crate::util::short_id(&psid, 8)
                         ));
                     }
                 }
@@ -381,12 +378,12 @@ impl App {
                         self.status_message = format!(
                             "▶ Resuming: {} ({})",
                             title,
-                            &psid[..8.min(psid.len())]
+                            crate::util::short_id(&psid, 8)
                         );
                         self.log_lines.push(format!(
                             "Resuming: {} ({})",
                             title,
-                            &psid[..8.min(psid.len())]
+                            crate::util::short_id(&psid, 8)
                         ));
                     }
                 }
@@ -412,7 +409,7 @@ impl App {
                             }
                         }
                         self.log_lines
-                            .push(format!("Archived: {}", &psid[..8.min(psid.len())]));
+                            .push(format!("Archived: {}", crate::util::short_id(&psid, 8)));
                     }
                 }
                 KeyCode::BackTab => {
@@ -525,7 +522,7 @@ impl App {
                 let s = &self.current_view_sessions()[session_idx];
                 let badge = s.state.badge();
                 let age = format_age(&s.updated_at);
-                let short_id = &s.provider_session_id[..8.min(s.provider_session_id.len())];
+                let short_id = crate::util::short_id(&s.provider_session_id, 8);
 
                 let title_display = if s.title.is_empty() {
                     short_id.to_string()

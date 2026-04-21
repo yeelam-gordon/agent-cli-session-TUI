@@ -225,7 +225,7 @@ impl Provider for QwenProvider {
 
                 let title = scan.first_user_msg.as_ref()
                     .map(|m| truncate_str_safe(m.lines().next().unwrap_or(m), 60))
-                    .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
+                    .unwrap_or_else(|| crate::util::short_id(&session_id, 8).to_string());
 
                 // Set interaction state from JSONL scan
                 let interaction = if scan.waiting_for_user {

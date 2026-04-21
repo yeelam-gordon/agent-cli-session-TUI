@@ -358,7 +358,7 @@ impl Provider for ClaudeProvider {
                         let short = m.lines().next().unwrap_or(m);
                         truncate_str_safe(short, 60)
                     })
-                    .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
+                    .unwrap_or_else(|| crate::util::short_id(&session_id, 8).to_string());
 
                 sessions.push(Session {
                     id: format!("claude_{}_{}", proj_name, session_id),
