@@ -105,7 +105,7 @@ impl App {
         if self.search_query.is_empty() {
             self.filtered_indices = (0..view.len()).collect();
         } else {
-            let results = crate::search::ranked_search(view, &self.search_query);
+            let results = crate::search::ranked_search(view, &self.search_query, None);
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
         if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {

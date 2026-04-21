@@ -9,3 +9,6 @@ sessions.json
 # Agent tool settings (local permissions)
 .qwen/
 .claude/
+
+semantic-plugin/target/
+semantic-plugin/Cargo.lock
