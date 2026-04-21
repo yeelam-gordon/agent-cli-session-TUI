@@ -208,7 +208,6 @@ impl App {
                 match ev {
                     SupervisorEvent::SessionsUpdated { mut active, mut hidden } => {
                         // Filter out sessions that were just archived locally
-                        // (supervisor may not have processed the command yet)
                         if !self.pending_archives.is_empty() {
                             let mut moved = Vec::new();
                             active.retain(|s| {
@@ -221,7 +220,6 @@ impl App {
                                 }
                             });
                             hidden.extend(moved);
-                            // Clear pending once supervisor confirms (session is in hidden list)
                             self.pending_archives.retain(|k| {
                                 !hidden.iter().any(|s| format!("{}:{}", s.provider_name, s.provider_session_id) == *k)
                             });
@@ -230,39 +228,60 @@ impl App {
                         let active_count = active.len();
                         let hidden_count = hidden.len();
 
-                        // Preserve selection only if user has interacted
-                        let prev_selected_id = if self.selected_index > 0 || self.search_active {
-                            self.selected_session()
-                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
-                        } else {
-                            None
-                        };
+                        // Check if data actually changed (avoid needless re-filter + selection reset)
+                        let data_changed = active.len() != self.sessions.len()
+                            || active.iter().zip(self.sessions.iter()).any(|(new, old)| {
+                                new.id != old.id
+                                    || new.state != old.state
+                                    || new.title != old.title
+                                    || new.tab_title != old.tab_title
+                                    || new.updated_at != old.updated_at
+                            });
 
-                        self.sessions = active;
-                        self.hidden_sessions = hidden;
+                        if data_changed {
+                            // Preserve selection if user has interacted
+                            let prev_selected_id = if self.selected_index > 0 || self.search_active {
+                                self.selected_session()
+                                    .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
+                            } else {
+                                None
+                            };
+                            let prev_top_id = prev_selected_id.clone();
 
-                        // Track if the top session changed (for detail pane scroll reset)
-                        let prev_top_id = prev_selected_id.clone();
-                        self.apply_filter();
+                            self.sessions = active;
+                            self.hidden_sessions = hidden;
+                            self.apply_filter();
 
-                        // Restore selection only if user had navigated
-                        if let Some((prev_provider, prev_id)) = prev_selected_id {
-                            let view = self.current_view_sessions();
-                            if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
-                                let s = &view[idx];
-                                s.provider_name == prev_provider && s.provider_session_id == prev_id
-                            }) {
-                                self.selected_index = pos;
-                                self.list_state.select(Some(pos));
+                            // Restore selection
+                            if let Some((prev_provider, prev_id)) = prev_selected_id {
+                                let view = self.current_view_sessions();
+                                if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
+                                    let s = &view[idx];
+                                    s.provider_name == prev_provider && s.provider_session_id == prev_id
+                                }) {
+                                    self.selected_index = pos;
+                                    self.list_state.select(Some(pos));
+                                }
                             }
-                        }
 
-                        // Reset detail scroll if the selected session changed
-                        let new_top_id = self
-                            .selected_session()
-                            .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
-                        if new_top_id != prev_top_id {
-                            self.detail_scroll = 0;
+                            // Reset detail scroll if selected session changed
+                            let new_top_id = self
+                                .selected_session()
+                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
+                            if new_top_id != prev_top_id {
+                                self.detail_scroll = 0;
+                            }
+
+                            // Background semantic indexing
+                            let sem_clone = self.semantic.clone();
+                            let all_sessions: Vec<Session> = self.sessions.clone();
+                            std::thread::spawn(move || {
+                                if let Ok(mut sem) = sem_clone.lock() {
+                                    if sem.lib.is_some() {
+                                        sem.index_sessions(&all_sessions);
+                                    }
+                                }
+                            });
                         }
 
                         let now = chrono::Local::now().format("%H:%M:%S");
