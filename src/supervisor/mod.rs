@@ -38,6 +38,10 @@ pub enum SupervisorCommand {
         provider_session_id: String,
         provider_key: String,
     },
+    FocusSession {
+        title: String,
+        provider_session_id: String,
+    },
     Shutdown,
 }
 
@@ -100,8 +104,10 @@ impl Supervisor {
                         }
                         SupervisorCommand::ArchiveSession { provider_session_id, provider_key } => {
                             self.handle_archive(&provider_key, &provider_session_id, &event_tx);
-                            // Immediately re-scan so UI gets updated list without flicker
                             let _ = self.scan_and_notify(&event_tx);
+                        }
+                        SupervisorCommand::FocusSession { title, provider_session_id } => {
+                            Self::handle_focus(&title, &provider_session_id, &event_tx);
                         }
                     }
                 }
@@ -249,6 +255,82 @@ impl Supervisor {
         let _ = event_tx.send(SupervisorEvent::Error(
             "Kill not yet implemented".to_string(),
         ));
+    }
+
+    /// Try to focus an existing Windows Terminal tab by matching the title.
+    fn handle_focus(
+        title: &str,
+        session_id: &str,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+    ) {
+        #[cfg(windows)]
+        {
+            // Try matching by session title first, then by short session ID
+            let search_terms = [title.to_string(), session_id[..8.min(session_id.len())].to_string()];
+
+            for term in &search_terms {
+                let ps_script = format!(
+                    r#"
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type -Name W -Namespace U -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+'@
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$wtWindows = $root.FindAll(
+  [System.Windows.Automation.TreeScope]::Children,
+  (New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ClassNameProperty,
+    'CASCADIA_HOSTING_WINDOW_CLASS')))
+foreach ($w in $wtWindows) {{
+  $tabs = $w.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::TabItem)))
+  foreach ($t in $tabs) {{
+    if ($t.Current.Name -like '*{search}*') {{
+      $si = $t.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+      $si.Select()
+      $hwnd = [IntPtr]$w.Current.NativeWindowHandle
+      [U.W]::ShowWindow($hwnd, 9) | Out-Null
+      [U.W]::SetForegroundWindow($hwnd) | Out-Null
+      exit 0
+    }}
+  }}
+}}
+exit 1
+"#,
+                    search = term.replace('\'', "''").replace('"', "`\"")
+                );
+
+                let result = std::process::Command::new("pwsh")
+                    .args(["-NoProfile", "-Command", &ps_script])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+
+                if let Ok(status) = result {
+                    if status.success() {
+                        crate::log::info(&format!("Focused tab matching: {}", term));
+                        return;
+                    }
+                }
+            }
+
+            crate::log::warn(&format!("Could not find tab for: {} / {}", title, session_id));
+            let _ = event_tx.send(SupervisorEvent::Error(
+                format!("Tab not found for '{}'", title),
+            ));
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (title, session_id);
+            let _ = event_tx.send(SupervisorEvent::Error(
+                "Tab focus not supported on this platform".to_string(),
+            ));
+        }
     }
 
     fn handle_archive(

@@ -370,21 +370,41 @@ impl App {
                         let pname = session.provider_name.clone();
                         let title = session.title.clone();
                         let scwd = session.cwd.to_string_lossy().to_string();
-                        let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
-                            provider_session_id: psid.clone(),
-                            provider_key: pname,
-                            session_cwd: scwd,
-                        });
-                        self.status_message = format!(
-                            "▶ Resuming: {} ({})",
-                            title,
-                            crate::util::short_id(&psid, 8)
-                        );
-                        self.log_lines.push(format!(
-                            "Resuming: {} ({})",
-                            title,
-                            crate::util::short_id(&psid, 8)
-                        ));
+                        let is_running = session.state.process == crate::models::ProcessState::Running;
+
+                        if is_running {
+                            // Try to focus the existing terminal tab
+                            let _ = cmd_tx.send(SupervisorCommand::FocusSession {
+                                title: title.clone(),
+                                provider_session_id: psid.clone(),
+                            });
+                            self.status_message = format!(
+                                "🔍 Focusing: {} ({})",
+                                title,
+                                crate::util::short_id(&psid, 8)
+                            );
+                            self.log_lines.push(format!(
+                                "Focusing tab: {} ({})",
+                                title,
+                                crate::util::short_id(&psid, 8)
+                            ));
+                        } else {
+                            let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
+                                provider_session_id: psid.clone(),
+                                provider_key: pname,
+                                session_cwd: scwd,
+                            });
+                            self.status_message = format!(
+                                "▶ Resuming: {} ({})",
+                                title,
+                                crate::util::short_id(&psid, 8)
+                            );
+                            self.log_lines.push(format!(
+                                "Resuming: {} ({})",
+                                title,
+                                crate::util::short_id(&psid, 8)
+                            ));
+                        }
                     }
                 }
                 KeyCode::Char('a') => {
