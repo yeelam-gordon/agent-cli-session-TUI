@@ -137,6 +137,8 @@ Quick summary:
 5. **Empty command lines** — sysinfo returns empty `cmd()` for some processes. Use `process_info.rs` instead.
 6. **Regressions without tests** — Every bug fix MUST include a regression test. See [`testing.instructions.md`](.github/instructions/testing.instructions.md) § Regression Test Policy. No exceptions.
 
+7. **Fixing one plugin in isolation** — A bug in one provider likely exists in others. See [`plugin.instructions.md`](.github/instructions/plugin.instructions.md) § Cross-Plugin Consistency Rule. Always audit all providers before closing a fix.
+
 ## Self-Correction Rule
 
 **When you change code, check if any documentation needs updating — and vice versa.**
@@ -156,6 +158,7 @@ This project has multiple agents and humans working on it. Stale docs cause real
 | `Cargo.toml` (deps, bin entries) | `AGENTS.md` how to build |
 | Any file move or rename | `AGENTS.md` project structure, `lib.rs` exports, `main.rs` mod declarations |
 | `src/ui/mod.rs` (keybindings) | `README.md` keybindings table |
+| `src/provider/<name>/mod.rs` (bug fix) | All other providers for the same bug — see `plugin.instructions.md` § Cross-Plugin Consistency |
 
 **Run the instruction audit after significant changes:**
 Use a code-review agent to read `.github/instructions/*.md` + `AGENTS.md` and diff against the actual code. Fix both directions — code should match docs, and docs should match code.

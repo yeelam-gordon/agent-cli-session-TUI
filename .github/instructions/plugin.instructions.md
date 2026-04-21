@@ -208,6 +208,34 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 | `launch` | Detects Running, Busy, WaitingInput transitions over 60s |
 | `kill` | After kill: process not Running, session is Resumable |
 
+## Cross-Plugin Consistency Rule
+
+**When you fix a bug or add a feature in one provider, you MUST check if other providers need the same change.**
+
+Providers share structural patterns (discovery, process matching, state inference, summary extraction, tab title). A bug in one often means the same bug lurks in others. Before closing any provider change:
+
+1. **Audit all providers** — grep for the same pattern across `src/provider/*/mod.rs`. If 3 out of 5 providers have the same issue, fix all 5.
+2. **Push common logic to the foundation** — if a fix applies to ≥3 providers, it likely belongs in:
+   - `src/provider/mod.rs` (trait default methods, shared helpers)
+   - `src/models.rs` (state enums, shared types)
+   - `src/process_info.rs` (process detection)
+   - `src/util.rs` (string handling, file I/O helpers)
+3. **Enforce via trait contract** — if a behavior MUST be consistent across all providers (e.g., "never return empty summaries", "always use file mtime for last_activity"), add it as:
+   - A **trait default method** that providers inherit (preferred — zero effort for plugin authors)
+   - A **documented contract** in this file's "Key Rules for Providers" section (if behavior varies but constraints exist)
+   - A **unit test in the shared test framework** (`src/testing/`) that runs against every provider
+4. **Update this instruction file** — if the fix reveals a new pattern or pitfall that plugin authors should know, add it to the relevant section here.
+
+| Symptom | Action |
+|---------|--------|
+| Bug in one provider's discovery | Check all providers' `discover_sessions()` for the same issue |
+| Bug in one provider's state inference | Check if `infer_state()` default impl needs updating, or if all overrides share the bug |
+| Bug in summary/title extraction | Check the "Response Extraction" table below — all providers parse differently but may share the same logical error |
+| New helper function written for one provider | Ask: should this live in `util.rs` or `provider/mod.rs` so all providers benefit? |
+| New edge case discovered | Add to "Key Rules for Providers" above AND write a test that covers all providers |
+
+**The goal: no provider is a special snowflake.** Common patterns get common infrastructure. Provider-specific code handles only what's genuinely unique to that CLI.
+
 ## Existing Providers as Reference
 
 | Provider | File | Data Sources |
