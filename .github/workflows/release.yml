@@ -40,14 +40,14 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
-    - name: Install MSVC toolchain (Windows)
-      if: runner.os == 'Windows'
+    - name: Install MSVC toolchain (Windows x64)
+      if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
       run: rustup default stable-x86_64-pc-windows-msvc
 
     - name: Install cross-compiler (Linux arm64)
-      if: matrix.target == 'aarch64-unknown-linux-gnu'
+      if: matrix.target == 'aarch64-unknown-linux-gnu' && matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc-aarch64-linux-gnu
@@ -80,7 +80,7 @@ jobs:
       run: tar -czf agent-session-tui-${{ matrix.target }}.tar.gz -C dist .
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: core-${{ matrix.target }}
         path: agent-session-tui-${{ matrix.target }}.*
@@ -95,8 +95,18 @@ jobs:
             core_artifact: agent-session-tui.exe
             dll_artifact: semantic_search_plugin.dll
             archive_ext: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            core_artifact: agent-session-tui.exe
+            dll_artifact: semantic_search_plugin.dll
+            archive_ext: zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            core_artifact: agent-session-tui
+            dll_artifact: libsemantic_search_plugin.so
+            archive_ext: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             core_artifact: agent-session-tui
             dll_artifact: libsemantic_search_plugin.so
             archive_ext: tar.gz
@@ -109,10 +119,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
-    - name: Install MSVC toolchain (Windows)
-      if: runner.os == 'Windows'
+    - name: Install MSVC toolchain (Windows x64)
+      if: matrix.target == 'x86_64-pc-windows-msvc'
       run: rustup default stable-x86_64-pc-windows-msvc
 
     - name: Install Rust target
@@ -146,7 +156,7 @@ jobs:
       run: tar -czf agent-session-tui-${{ matrix.target }}-semantic.tar.gz -C dist .
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: semantic-${{ matrix.target }}
         path: agent-session-tui-${{ matrix.target }}-semantic.*
@@ -157,7 +167,7 @@ jobs:
 
     steps:
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v5
       with:
         path: artifacts
 
