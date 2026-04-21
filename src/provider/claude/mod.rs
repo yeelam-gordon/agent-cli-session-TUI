@@ -63,6 +63,8 @@ impl ClaudeProvider {
         let lines: Vec<&str> = text.lines().collect();
         let event_count = lines.len();
         let mut first_user_msg: Option<String> = None;
+        let mut last_user_msg: Option<String> = None;
+        let mut prev_assistant_msg: Option<String> = None;
         let mut last_assistant_msg: Option<String> = None;
         let mut first_timestamp: Option<String> = None;
         let mut last_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -96,16 +98,20 @@ impl ClaudeProvider {
                     last_role = role.to_string();
                 }
 
-                // Extract first user message (for title/summary)
-                if event_type == "user" && role == "user" && first_user_msg.is_none() {
+                // Extract user messages (first for title, last for summary)
+                if event_type == "user" && role == "user" {
                     if let Some(content) = Self::extract_message_content(&val) {
-                        first_user_msg = Some(truncate_str_safe(&content, 300));
+                        if first_user_msg.is_none() {
+                            first_user_msg = Some(truncate_str_safe(&content, 500));
+                        }
+                        last_user_msg = Some(content);
                     }
                 }
 
                 // Track last assistant message (for summary)
                 if event_type == "assistant" && role == "assistant" {
                     if let Some(content) = Self::extract_message_content(&val) {
+                        prev_assistant_msg = last_assistant_msg.take();
                         last_assistant_msg = Some(content);
                     }
                 }
@@ -130,6 +136,8 @@ impl ClaudeProvider {
 
         JsonlScanResult {
             first_user_msg,
+            last_user_msg,
+            prev_assistant_msg,
             last_assistant_msg,
             has_user,
             event_count,
@@ -254,6 +262,8 @@ impl ClaudeProvider {
 struct JsonlScanResult {
     // Display fields
     first_user_msg: Option<String>,
+    last_user_msg: Option<String>,
+    prev_assistant_msg: Option<String>,
     last_assistant_msg: Option<String>,
     has_user: bool,
     event_count: usize,
@@ -341,12 +351,22 @@ impl Provider for ClaudeProvider {
                     .clone()
                     .unwrap_or_else(|| file_mtime.clone());
                 let first_msg = scan.first_user_msg.clone();
+                let last_user = scan.last_user_msg.clone();
+                let prev_assistant = scan.prev_assistant_msg.clone();
                 let last_assistant = scan.last_assistant_msg.clone();
 
                 // Build summary
                 let mut summary = String::new();
                 if let Some(ref msg) = first_msg {
                     summary = format!("--- First message ---\n{}", msg);
+                }
+                if let Some(ref msg) = last_user {
+                    if first_msg.as_ref() != Some(msg) {
+                        summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
+                    }
+                }
+                if let Some(ref msg) = prev_assistant {
+                    summary = format!("{}\n\n--- Previous response ---\n{}", summary, msg);
                 }
                 if let Some(ref msg) = last_assistant {
                     summary = format!("{}\n\n--- Last Claude response ---\n{}", summary, msg);

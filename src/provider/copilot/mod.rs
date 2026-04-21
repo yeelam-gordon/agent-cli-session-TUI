@@ -84,10 +84,12 @@ impl CopilotProvider {
         let workspace = self.read_workspace_yaml(dir);
         let plan_items = self.read_plan_md(dir);
 
-        let (first_msg_events, last_assistant_events, has_user_events, _event_count) =
+        let (first_msg_events, last_user_events, prev_assistant_events, last_assistant_events, has_user_events, _event_count) =
             self.read_user_messages_from_events(dir);
 
         let first_message = first_msg_events;
+        let last_user = last_user_events;
+        let prev_assistant = prev_assistant_events;
         let last_assistant = last_assistant_events;
 
         let ws_summary = workspace.as_ref().and_then(|w| w.summary.as_ref());
@@ -120,6 +122,14 @@ impl CopilotProvider {
 
         if let Some(ref msg) = first_message {
             summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+        }
+        if let Some(ref msg) = last_user {
+            if first_message.as_ref() != Some(msg) {
+                summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
+            }
+        }
+        if let Some(ref msg) = prev_assistant {
+            summary = format!("{}\n\n--- Previous response ---\n{}", summary, msg);
         }
         if let Some(ref msg) = last_assistant {
             summary = format!("{}\n\n--- Last Copilot response ---\n{}", summary, msg);
@@ -429,19 +439,19 @@ impl CopilotProvider {
         }
     }
 
-    /// Extract first user message and last assistant message from events.jsonl.
-    /// Returns (first_user_msg, last_assistant_msg, has_user_messages, total_event_count).
-    /// Reads first 50KB for the first user message, and last 512KB for the last assistant message.
+    /// Extract first user message, last user message, prev/last assistant messages from events.jsonl.
+    /// Returns (first_user_msg, last_user_msg, prev_assistant_msg, last_assistant_msg, has_user_messages, total_event_count).
+    /// Reads first 50KB for the first user message, and last 512KB for the rest.
     fn read_user_messages_from_events(
         &self,
         session_dir: &Path,
-    ) -> (Option<String>, Option<String>, bool, usize) {
+    ) -> (Option<String>, Option<String>, Option<String>, Option<String>, bool, usize) {
         use std::io::{Read, Seek, SeekFrom};
 
         let events_path = session_dir.join("events.jsonl");
         let mut file = match std::fs::File::open(&events_path) {
             Ok(f) => f,
-            Err(_) => return (None, None, false, 0),
+            Err(_) => return (None, None, None, None, false, 0),
         };
         let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
@@ -488,11 +498,30 @@ impl CopilotProvider {
             &tail_buf
         };
 
+        let mut prev_assistant_msg: Option<String> = None;
         let mut last_assistant_msg: Option<String> = None;
+        let mut last_user_msg: Option<String> = None;
         for line in tail_text.lines() {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
                 let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                if event_type == "user.message" || event_type == "human.message" {
+                    if let Some(msg) = val
+                        .get("data")
+                        .and_then(|d| d.get("content").or(d.get("message")).or(d.get("text")))
+                        .and_then(|v| v.as_str())
+                    {
+                        let trimmed = msg.trim();
+                        if !trimmed.is_empty() {
+                            last_user_msg = Some(trimmed.to_string());
+                        }
+                    }
+                }
+
                 if event_type == "assistant.message" {
+                    // Resolve effective message for this assistant event
+                    let mut effective_msg: Option<String> = None;
+
                     // Check direct content field
                     if let Some(msg) = val
                         .get("data")
@@ -501,7 +530,7 @@ impl CopilotProvider {
                     {
                         let trimmed = msg.trim();
                         if !trimmed.is_empty() {
-                            last_assistant_msg = Some(trimmed.to_string());
+                            effective_msg = Some(trimmed.to_string());
                         }
                     }
 
@@ -521,11 +550,16 @@ impl CopilotProvider {
                                 {
                                     let trimmed = summary.trim();
                                     if !trimmed.is_empty() {
-                                        last_assistant_msg = Some(trimmed.to_string());
+                                        effective_msg = Some(trimmed.to_string());
                                     }
                                 }
                             }
                         }
+                    }
+
+                    if effective_msg.is_some() {
+                        prev_assistant_msg = last_assistant_msg.take();
+                        last_assistant_msg = effective_msg;
                     }
                 }
             }
@@ -538,7 +572,7 @@ impl CopilotProvider {
         }
 
         let has_user = first_user_msg.is_some();
-        (first_user_msg, last_assistant_msg, has_user, event_count)
+        (first_user_msg, last_user_msg, prev_assistant_msg, last_assistant_msg, has_user, event_count)
     }
 }
 
@@ -596,11 +630,13 @@ impl Provider for CopilotProvider {
             let plan_items = self.read_plan_md(&entry.path());
             let last_activity = self.last_activity_time(&entry.path());
 
-            // Extract from events.jsonl (first user msg, last assistant msg, has user msgs, event count)
-            let (first_msg_events, last_assistant_events, has_user_events, _event_count) =
+            // Extract from events.jsonl (first user msg, last user msg, prev/last assistant msg, has user msgs, event count)
+            let (first_msg_events, last_user_events, prev_assistant_events, last_assistant_events, has_user_events, _event_count) =
                 self.read_user_messages_from_events(&entry.path());
 
             let first_message = first_msg_events;
+            let last_user = last_user_events;
+            let prev_assistant = prev_assistant_events;
             let last_assistant = last_assistant_events;
 
             // Skip sessions with zero user interaction
@@ -631,9 +667,17 @@ impl Provider for CopilotProvider {
                 String::new()
             };
 
-            // Append first user message + last assistant response for context
+            // Append first user message + last user message + prev/last assistant response for context
             if let Some(ref msg) = first_message {
                 summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+            }
+            if let Some(ref msg) = last_user {
+                if first_message.as_ref() != Some(msg) {
+                    summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
+                }
+            }
+            if let Some(ref msg) = prev_assistant {
+                summary = format!("{}\n\n--- Previous response ---\n{}", summary, msg);
             }
             if let Some(ref msg) = last_assistant {
                 summary = format!("{}\n\n--- Last Copilot response ---\n{}", summary, msg);

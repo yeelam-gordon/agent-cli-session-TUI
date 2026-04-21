@@ -174,16 +174,17 @@ impl CodexProvider {
             "user" => {
                 if scan.first_user_msg.is_none() {
                     scan.first_user_msg =
-                        content.as_ref().map(|s| truncate_str_safe(s.trim(), 300));
+                        content.as_ref().map(|s| truncate_str_safe(s.trim(), 500));
                 }
                 if let Some(text) = content {
-                    scan.last_user_msg = Some(truncate_str_safe(text.trim(), 300));
+                    scan.last_user_msg = Some(text.trim().to_string());
                 }
                 scan.last_role = Some("user".into());
                 scan.last_activity_kind = Some("user".into());
             }
             "assistant" => {
                 if let Some(text) = content {
+                    scan.prev_assistant_msg = scan.last_assistant_msg.take();
                     scan.last_assistant_msg = Some(text.trim().to_string());
                 }
                 scan.last_role = Some("assistant".into());
@@ -233,6 +234,7 @@ struct SessionScan {
     file_mtime: Option<String>,
     first_user_msg: Option<String>,
     last_user_msg: Option<String>,
+    prev_assistant_msg: Option<String>,
     last_assistant_msg: Option<String>,
     active_task: bool,
     last_role: Option<String>,
@@ -298,6 +300,8 @@ impl Provider for CodexProvider {
             });
 
             let first_msg = scan.first_user_msg.clone();
+            let last_user = scan.last_user_msg.clone();
+            let prev_assistant = scan.prev_assistant_msg.clone();
             let last_assistant = scan.last_assistant_msg.clone();
             let file_mtime = scan.file_mtime.clone().unwrap_or_default();
             let created_at = scan
@@ -314,6 +318,14 @@ impl Provider for CodexProvider {
             let mut summary = String::new();
             if let Some(ref msg) = first_msg {
                 summary = format!("--- First message ---\n{}", msg);
+            }
+            if let Some(ref msg) = last_user {
+                if first_msg.as_ref() != Some(msg) {
+                    summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
+                }
+            }
+            if let Some(ref msg) = prev_assistant {
+                summary = format!("{}\n\n--- Previous response ---\n{}", summary, msg);
             }
             if let Some(ref msg) = last_assistant {
                 summary = format!("{}\n\n--- Last Codex response ---\n{}", summary, msg);

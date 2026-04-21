@@ -69,6 +69,8 @@ impl GeminiProvider {
 
         let lines: Vec<&str> = text.lines().collect();
         let mut first_user_msg: Option<String> = None;
+        let mut last_user_msg: Option<String> = None;
+        let mut prev_gemini_msg: Option<String> = None;
         let mut last_gemini_msg: Option<String> = None;
         let mut first_timestamp: Option<String> = None;
         let mut last_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -98,15 +100,18 @@ impl GeminiProvider {
                     }
                 }
 
-                if event_type == "user"
-                    && first_user_msg.is_none() {
+                if event_type == "user" {
                         if let Some(content) = Self::extract_content_text(&val) {
-                            first_user_msg = Some(truncate_str_safe(&content, 300));
+                            if first_user_msg.is_none() {
+                                first_user_msg = Some(truncate_str_safe(&content, 500));
+                            }
+                            last_user_msg = Some(content);
                         }
                     }
 
                 if event_type == "gemini" {
                     if let Some(content) = val.get("content").and_then(|v| v.as_str()) {
+                        prev_gemini_msg = last_gemini_msg.take();
                         last_gemini_msg = Some(content.to_string());
                     }
                 }
@@ -124,6 +129,8 @@ impl GeminiProvider {
 
         JsonlScanResult {
             first_user_msg,
+            last_user_msg,
+            prev_gemini_msg,
             last_gemini_msg,
             has_user,
             event_count: lines.len(),
@@ -208,6 +215,8 @@ impl GeminiProvider {
 #[derive(Debug, Default)]
 struct JsonlScanResult {
     first_user_msg: Option<String>,
+    last_user_msg: Option<String>,
+    prev_gemini_msg: Option<String>,
     last_gemini_msg: Option<String>,
     has_user: bool,
     event_count: usize,
@@ -317,6 +326,14 @@ impl Provider for GeminiProvider {
                 let mut summary = String::new();
                 if let Some(ref msg) = scan.first_user_msg {
                     summary = format!("--- First message ---\n{}", msg);
+                }
+                if let Some(ref msg) = scan.last_user_msg {
+                    if scan.first_user_msg.as_ref() != Some(msg) {
+                        summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
+                    }
+                }
+                if let Some(ref msg) = scan.prev_gemini_msg {
+                    summary = format!("{}\n\n--- Previous response ---\n{}", summary, msg);
                 }
                 if let Some(ref msg) = scan.last_gemini_msg {
                     summary = format!("{}\n\n--- Last Gemini response ---\n{}", summary, msg);

@@ -53,6 +53,8 @@ impl QwenProvider {
         let lines: Vec<&str> = text.lines().collect();
         let event_count = lines.len();
         let mut first_user_msg: Option<String> = None;
+        let mut last_user_msg: Option<String> = None;
+        let mut prev_assistant_msg: Option<String> = None;
         let mut last_assistant_msg: Option<String> = None;
         let mut first_timestamp: Option<String> = None;
         let mut last_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -82,16 +84,18 @@ impl QwenProvider {
 
                 if event_type == "user" {
                     last_role = "user".into();
-                    if first_user_msg.is_none() {
-                        if let Some(content) = Self::extract_text_parts(&val) {
-                            first_user_msg = Some(truncate_str_safe(&content, 300));
+                    if let Some(content) = Self::extract_text_parts(&val) {
+                        if first_user_msg.is_none() {
+                            first_user_msg = Some(truncate_str_safe(&content, 500));
                         }
+                        last_user_msg = Some(content);
                     }
                 }
 
                 if event_type == "assistant" {
                     last_role = "assistant".into();
                     if let Some(content) = Self::extract_text_parts(&val) {
+                        prev_assistant_msg = last_assistant_msg.take();
                         last_assistant_msg = Some(content);
                     }
                 }
@@ -107,6 +111,8 @@ impl QwenProvider {
 
         JsonlScanResult {
             first_user_msg,
+            last_user_msg,
+            prev_assistant_msg,
             last_assistant_msg,
             has_user,
             event_count,
@@ -154,6 +160,8 @@ impl QwenProvider {
 #[derive(Debug, Default)]
 struct JsonlScanResult {
     first_user_msg: Option<String>,
+    last_user_msg: Option<String>,
+    prev_assistant_msg: Option<String>,
     last_assistant_msg: Option<String>,
     has_user: bool,
     event_count: usize,
@@ -237,6 +245,14 @@ impl Provider for QwenProvider {
                 let mut summary = String::new();
                 if let Some(ref msg) = scan.first_user_msg {
                     summary = format!("--- First message ---\n{}", msg);
+                }
+                if let Some(ref msg) = scan.last_user_msg {
+                    if scan.first_user_msg.as_ref() != Some(msg) {
+                        summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
+                    }
+                }
+                if let Some(ref msg) = scan.prev_assistant_msg {
+                    summary = format!("{}\n\n--- Previous response ---\n{}", summary, msg);
                 }
                 if let Some(ref msg) = scan.last_assistant_msg {
                     summary = format!("{}\n\n--- Last Qwen response ---\n{}", summary, msg);
