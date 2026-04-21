@@ -16,6 +16,8 @@ use crate::models::Session;
 pub struct SearchResult {
     pub index: usize,
     pub score: u32,
+    /// Whether this result got a semantic similarity boost.
+    pub semantic_match: bool,
 }
 
 /// Rank sessions against a query. Returns indices sorted by relevance (highest first).
@@ -28,7 +30,7 @@ pub fn ranked_search(
 ) -> Vec<SearchResult> {
     if query.is_empty() {
         return (0..sessions.len())
-            .map(|i| SearchResult { index: i, score: 0 })
+            .map(|i| SearchResult { index: i, score: 0, semantic_match: false })
             .collect();
     }
 
@@ -36,7 +38,6 @@ pub fn ranked_search(
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
     // Tier 3: pre-compute semantic matches from cached embeddings
-    // Only one embed call (the query) — session vectors are already cached
     let semantic_scores: HashMap<String, f32> = if query.len() >= 5 {
         semantic
             .filter(|s| s.is_ready())
@@ -51,14 +52,16 @@ pub fn ranked_search(
         .enumerate()
         .filter_map(|(i, s)| {
             let mut score = score_session(s, &query_lower, &query_words);
+            let mut semantic_match = false;
 
             // Tier 3: semantic boost from cached vectors (instant lookup)
             if let Some(&sim) = semantic_scores.get(&s.id) {
                 let boost = ((sim - 0.4) * 333.0).min(200.0) as u32;
                 score = score.saturating_add(boost);
+                semantic_match = true;
             }
 
-            if score > 0 { Some(SearchResult { index: i, score }) } else { None }
+            if score > 0 { Some(SearchResult { index: i, score, semantic_match }) } else { None }
         })
         .collect();
 
@@ -451,7 +454,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[allow(dead_code)]
 impl SearchResult {
     pub fn new(index: usize, score: u32) -> Self {
-        Self { index, score }
+        Self { index, score, semantic_match: false }
     }
 }
 

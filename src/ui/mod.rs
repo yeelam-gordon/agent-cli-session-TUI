@@ -55,6 +55,8 @@ pub struct App {
     log_max_lines: usize,
     /// Sessions archived locally this cycle — filtered out until supervisor confirms.
     pending_archives: Vec<String>,
+    /// Which filtered indices had a semantic match boost (for ✨ indicator).
+    semantic_matches: std::collections::HashSet<usize>,
     /// Semantic plugin (shared with background indexer). Always use try_lock() — never block UI.
     semantic: std::sync::Arc<std::sync::Mutex<crate::search::SemanticPlugin>>,
     /// Last known semantic status (updated from try_lock, avoids blocking on status read).
@@ -101,6 +103,7 @@ impl App {
             search_query: String::new(),
             log_max_lines,
             pending_archives: Vec::new(),
+            semantic_matches: std::collections::HashSet::new(),
             semantic,
             semantic_status_cache: crate::search::SemanticStatus::Unavailable,
         }
@@ -124,18 +127,27 @@ impl App {
     /// Rebuild the filtered indices based on the search query.
     /// Uses tiered ranking: exact → fuzzy → semantic (from cached embeddings).
     fn apply_filter(&mut self) {
-        let view = self.current_view_sessions();
-        if self.search_query.is_empty() {
-            self.filtered_indices = (0..view.len()).collect();
+        self.semantic_matches.clear();
+
+        let query = self.search_query.clone();
+        if query.is_empty() {
+            let len = self.current_view_sessions().len();
+            self.filtered_indices = (0..len).collect();
         } else {
             // try_lock: skip semantic if indexer holds the lock (never block UI)
-            let sem = if self.search_query.len() >= 5 {
+            let sem = if query.len() >= 5 {
                 self.semantic.try_lock().ok()
             } else {
                 None
             };
             let sem_ref = sem.as_deref();
-            let results = crate::search::ranked_search(view, &self.search_query, sem_ref);
+            let view = self.current_view_sessions();
+            let results = crate::search::ranked_search(view, &query, sem_ref);
+            for r in &results {
+                if r.semantic_match {
+                    self.semantic_matches.insert(r.index);
+                }
+            }
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
         if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {
@@ -596,6 +608,12 @@ impl App {
                     truncate_str_safe(&s.title, 25)
                 };
 
+                let sem_icon = if self.semantic_matches.contains(&session_idx) {
+                    "✨"
+                } else {
+                    ""
+                };
+
                 let line = Line::from(vec![
                     Span::raw(format!("{} ", badge)),
                     Span::styled(
@@ -612,6 +630,10 @@ impl App {
                         } else {
                             Style::default().fg(Color::Gray)
                         },
+                    ),
+                    Span::styled(
+                        format!(" {}", sem_icon),
+                        Style::default().fg(Color::Magenta),
                     ),
                 ]);
 
