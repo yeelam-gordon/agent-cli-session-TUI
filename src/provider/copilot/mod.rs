@@ -493,6 +493,7 @@ impl CopilotProvider {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
                 let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if event_type == "assistant.message" {
+                    // Check direct content field
                     if let Some(msg) = val
                         .get("data")
                         .and_then(|d| d.get("content"))
@@ -500,8 +501,30 @@ impl CopilotProvider {
                     {
                         let trimmed = msg.trim();
                         if !trimmed.is_empty() {
-                            // Keep full last response (up to 3000 chars) for detail + semantic
                             last_assistant_msg = Some(trimmed.to_string());
+                        }
+                    }
+
+                    // Check for task_complete summary in toolRequests
+                    // (the real result — content field is often just "Task complete.")
+                    if let Some(requests) = val
+                        .get("data")
+                        .and_then(|d| d.get("toolRequests"))
+                        .and_then(|r| r.as_array())
+                    {
+                        for req in requests {
+                            if req.get("name").and_then(|n| n.as_str()) == Some("task_complete") {
+                                if let Some(summary) = req
+                                    .get("arguments")
+                                    .and_then(|a| a.get("summary"))
+                                    .and_then(|s| s.as_str())
+                                {
+                                    let trimmed = summary.trim();
+                                    if !trimmed.is_empty() {
+                                        last_assistant_msg = Some(trimmed.to_string());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
