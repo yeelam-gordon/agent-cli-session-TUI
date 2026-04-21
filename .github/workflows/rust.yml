@@ -17,19 +17,27 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Install MSVC toolchain (Windows)
       if: matrix.os == 'windows-latest'
       run: rustup default stable-x86_64-pc-windows-msvc
 
-    - name: Clippy
+    - name: Clippy (core)
       run: cargo clippy -- -D warnings
 
-    - name: Build
+    - name: Build (core)
       run: cargo build --verbose
 
     - name: Run unit tests
       # Only run lib tests (unit tests in src/).
       # Integration tests in tests/ need real session data and are skipped on CI.
       run: cargo test --lib --verbose
+
+    - name: Clippy (semantic plugin)
+      working-directory: semantic-plugin
+      run: cargo clippy -- -D warnings
+
+    - name: Build (semantic plugin)
+      working-directory: semantic-plugin
+      run: cargo build --verbose
