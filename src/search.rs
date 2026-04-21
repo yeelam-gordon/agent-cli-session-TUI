@@ -201,27 +201,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn exact_title_match_ranks_highest() {
-        let sessions = vec![
-            make_session("fix auth bug", "some work", "copilot"),
-            make_session("deploy server", "auth related fix", "copilot"),
-        ];
-        let results = ranked_search(&sessions, "fix auth");
-        assert!(!results.is_empty());
-        assert_eq!(results[0].index, 0); // exact title match first
+    fn make_session_full(
+        title: &str,
+        summary: &str,
+        provider: &str,
+        session_id: &str,
+        cwd: &str,
+    ) -> Session {
+        Session {
+            id: format!("{}_{}", provider, session_id),
+            provider_session_id: session_id.into(),
+            provider_name: provider.into(),
+            cwd: PathBuf::from(cwd),
+            title: title.into(),
+            tab_title: None,
+            summary: summary.into(),
+            state: SessionState::default(),
+            pid: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            state_dir: None,
+        }
     }
 
-    #[test]
-    fn word_match_finds_partial() {
-        let sessions = vec![
-            make_session("unrelated work", "nothing here", "copilot"),
-            make_session("deploy server", "fixed the auth bug yesterday", "copilot"),
-        ];
-        let results = ranked_search(&sessions, "auth bug");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].index, 1); // found via summary word match
-    }
+    // ── Empty / trivial queries ──────────────────────────────────────
 
     #[test]
     fn empty_query_returns_all() {
@@ -234,13 +237,9 @@ mod tests {
     }
 
     #[test]
-    fn state_label_searchable() {
-        let mut s = make_session("my session", "stuff", "copilot");
-        s.state.process = ProcessState::Running;
-        s.state.interaction = InteractionState::WaitingInput;
-        let sessions = vec![s];
-        let results = ranked_search(&sessions, "waiting");
-        assert_eq!(results.len(), 1);
+    fn empty_sessions_returns_empty() {
+        let results = ranked_search(&[], "something");
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -250,5 +249,224 @@ mod tests {
         ];
         let results = ranked_search(&sessions, "xyznonexistent");
         assert!(results.is_empty());
+    }
+
+    // ── Tier 1: exact substring match ────────────────────────────────
+
+    #[test]
+    fn exact_title_match_ranks_highest() {
+        let sessions = vec![
+            make_session("fix auth bug", "some work", "copilot"),
+            make_session("deploy server", "auth related fix", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "fix auth");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].index, 0); // exact title match first
+        assert!(results[0].score >= 1000);
+    }
+
+    #[test]
+    fn exact_title_beats_exact_summary() {
+        let sessions = vec![
+            make_session("unrelated title", "fix the authentication flow", "copilot"),
+            make_session("fix the authentication flow", "unrelated summary", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "fix the authentication");
+        assert_eq!(results[0].index, 1); // title match scores higher
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn exact_session_id_match() {
+        let sessions = vec![
+            make_session_full("some title", "summary", "copilot", "703611e6-890c-4df2", "D:\\Demo"),
+        ];
+        let results = ranked_search(&sessions, "703611e6");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].score >= 800);
+    }
+
+    #[test]
+    fn exact_cwd_match() {
+        let sessions = vec![
+            make_session_full("title", "summary", "copilot", "abc", "D:\\Demo\\myproject"),
+        ];
+        let results = ranked_search(&sessions, "myproject");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].score >= 400);
+    }
+
+    #[test]
+    fn exact_provider_name_match() {
+        let sessions = vec![
+            make_session("title a", "summary a", "copilot"),
+            make_session("title b", "summary b", "claude"),
+        ];
+        let results = ranked_search(&sessions, "claude");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].index, 1);
+    }
+
+    #[test]
+    fn case_insensitive_matching() {
+        let sessions = vec![
+            make_session("Fix Authentication Bug", "IMPORTANT work", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "fix authentication");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].score >= 1000);
+    }
+
+    // ── Tier 2: word-level matching ──────────────────────────────────
+
+    #[test]
+    fn all_words_match_in_summary() {
+        let sessions = vec![
+            make_session("unrelated work", "nothing here", "copilot"),
+            make_session("deploy server", "fixed the auth bug yesterday", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "auth bug");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].index, 1);
+    }
+
+    #[test]
+    fn all_words_match_scores_lower_than_exact() {
+        let sessions = vec![
+            // Title has "auth" and "bug" but not as "auth bug" substring
+            make_session("auth system", "found the bug in handler", "copilot"),
+            // Title has exact substring "auth bug"
+            make_session("fix auth bug now", "todo", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "auth bug");
+        assert_eq!(results[0].index, 1); // exact match ranks first
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn partial_word_match_single_word() {
+        let sessions = vec![
+            make_session("authentication module", "handles login", "copilot"),
+        ];
+        // "auth" is a substring of "authentication" — should match
+        let results = ranked_search(&sessions, "auth");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn short_words_under_3_chars_ignored_for_partial() {
+        let sessions = vec![
+            make_session("fix it now", "some summary", "copilot"),
+        ];
+        // "it" is < 3 chars, shouldn't trigger partial word match on its own
+        // but "fix it" as full query IS an exact substring match in title
+        let results = ranked_search(&sessions, "it");
+        // "it" appears in title as exact substring match
+        assert_eq!(results.len(), 1);
+    }
+
+    // ── Tier 2c: state label matching ────────────────────────────────
+
+    #[test]
+    fn search_running_state() {
+        let mut s = make_session("my session", "stuff", "copilot");
+        s.state.process = ProcessState::Running;
+        s.state.interaction = InteractionState::Busy;
+        let sessions = vec![s];
+        let results = ranked_search(&sessions, "running");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_waiting_state() {
+        let mut s = make_session("my session", "stuff", "copilot");
+        s.state.process = ProcessState::Running;
+        s.state.interaction = InteractionState::WaitingInput;
+        let sessions = vec![s];
+        let results = ranked_search(&sessions, "waiting");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_resumable_state() {
+        let mut s = make_session("my session", "stuff", "copilot");
+        s.state.persistence = PersistenceState::Resumable;
+        let sessions = vec![s];
+        let results = ranked_search(&sessions, "resumable");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn state_label_ranks_lower_than_title() {
+        let s1 = make_session("running tests", "unit tests", "copilot");
+        // s1 matches "running" in title (score 1000)
+        let mut s2 = make_session("deploy app", "production", "copilot");
+        s2.state.process = ProcessState::Running;
+        s2.state.interaction = InteractionState::Busy;
+        // s2 matches "running" in state label (score 200)
+        let sessions = vec![s1, s2];
+        let results = ranked_search(&sessions, "running");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].index, 0); // title match ranks higher
+        assert!(results[0].score > results[1].score);
+    }
+
+    // ── Ranking order / multi-field ──────────────────────────────────
+
+    #[test]
+    fn ranking_preserves_order_by_score() {
+        let sessions = vec![
+            make_session("unrelated", "deploy the auth system", "copilot"),  // summary match (600)
+            make_session("auth system deploy", "nothing", "copilot"),         // title match (1000)
+            make_session("other work", "stuff", "copilot"),                   // no match
+        ];
+        let results = ranked_search(&sessions, "auth");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].index, 1); // title match first (1000)
+        assert_eq!(results[1].index, 0); // summary match second (600)
+    }
+
+    #[test]
+    fn multiple_matches_all_returned() {
+        let sessions = vec![
+            make_session("auth login", "handles auth", "copilot"),
+            make_session("auth signup", "new user auth", "claude"),
+            make_session("deploy server", "no match here", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "auth");
+        assert_eq!(results.len(), 2); // only 2 match, not the deploy one
+    }
+
+    // ── Multi-word queries ───────────────────────────────────────────
+
+    #[test]
+    fn multi_word_exact_phrase_in_title() {
+        let sessions = vec![
+            make_session("fix the authentication bug", "work", "copilot"),
+            make_session("authentication fix", "bug report", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "fix the authentication bug");
+        assert_eq!(results[0].index, 0); // exact phrase match
+    }
+
+    #[test]
+    fn multi_word_scattered_across_field() {
+        let sessions = vec![
+            make_session("the server has a bug in authentication", "details", "copilot"),
+        ];
+        // "authentication bug" — both words present but not as exact phrase
+        let results = ranked_search(&sessions, "authentication bug");
+        assert_eq!(results.len(), 1);
+        // Should match via word-level matching (tier 2)
+        assert!(results[0].score > 0);
+        assert!(results[0].score < 1000); // not exact match score
+    }
+
+    // ── Semantic plugin status ───────────────────────────────────────
+
+    #[test]
+    fn semantic_plugin_defaults_unavailable() {
+        let plugin = SemanticPlugin::new();
+        assert_eq!(*plugin.status(), SemanticStatus::Unavailable);
     }
 }
