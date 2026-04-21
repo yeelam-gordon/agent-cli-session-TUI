@@ -5,12 +5,12 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 
 ## Pain Points Solved
 
+- **Where is my running agent?** — press `Enter` on any 🟡 Waiting or 🟢 Running session to instantly focus its terminal tab (native Windows UI Automation — sub-second, no PowerShell)
 - **Too many tabs** — see all sessions in one view with clear status badges
 - **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
+- **Finding that one session** — `/` to search with tiered ranking: exact match → fuzzy word match → ✨ semantic similarity (optional). Results ranked by relevance, not just recency
 - **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later
-- **Resume after reboot** — session summaries, last activity, work state help you decide what to pick up
-- **Fast search + resume** — `/` to search across title, summary, CWD, provider, then `Enter` to resume
-- **Semantic search** — optional DLL plugin adds meaning-aware search on top of exact + fuzzy matching
+- **Resume after reboot** — session summaries, last activity, full last response help you decide what to pick up
 - **One place for all agents** — manage Copilot, Claude, Codex, Qwen, Gemini sessions from a single TUI
 
 ## Architecture
