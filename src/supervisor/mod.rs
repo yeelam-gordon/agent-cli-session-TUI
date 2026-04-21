@@ -159,7 +159,7 @@ impl Supervisor {
         let mut all_active: Vec<Session> = Vec::new();
         let mut all_hidden: Vec<Session> = Vec::new();
 
-        // Scan providers in parallel, sending progressive updates as each completes
+        // Scan providers in parallel, collect all results, send one final update
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel::<Vec<Session>>();
 
@@ -189,9 +189,9 @@ impl Supervisor {
                     let _ = tx.send(sessions);
                 });
             }
-            drop(tx); // Close sender so rx iterator ends when all threads finish
+            drop(tx);
 
-            // Process results as each provider completes — send progressive updates
+            // Collect all provider results
             for sessions in rx {
                 for s in sessions {
                     let is_archived = archive
@@ -204,15 +204,15 @@ impl Supervisor {
                         all_active.push(s);
                     }
                 }
-
-                // Sort and send partial update — UI renders immediately
-                all_active.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                all_hidden.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
-                    active: all_active.clone(),
-                    hidden: all_hidden.clone(),
-                });
             }
+        });
+
+        // Single atomic update — no flicker from partial results
+        all_active.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        all_hidden.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
+            active: all_active,
+            hidden: all_hidden,
         });
 
         Ok(())
