@@ -2,25 +2,40 @@ name: Release
 
 on:
   push:
-    tags: [ "v*" ]  # Trigger on version tags like v0.1.0
+    tags: [ "v*" ]
 
 permissions:
-  contents: write  # Needed to create GitHub releases
+  contents: write
 
 jobs:
-  build:
+  build-core:
     strategy:
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: agent-session-tui.exe
+            archive_ext: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: agent-session-tui.exe
+            archive_ext: zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: agent-session-tui
+            archive_ext: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: agent-session-tui
+            archive_ext: tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: agent-session-tui
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: agent-session-tui
+            archive_ext: tar.gz
 
     runs-on: ${{ matrix.os }}
 
@@ -33,40 +48,109 @@ jobs:
     - name: Build release
       run: cargo build --release --target ${{ matrix.target }}
 
-    - name: Package (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        mkdir dist
-        cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
-        cp config.toml.example dist/
-        cp README.md dist/
+    - name: Package
       shell: bash
-
-    - name: Package (Unix)
-      if: matrix.os != 'windows-latest'
       run: |
         mkdir dist
         cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
         cp config.toml.example dist/
         cp README.md dist/
-        chmod +x dist/${{ matrix.artifact }}
+        if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
+          chmod +x dist/${{ matrix.artifact }}
+        fi
 
-    - name: Create archive (Windows)
-      if: matrix.os == 'windows-latest'
+    - name: Create archive (zip)
+      if: endsWith(matrix.archive_ext, 'zip')
       run: Compress-Archive -Path dist/* -DestinationPath agent-session-tui-${{ matrix.target }}.zip
 
-    - name: Create archive (Unix)
-      if: matrix.os != 'windows-latest'
+    - name: Create archive (tar.gz)
+      if: endsWith(matrix.archive_ext, 'tar.gz')
       run: tar -czf agent-session-tui-${{ matrix.target }}.tar.gz -C dist .
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: agent-session-tui-${{ matrix.target }}
+        name: core-${{ matrix.target }}
         path: agent-session-tui-${{ matrix.target }}.*
 
+  build-semantic:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            core_artifact: agent-session-tui.exe
+            dll_artifact: semantic_search_plugin.dll
+            archive_ext: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            core_artifact: agent-session-tui.exe
+            dll_artifact: semantic_search_plugin.dll
+            archive_ext: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            core_artifact: agent-session-tui
+            dll_artifact: libsemantic_search_plugin.so
+            archive_ext: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            core_artifact: agent-session-tui
+            dll_artifact: libsemantic_search_plugin.so
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            core_artifact: agent-session-tui
+            dll_artifact: libsemantic_search_plugin.dylib
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            core_artifact: agent-session-tui
+            dll_artifact: libsemantic_search_plugin.dylib
+            archive_ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      run: rustup target add ${{ matrix.target }}
+
+    - name: Build core
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Build semantic plugin
+      working-directory: semantic-plugin
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Package
+      shell: bash
+      run: |
+        mkdir dist
+        cp target/${{ matrix.target }}/release/${{ matrix.core_artifact }} dist/
+        cp semantic-plugin/target/${{ matrix.target }}/release/${{ matrix.dll_artifact }} dist/
+        cp config.toml.example dist/
+        cp README.md dist/
+        if [ "${{ matrix.os }}" != "windows-latest" ] && [ "${{ matrix.os }}" != "windows-11-arm" ]; then
+          chmod +x dist/${{ matrix.core_artifact }}
+        fi
+
+    - name: Create archive (zip)
+      if: endsWith(matrix.archive_ext, 'zip')
+      run: Compress-Archive -Path dist/* -DestinationPath agent-session-tui-${{ matrix.target }}-semantic.zip
+
+    - name: Create archive (tar.gz)
+      if: endsWith(matrix.archive_ext, 'tar.gz')
+      run: tar -czf agent-session-tui-${{ matrix.target }}-semantic.tar.gz -C dist .
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: semantic-${{ matrix.target }}
+        path: agent-session-tui-${{ matrix.target }}-semantic.*
+
   release:
-    needs: build
+    needs: [build-core, build-semantic]
     runs-on: ubuntu-latest
 
     steps:
