@@ -120,11 +120,15 @@ impl CopilotProvider {
             String::new()
         };
 
-        if let Some(ref msg) = first_message {
-            summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+        // Only show "First message" when workspace.yaml has no summary
+        // (long-running sessions compact events.jsonl, making the "first" message stale)
+        if !has_ws_content {
+            if let Some(ref msg) = first_message {
+                summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+            }
         }
         if let Some(ref msg) = last_user {
-            if first_message.as_ref() != Some(msg) {
+            if first_message.as_ref() != Some(msg) && ws_summary.map(|s| s.as_str()) != Some(msg.as_str()) {
                 summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
             }
         }
@@ -667,12 +671,14 @@ impl Provider for CopilotProvider {
                 String::new()
             };
 
-            // Append first user message + last user message + prev/last assistant response for context
-            if let Some(ref msg) = first_message {
-                summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+            // Append recent context — skip stale "first message" when workspace.yaml has summary
+            if !has_ws_content {
+                if let Some(ref msg) = first_message {
+                    summary = format!("{}\n\n--- First message ---\n{}", summary, msg);
+                }
             }
             if let Some(ref msg) = last_user {
-                if first_message.as_ref() != Some(msg) {
+                if first_message.as_ref() != Some(msg) && ws_summary.map(|s| s.as_str()) != Some(msg.as_str()) {
                     summary = format!("{}\n\n--- Last user message ---\n{}", summary, msg);
                 }
             }
