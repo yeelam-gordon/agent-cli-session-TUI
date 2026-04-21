@@ -629,17 +629,18 @@ impl Provider for CopilotProvider {
         let events_path = dir.join("events.jsonl");
         let text = std::fs::read_to_string(&events_path).ok()?;
 
-        // Scan backwards through the last ~200 lines for the latest report_intent
+        // Scan backwards from end to find the latest report_intent efficiently
         let lines: Vec<&str> = text.lines().collect();
-        let scan_start = lines.len().saturating_sub(200);
-        let mut latest_intent: Option<String> = None;
 
-        for line in &lines[scan_start..] {
+        for line in lines.iter().rev() {
             if !line.contains("report_intent") {
                 continue;
             }
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                // Structure: {"type":"assistant.message","data":{"toolRequests":[{"name":"report_intent","arguments":{"intent":"..."}}]}}
+                // Only match assistant.message events (skip system.message text mentions)
+                if val.get("type").and_then(|v| v.as_str()) != Some("assistant.message") {
+                    continue;
+                }
                 if let Some(requests) = val
                     .get("data")
                     .and_then(|d| d.get("toolRequests"))
@@ -654,7 +655,7 @@ impl Provider for CopilotProvider {
                             {
                                 let trimmed = intent.trim();
                                 if !trimmed.is_empty() {
-                                    latest_intent = Some(trimmed.to_string());
+                                    return Some(trimmed.to_string());
                                 }
                             }
                         }
@@ -663,6 +664,6 @@ impl Provider for CopilotProvider {
             }
         }
 
-        latest_intent
+        None
     }
 }

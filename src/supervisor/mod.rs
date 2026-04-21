@@ -288,6 +288,7 @@ Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type -Name W -Namespace U -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
 '@
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $wtWindows = $root.FindAll(
@@ -306,7 +307,7 @@ foreach ($w in $wtWindows) {{
       $si = $t.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
       $si.Select()
       $hwnd = [IntPtr]$w.Current.NativeWindowHandle
-      [U.W]::ShowWindow($hwnd, 9) | Out-Null
+      if ([U.W]::IsIconic($hwnd)) {{ [U.W]::ShowWindow($hwnd, 9) | Out-Null }}
       [U.W]::SetForegroundWindow($hwnd) | Out-Null
       exit 0
     }}
