@@ -380,6 +380,64 @@ impl App {
         Ok(())
     }
 
+    /// Handle Enter key: focus running/waiting sessions, resume others.
+    /// Shared between normal mode and search mode.
+    fn handle_enter(&mut self, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
+        if let Some(session) = self.selected_session() {
+            let psid = session.provider_session_id.clone();
+            let pname = session.provider_name.clone();
+            let title = session.title.clone();
+            let tab_title = session.tab_title.clone();
+            let scwd = session.cwd.to_string_lossy().to_string();
+            let is_running = session.state.process == crate::models::ProcessState::Running;
+
+            crate::log::info(&format!(
+                "Enter: {} state={:?} process={:?} tab_title={:?}",
+                crate::util::short_id(&psid, 8),
+                session.state.label(),
+                session.state.process,
+                tab_title.as_deref().unwrap_or("None"),
+            ));
+
+            if is_running {
+                if let Some(ref tt) = tab_title {
+                    let _ = cmd_tx.send(SupervisorCommand::FocusSession {
+                        tab_title: Some(tt.clone()),
+                        title: title.clone(),
+                        provider_session_id: psid.clone(),
+                    });
+                    self.status_message = format!(
+                        "🔍 Focusing: {} ({})",
+                        tt, crate::util::short_id(&psid, 8)
+                    );
+                    self.log_lines.push(format!(
+                        "Focusing tab: {} ({})",
+                        tt, crate::util::short_id(&psid, 8)
+                    ));
+                } else {
+                    self.status_message = format!(
+                        "⚠ Tab focus not available for {} sessions",
+                        pname
+                    );
+                }
+            } else {
+                let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
+                    provider_session_id: psid.clone(),
+                    provider_key: pname,
+                    session_cwd: scwd,
+                });
+                self.status_message = format!(
+                    "▶ Resuming: {} ({})",
+                    title, crate::util::short_id(&psid, 8)
+                );
+                self.log_lines.push(format!(
+                    "Resuming: {} ({})",
+                    title, crate::util::short_id(&psid, 8)
+                ));
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
         // Search mode handles its own keys
         if self.search_active {
@@ -390,27 +448,14 @@ impl App {
                     self.apply_filter();
                 }
                 KeyCode::Enter => {
-                    // Exit search and resume the selected session
+                    // Exit search mode, then open/focus the selected session
                     self.search_active = false;
-                    if let Some(session) = self.selected_session() {
-                        let psid = session.provider_session_id.clone();
-                        let pname = session.provider_name.clone();
-                        let title = session.title.clone();
-                        let scwd = session.cwd.to_string_lossy().to_string();
-                        let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
-                            provider_session_id: psid.clone(),
-                            provider_key: pname,
-                            session_cwd: scwd,
-                        });
-                        self.status_message = format!(
-                            "▶ Resuming: {} ({})",
-                            title, crate::util::short_id(&psid, 8)
-                        );
-                        self.log_lines.push(format!(
-                            "Resuming: {} ({})",
-                            title, crate::util::short_id(&psid, 8)
-                        ));
-                    }
+                    // Reuse the same Enter logic as normal mode
+                    self.handle_enter(cmd_tx);
+                }
+                KeyCode::Tab => {
+                    // Switch to detail pane while keeping search results
+                    self.focus = Focus::Detail;
                 }
                 KeyCode::Up => {
                     // Navigate results while still in search mode
@@ -497,65 +542,7 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    if let Some(session) = self.selected_session() {
-                        let psid = session.provider_session_id.clone();
-                        let pname = session.provider_name.clone();
-                        let title = session.title.clone();
-                        let tab_title = session.tab_title.clone();
-                        let scwd = session.cwd.to_string_lossy().to_string();
-                        let is_running = session.state.process == crate::models::ProcessState::Running;
-
-                        crate::log::info(&format!(
-                            "Enter: {} state={:?} process={:?} tab_title={:?}",
-                            crate::util::short_id(&psid, 8),
-                            session.state.label(),
-                            session.state.process,
-                            tab_title.as_deref().unwrap_or("None"),
-                        ));
-
-                        if is_running {
-                            if let Some(ref tt) = tab_title {
-                                // Provider supports tab-title: try to focus the WT tab
-                                let _ = cmd_tx.send(SupervisorCommand::FocusSession {
-                                    tab_title: Some(tt.clone()),
-                                    title: title.clone(),
-                                    provider_session_id: psid.clone(),
-                                });
-                                self.status_message = format!(
-                                    "🔍 Focusing: {} ({})",
-                                    tt,
-                                    crate::util::short_id(&psid, 8)
-                                );
-                                self.log_lines.push(format!(
-                                    "Focusing tab: {} ({})",
-                                    tt,
-                                    crate::util::short_id(&psid, 8)
-                                ));
-                            } else {
-                                // No tab-title support — can't focus a running session
-                                self.status_message = format!(
-                                    "⚠ Tab focus not available for {} sessions",
-                                    pname
-                                );
-                            }
-                        } else {
-                            let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
-                                provider_session_id: psid.clone(),
-                                provider_key: pname,
-                                session_cwd: scwd,
-                            });
-                            self.status_message = format!(
-                                "▶ Resuming: {} ({})",
-                                title,
-                                crate::util::short_id(&psid, 8)
-                            );
-                            self.log_lines.push(format!(
-                                "Resuming: {} ({})",
-                                title,
-                                crate::util::short_id(&psid, 8)
-                            ));
-                        }
-                    }
+                    self.handle_enter(cmd_tx);
                 }
                 KeyCode::Char('a') => {
                     if let Some(session) = self.selected_session() {
