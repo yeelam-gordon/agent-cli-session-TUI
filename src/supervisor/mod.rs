@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,6 +47,97 @@ pub enum SupervisorCommand {
     Shutdown,
 }
 
+// ---------------------------------------------------------------------------
+// Session ViewModel — merges provider results incrementally
+// ---------------------------------------------------------------------------
+
+/// Tracks all known sessions, keyed by session ID.
+/// When a provider returns new results, only that provider's sessions are diffed:
+/// - New sessions are added
+/// - Missing sessions (from that provider) are removed
+/// - Existing sessions are updated in-place (state, tab_title, etc.)
+///
+/// This allows progressive updates without flicker — each provider's results
+/// merge independently regardless of arrival order.
+struct SessionViewModel {
+    /// All known sessions indexed by their unique `id` field.
+    sessions: HashMap<String, Session>,
+}
+
+impl SessionViewModel {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+        }
+    }
+
+    /// Merge results from a single provider. Returns `true` if anything changed.
+    fn merge_provider(&mut self, provider_name: &str, incoming: Vec<Session>) -> bool {
+        let mut changed = false;
+
+        // Build set of incoming IDs for this provider
+        let incoming_ids: std::collections::HashSet<String> =
+            incoming.iter().map(|s| s.id.clone()).collect();
+
+        // Remove sessions from this provider that are no longer present
+        let before_len = self.sessions.len();
+        self.sessions
+            .retain(|_, s| s.provider_name != provider_name || incoming_ids.contains(&s.id));
+        if self.sessions.len() != before_len {
+            changed = true;
+        }
+
+        // Upsert incoming sessions
+        for s in incoming {
+            match self.sessions.entry(s.id.clone()) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(s);
+                    changed = true;
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let existing = e.get_mut();
+                    // Update mutable fields; keep stable identity
+                    if existing.state != s.state
+                        || existing.tab_title != s.tab_title
+                        || existing.updated_at != s.updated_at
+                        || existing.pid != s.pid
+                        || existing.title != s.title
+                        || existing.summary != s.summary
+                    {
+                        *existing = s;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        changed
+    }
+
+    /// Produce sorted active/hidden lists from current state.
+    fn snapshot(
+        &self,
+        archive: &Option<std::sync::MutexGuard<'_, ArchiveStore>>,
+    ) -> (Vec<Session>, Vec<Session>) {
+        let mut active = Vec::new();
+        let mut hidden = Vec::new();
+        for s in self.sessions.values() {
+            let is_archived = archive
+                .as_ref()
+                .map(|a| a.is_archived(&s.provider_name, &s.provider_session_id))
+                .unwrap_or(false);
+            if is_archived {
+                hidden.push(s.clone());
+            } else {
+                active.push(s.clone());
+            }
+        }
+        active.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        hidden.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        (active, hidden)
+    }
+}
+
 /// Background supervisor that owns process lifecycle and state monitoring.
 pub struct Supervisor {
     registry: Arc<ProviderRegistry>,
@@ -75,8 +167,11 @@ impl Supervisor {
         event_tx: mpsc::UnboundedSender<SupervisorEvent>,
         mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCommand>,
     ) {
+        // Shared viewmodel — persists across scan cycles for incremental diffing
+        let vm = Arc::new(Mutex::new(SessionViewModel::new()));
+
         // Initial scan (blocking — UI shows progressive results via try_recv)
-        if let Err(e) = self.scan_and_notify(&event_tx) {
+        if let Err(e) = self.scan_and_notify(&vm, &event_tx) {
             crate::log::error(&format!("Initial scan failed: {}", e));
             let _ = event_tx.send(SupervisorEvent::Error(e.to_string()));
         }
@@ -94,12 +189,13 @@ impl Supervisor {
                     // Run scan in background thread so commands aren't blocked
                     let registry = self.registry.clone();
                     let archive = self.archive.clone();
+                    let vm_clone = vm.clone();
                     let tx = event_tx.clone();
                     let scan_flag = scanning.clone();
                     scan_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::spawn(move || {
                         let scan_start = std::time::Instant::now();
-                        if let Err(e) = Self::scan_providers(&registry, &archive, &tx) {
+                        if let Err(e) = Self::scan_providers(&registry, &archive, &vm_clone, &tx) {
                             crate::log::warn(&format!("Scan error: {}", e));
                             let _ = tx.send(SupervisorEvent::Error(e.to_string()));
                         }
@@ -125,9 +221,10 @@ impl Supervisor {
                             // Trigger an immediate background scan
                             let registry = self.registry.clone();
                             let archive_c = self.archive.clone();
+                            let vm_clone = vm.clone();
                             let tx = event_tx.clone();
                             std::thread::spawn(move || {
-                                let _ = Self::scan_providers(&registry, &archive_c, &tx);
+                                let _ = Self::scan_providers(&registry, &archive_c, &vm_clone, &tx);
                             });
                         }
                         SupervisorCommand::FocusSession { tab_title, title, provider_session_id } => {
@@ -141,27 +238,29 @@ impl Supervisor {
         }
     }
 
-    fn scan_and_notify(&self, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
-        Self::scan_providers(&self.registry, &self.archive, event_tx)
+    fn scan_and_notify(&self, vm: &Arc<Mutex<SessionViewModel>>, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
+        Self::scan_providers(&self.registry, &self.archive, vm, event_tx)
     }
 
     /// Static scan function — can run on any thread without borrowing &self.
+    /// Uses SessionViewModel to merge results incrementally per-provider,
+    /// sending progressive updates that never flicker.
     fn scan_providers(
         registry: &Arc<ProviderRegistry>,
         archive: &Arc<Mutex<ArchiveStore>>,
+        vm: &Arc<Mutex<SessionViewModel>>,
         event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) -> Result<()> {
         let providers: Vec<_> = registry.providers().iter()
             .filter(|p| p.capabilities().supports_discovery)
             .collect();
 
-        let archive = archive.lock().ok();
-        let mut all_active: Vec<Session> = Vec::new();
-        let mut all_hidden: Vec<Session> = Vec::new();
+        let archive_guard = archive.lock().ok();
 
-        // Scan providers in parallel, collect all results, send one final update
+        // Scan providers in parallel; merge each provider's results as they arrive
         std::thread::scope(|s| {
-            let (tx, rx) = std::sync::mpsc::channel::<Vec<Session>>();
+            // Channel carries (provider_key, sessions)
+            let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<Session>)>();
 
             for provider in &providers {
                 let tx = tx.clone();
@@ -186,33 +285,24 @@ impl Supervisor {
                         "Provider '{}' scan: {} sessions in {:?}",
                         provider.key(), sessions.len(), pstart.elapsed()
                     ));
-                    let _ = tx.send(sessions);
+                    let _ = tx.send((provider.key().to_string(), sessions));
                 });
             }
             drop(tx);
 
-            // Collect all provider results
-            for sessions in rx {
-                for s in sessions {
-                    let is_archived = archive
-                        .as_ref()
-                        .map(|a| a.is_archived(&s.provider_name, &s.provider_session_id))
-                        .unwrap_or(false);
-                    if is_archived {
-                        all_hidden.push(s);
-                    } else {
-                        all_active.push(s);
+            // Merge each provider's results into the viewmodel as they arrive
+            for (provider_key, sessions) in rx {
+                if let Ok(mut vm_lock) = vm.lock() {
+                    let changed = vm_lock.merge_provider(&provider_key, sessions);
+                    if changed {
+                        let (active, hidden) = vm_lock.snapshot(&archive_guard);
+                        let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
+                            active,
+                            hidden,
+                        });
                     }
                 }
             }
-        });
-
-        // Single atomic update — no flicker from partial results
-        all_active.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        all_hidden.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
-            active: all_active,
-            hidden: all_hidden,
         });
 
         Ok(())

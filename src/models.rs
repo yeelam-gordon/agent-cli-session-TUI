@@ -46,7 +46,7 @@ pub enum Confidence {
 }
 
 /// Composite session state derived from multiple signal axes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
     pub process: ProcessState,
     pub interaction: InteractionState,
