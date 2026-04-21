@@ -55,8 +55,8 @@ pub struct App {
     log_max_lines: usize,
     /// Sessions archived locally this cycle — filtered out until supervisor confirms.
     pending_archives: Vec<String>,
-    /// Optional semantic search plugin (loaded at startup if DLL present).
-    semantic: crate::search::SemanticPlugin,
+    /// Optional semantic search plugin (loaded in background if DLL present).
+    semantic: std::sync::Arc<std::sync::Mutex<crate::search::SemanticPlugin>>,
 }
 
 impl App {
@@ -64,14 +64,21 @@ impl App {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
 
-        // Try to load semantic search plugin
-        let mut semantic = crate::search::SemanticPlugin::new();
-        let cache_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("agent-session-tui")
-            .join("models");
-        std::fs::create_dir_all(&cache_dir).ok();
-        semantic.try_load(&cache_dir.to_string_lossy());
+        // Semantic plugin loaded in background thread (never blocks UI)
+        let semantic = std::sync::Arc::new(std::sync::Mutex::new(crate::search::SemanticPlugin::new()));
+        {
+            let sem_clone = semantic.clone();
+            std::thread::spawn(move || {
+                let cache_dir = dirs::data_local_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("agent-session-tui")
+                    .join("models");
+                std::fs::create_dir_all(&cache_dir).ok();
+                if let Ok(mut plugin) = sem_clone.lock() {
+                    plugin.try_load(&cache_dir.to_string_lossy());
+                }
+            });
+        }
 
         Self {
             sessions: Vec::new(),
@@ -112,14 +119,16 @@ impl App {
     }
 
     /// Rebuild the filtered indices based on the search query.
-    /// Uses tiered ranking: exact match → word match → partial match → state badge.
+    /// Uses tiered ranking: exact match → word match → partial match → state label.
+    /// Semantic search is NOT used during interactive typing (too expensive per-keystroke).
+    /// It will be used via pre-computed embeddings in a future update.
     fn apply_filter(&mut self) {
         let view = self.current_view_sessions();
         if self.search_query.is_empty() {
             self.filtered_indices = (0..view.len()).collect();
         } else {
-            let sem = if self.semantic.is_ready() { Some(&self.semantic) } else { None };
-            let results = crate::search::ranked_search(view, &self.search_query, sem);
+            // Keyword + fuzzy only during interactive typing (instant)
+            let results = crate::search::ranked_search(view, &self.search_query, None);
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
         if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {
@@ -822,7 +831,8 @@ impl App {
             ViewMode::Active => "Shift+Tab: show archived",
             ViewMode::Hidden => "Shift+Tab: show active",
         };
-        let sem_indicator = match self.semantic.status() {
+        let sem_status = self.semantic.lock().map(|s| s.status().clone()).unwrap_or(crate::search::SemanticStatus::Unavailable);
+        let sem_indicator = match sem_status {
             crate::search::SemanticStatus::Ready => Span::styled("🧠 Semantic ", Style::default().fg(Color::Green)),
             crate::search::SemanticStatus::Loading => Span::styled("⏳ Loading model... ", Style::default().fg(Color::Yellow)),
             crate::search::SemanticStatus::Failed(_) => Span::styled("⚠ Semantic failed ", Style::default().fg(Color::Red)),
