@@ -33,7 +33,7 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 └─────────────────────────────────────────────────────────────┘
 ```
 
-No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh (non-blocking — `AtomicBool` scan guard prevents overlapping scans). The `SessionViewModel` merges results incrementally per-provider for progressive loading. The only file we write is `archived.json` for tracking hidden sessions.
+No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh. The `SessionViewModel` merges results incrementally per-provider for progressive loading.
 
 ### Session States
 
@@ -90,7 +90,7 @@ command = "copilot"
 default_args = []
 state_dir = '~/.copilot/session-state'
 resume_flag = "--resume"
-launch_method = "wt"    # "wt" | "wtai" | "pwsh" | "cmd"
+launch_method = "wt"    # "wt" | "pwsh" | "cmd"
 launch_fallback = "cmd" # optional — fallback if primary not found
 
 [providers.claude]
@@ -126,22 +126,12 @@ Search uses a three-tier ranking system: **exact substring** → **fuzzy word** 
 
 The plugin lives in `semantic-plugin/` and is built separately (see [Release Packages](#release-packages)).
 
-## Tab Focus
-
-When you press `Enter` on a **Running** session, the TUI focuses the existing Windows Terminal tab instead of launching a new one. This uses native Windows UI Automation (COM-based, via the `windows` crate):
-
-1. Finds all `CASCADIA_HOSTING_WINDOW_CLASS` windows (WT + Agentic Terminal)
-2. Searches descendant `TabItem` elements for a name match
-3. Selects the tab via `SelectionItemPattern` and brings the window to foreground
-
-Tab names are extracted by each provider's `tab_title()` method (e.g., Copilot uses `report_intent` tool calls). On non-Windows platforms, `focus_wt_tab()` is a no-op.
-
 ## Release Packages
 
 | Package | Size | Contents |
 |---------|------|----------|
 | **Core** | ~1.1 MB | `agent-session-tui` binary only |
-| **Semantic** | ~26 MB | Core + `semantic_search` DLL + ONNX model |
+| **Semantic** | ~26 MB | Core + `semantic_search_plugin` DLL |
 
 Built for **x64** and **arm64** across all three platforms (Windows, Linux, macOS).
 
@@ -170,11 +160,10 @@ Launch/resume/kill are handled by the framework from `config.toml`. Register you
 Requires the **MSVC toolchain** on Windows (for the `windows` crate used by tab focus):
 
 ```bash
+rustup override set stable-x86_64-pc-windows-msvc  # Windows only
 cargo build --release
 # Binary: target/release/agent-session-tui(.exe)
 ```
-
-The `rust-toolchain.toml` pins `stable-x86_64-pc-windows-msvc` automatically.
 
 ## Testing
 
@@ -201,4 +190,4 @@ For project internals, design decisions, and AI agent context, see [`AGENTS.md`]
 
 ## License
 
-MIT
+[MIT](LICENSE)
