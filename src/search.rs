@@ -19,7 +19,12 @@ pub struct SearchResult {
 }
 
 /// Rank sessions against a query. Returns indices sorted by relevance (highest first).
-pub fn ranked_search(sessions: &[Session], query: &str) -> Vec<SearchResult> {
+/// If a `SemanticPlugin` is provided and ready, semantic similarity boosts scores.
+pub fn ranked_search(
+    sessions: &[Session],
+    query: &str,
+    semantic: Option<&SemanticPlugin>,
+) -> Vec<SearchResult> {
     if query.is_empty() {
         return (0..sessions.len())
             .map(|i| SearchResult { index: i, score: 0 })
@@ -29,11 +34,31 @@ pub fn ranked_search(sessions: &[Session], query: &str) -> Vec<SearchResult> {
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
+    // Pre-compute query embedding if semantic plugin is ready
+    let query_embedding = semantic
+        .filter(|s| s.is_ready())
+        .and_then(|s| s.embed(query));
+
     let mut results: Vec<SearchResult> = sessions
         .iter()
         .enumerate()
         .filter_map(|(i, s)| {
-            let score = score_session(s, &query_lower, &query_words);
+            let mut score = score_session(s, &query_lower, &query_words);
+
+            // Tier 3: semantic boost (additive, never overrides keyword matches)
+            if let Some(ref q_emb) = query_embedding {
+                let sem = semantic.expect("checked above");
+                let session_text = format!("{} {}", s.title, s.summary);
+                if let Some(s_emb) = sem.embed(&session_text) {
+                    if let Some(sim) = sem.cosine(q_emb, &s_emb) {
+                        if sim > 0.4 {
+                            let boost = ((sim - 0.4) * 333.0).min(200.0) as u32;
+                            score = score.saturating_add(boost);
+                        }
+                    }
+                }
+            }
+
             if score > 0 { Some(SearchResult { index: i, score }) } else { None }
         })
         .collect();
@@ -124,6 +149,8 @@ pub enum SemanticStatus {
 #[allow(dead_code)]
 pub struct SemanticPlugin {
     status: SemanticStatus,
+    lib: Option<libloading::Library>,
+    dim: i32,
 }
 
 impl Default for SemanticPlugin {
@@ -132,11 +159,12 @@ impl Default for SemanticPlugin {
     }
 }
 
-#[allow(dead_code)]
 impl SemanticPlugin {
     pub fn new() -> Self {
         Self {
             status: SemanticStatus::Unavailable,
+            lib: None,
+            dim: 0,
         }
     }
 
@@ -144,30 +172,135 @@ impl SemanticPlugin {
         &self.status
     }
 
+    pub fn is_ready(&self) -> bool {
+        self.status == SemanticStatus::Ready
+    }
+
     /// Try to load the semantic search DLL from next to the executable.
-    pub fn try_load(&mut self) {
+    /// `cache_dir` is where the model files will be downloaded/cached.
+    pub fn try_load(&mut self, cache_dir: &str) {
         let dll_name = if cfg!(windows) {
-            "semantic_search.dll"
+            "semantic_search_plugin.dll"
         } else if cfg!(target_os = "macos") {
-            "libsemantic_search.dylib"
+            "libsemantic_search_plugin.dylib"
         } else {
-            "libsemantic_search.so"
+            "libsemantic_search_plugin.so"
         };
 
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
-        if let Some(dir) = exe_dir {
-            let dll_path = dir.join(dll_name);
-            if dll_path.exists() {
-                crate::log::info(&format!("Semantic plugin found: {:?}", dll_path));
-                // TODO: load via libloading, call semantic_init
-                self.status = SemanticStatus::Unavailable; // placeholder
-            } else {
-                self.status = SemanticStatus::Unavailable;
-            }
+        let dll_path = match exe_dir {
+            Some(dir) => dir.join(dll_name),
+            None => return,
+        };
+
+        if !dll_path.exists() {
+            crate::log::info(&format!("Semantic plugin not found at {:?}", dll_path));
+            return;
         }
+
+        crate::log::info(&format!("Loading semantic plugin: {:?}", dll_path));
+        self.status = SemanticStatus::Loading;
+
+        let lib = match unsafe { libloading::Library::new(&dll_path) } {
+            Ok(l) => l,
+            Err(e) => {
+                let msg = format!("Failed to load DLL: {}", e);
+                crate::log::error(&msg);
+                self.status = SemanticStatus::Failed(msg);
+                return;
+            }
+        };
+
+        // Call semantic_init with cache directory
+        let init_result: i32 = unsafe {
+            let init: libloading::Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> i32> =
+                match lib.get(b"semantic_init") {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let msg = format!("Missing semantic_init: {}", e);
+                        crate::log::error(&msg);
+                        self.status = SemanticStatus::Failed(msg);
+                        return;
+                    }
+                };
+            let c_dir = std::ffi::CString::new(cache_dir).unwrap_or_default();
+            init(c_dir.as_ptr())
+        };
+
+        if init_result != 0 {
+            let msg = "semantic_init returned error".to_string();
+            crate::log::error(&msg);
+            self.status = SemanticStatus::Failed(msg);
+            return;
+        }
+
+        // Get embedding dimension
+        let dim: i32 = unsafe {
+            let dim_fn: libloading::Symbol<unsafe extern "C" fn() -> i32> =
+                match lib.get(b"semantic_dim") {
+                    Ok(f) => f,
+                    Err(_) => {
+                        self.status = SemanticStatus::Failed("Missing semantic_dim".into());
+                        return;
+                    }
+                };
+            dim_fn()
+        };
+
+        if dim <= 0 {
+            self.status = SemanticStatus::Failed("Invalid embedding dimension".into());
+            return;
+        }
+
+        self.dim = dim;
+        self.lib = Some(lib);
+        self.status = SemanticStatus::Ready;
+        crate::log::info(&format!("Semantic plugin ready (dim={})", dim));
+    }
+
+    /// Embed a single text string. Returns None if plugin not ready.
+    pub fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        let lib = self.lib.as_ref()?;
+        if self.dim <= 0 {
+            return None;
+        }
+
+        let mut out = vec![0.0f32; self.dim as usize];
+        let c_text = std::ffi::CString::new(text).ok()?;
+
+        let result: i32 = unsafe {
+            let embed_fn: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_char, *mut f32, i32) -> i32,
+            > = lib.get(b"semantic_embed").ok()?;
+            embed_fn(c_text.as_ptr(), out.as_mut_ptr(), self.dim)
+        };
+
+        if result > 0 {
+            out.truncate(result as usize);
+            Some(out)
+        } else {
+            None
+        }
+    }
+
+    /// Compute cosine similarity between two embedding vectors.
+    pub fn cosine(&self, a: &[f32], b: &[f32]) -> Option<f32> {
+        let lib = self.lib.as_ref()?;
+        if a.len() != b.len() || a.is_empty() {
+            return None;
+        }
+
+        let sim: f32 = unsafe {
+            let cosine_fn: libloading::Symbol<
+                unsafe extern "C" fn(*const f32, *const f32, i32) -> f32,
+            > = lib.get(b"semantic_cosine").ok()?;
+            cosine_fn(a.as_ptr(), b.as_ptr(), a.len() as i32)
+        };
+
+        if sim <= -2.0 { None } else { Some(sim) }
     }
 }
 
@@ -232,13 +365,13 @@ mod tests {
             make_session("a", "x", "copilot"),
             make_session("b", "y", "claude"),
         ];
-        let results = ranked_search(&sessions, "");
+        let results = ranked_search(&sessions, "", None);
         assert_eq!(results.len(), 2);
     }
 
     #[test]
     fn empty_sessions_returns_empty() {
-        let results = ranked_search(&[], "something");
+        let results = ranked_search(&[], "something", None);
         assert!(results.is_empty());
     }
 
@@ -247,7 +380,7 @@ mod tests {
         let sessions = vec![
             make_session("deploy server", "production release", "copilot"),
         ];
-        let results = ranked_search(&sessions, "xyznonexistent");
+        let results = ranked_search(&sessions, "xyznonexistent", None);
         assert!(results.is_empty());
     }
 
@@ -259,7 +392,7 @@ mod tests {
             make_session("fix auth bug", "some work", "copilot"),
             make_session("deploy server", "auth related fix", "copilot"),
         ];
-        let results = ranked_search(&sessions, "fix auth");
+        let results = ranked_search(&sessions, "fix auth", None);
         assert!(!results.is_empty());
         assert_eq!(results[0].index, 0); // exact title match first
         assert!(results[0].score >= 1000);
@@ -271,7 +404,7 @@ mod tests {
             make_session("unrelated title", "fix the authentication flow", "copilot"),
             make_session("fix the authentication flow", "unrelated summary", "copilot"),
         ];
-        let results = ranked_search(&sessions, "fix the authentication");
+        let results = ranked_search(&sessions, "fix the authentication", None);
         assert_eq!(results[0].index, 1); // title match scores higher
         assert!(results[0].score > results[1].score);
     }
@@ -281,7 +414,7 @@ mod tests {
         let sessions = vec![
             make_session_full("some title", "summary", "copilot", "703611e6-890c-4df2", "D:\\Demo"),
         ];
-        let results = ranked_search(&sessions, "703611e6");
+        let results = ranked_search(&sessions, "703611e6", None);
         assert_eq!(results.len(), 1);
         assert!(results[0].score >= 800);
     }
@@ -291,7 +424,7 @@ mod tests {
         let sessions = vec![
             make_session_full("title", "summary", "copilot", "abc", "D:\\Demo\\myproject"),
         ];
-        let results = ranked_search(&sessions, "myproject");
+        let results = ranked_search(&sessions, "myproject", None);
         assert_eq!(results.len(), 1);
         assert!(results[0].score >= 400);
     }
@@ -302,7 +435,7 @@ mod tests {
             make_session("title a", "summary a", "copilot"),
             make_session("title b", "summary b", "claude"),
         ];
-        let results = ranked_search(&sessions, "claude");
+        let results = ranked_search(&sessions, "claude", None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].index, 1);
     }
@@ -312,7 +445,7 @@ mod tests {
         let sessions = vec![
             make_session("Fix Authentication Bug", "IMPORTANT work", "copilot"),
         ];
-        let results = ranked_search(&sessions, "fix authentication");
+        let results = ranked_search(&sessions, "fix authentication", None);
         assert_eq!(results.len(), 1);
         assert!(results[0].score >= 1000);
     }
@@ -325,7 +458,7 @@ mod tests {
             make_session("unrelated work", "nothing here", "copilot"),
             make_session("deploy server", "fixed the auth bug yesterday", "copilot"),
         ];
-        let results = ranked_search(&sessions, "auth bug");
+        let results = ranked_search(&sessions, "auth bug", None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].index, 1);
     }
@@ -338,7 +471,7 @@ mod tests {
             // Title has exact substring "auth bug"
             make_session("fix auth bug now", "todo", "copilot"),
         ];
-        let results = ranked_search(&sessions, "auth bug");
+        let results = ranked_search(&sessions, "auth bug", None);
         assert_eq!(results[0].index, 1); // exact match ranks first
         assert!(results[0].score > results[1].score);
     }
@@ -349,7 +482,7 @@ mod tests {
             make_session("authentication module", "handles login", "copilot"),
         ];
         // "auth" is a substring of "authentication" — should match
-        let results = ranked_search(&sessions, "auth");
+        let results = ranked_search(&sessions, "auth", None);
         assert_eq!(results.len(), 1);
     }
 
@@ -360,7 +493,7 @@ mod tests {
         ];
         // "it" is < 3 chars, shouldn't trigger partial word match on its own
         // but "fix it" as full query IS an exact substring match in title
-        let results = ranked_search(&sessions, "it");
+        let results = ranked_search(&sessions, "it", None);
         // "it" appears in title as exact substring match
         assert_eq!(results.len(), 1);
     }
@@ -373,7 +506,7 @@ mod tests {
         s.state.process = ProcessState::Running;
         s.state.interaction = InteractionState::Busy;
         let sessions = vec![s];
-        let results = ranked_search(&sessions, "running");
+        let results = ranked_search(&sessions, "running", None);
         assert_eq!(results.len(), 1);
     }
 
@@ -383,7 +516,7 @@ mod tests {
         s.state.process = ProcessState::Running;
         s.state.interaction = InteractionState::WaitingInput;
         let sessions = vec![s];
-        let results = ranked_search(&sessions, "waiting");
+        let results = ranked_search(&sessions, "waiting", None);
         assert_eq!(results.len(), 1);
     }
 
@@ -392,7 +525,7 @@ mod tests {
         let mut s = make_session("my session", "stuff", "copilot");
         s.state.persistence = PersistenceState::Resumable;
         let sessions = vec![s];
-        let results = ranked_search(&sessions, "resumable");
+        let results = ranked_search(&sessions, "resumable", None);
         assert_eq!(results.len(), 1);
     }
 
@@ -405,7 +538,7 @@ mod tests {
         s2.state.interaction = InteractionState::Busy;
         // s2 matches "running" in state label (score 200)
         let sessions = vec![s1, s2];
-        let results = ranked_search(&sessions, "running");
+        let results = ranked_search(&sessions, "running", None);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].index, 0); // title match ranks higher
         assert!(results[0].score > results[1].score);
@@ -420,7 +553,7 @@ mod tests {
             make_session("auth system deploy", "nothing", "copilot"),         // title match (1000)
             make_session("other work", "stuff", "copilot"),                   // no match
         ];
-        let results = ranked_search(&sessions, "auth");
+        let results = ranked_search(&sessions, "auth", None);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].index, 1); // title match first (1000)
         assert_eq!(results[1].index, 0); // summary match second (600)
@@ -433,7 +566,7 @@ mod tests {
             make_session("auth signup", "new user auth", "claude"),
             make_session("deploy server", "no match here", "copilot"),
         ];
-        let results = ranked_search(&sessions, "auth");
+        let results = ranked_search(&sessions, "auth", None);
         assert_eq!(results.len(), 2); // only 2 match, not the deploy one
     }
 
@@ -445,7 +578,7 @@ mod tests {
             make_session("fix the authentication bug", "work", "copilot"),
             make_session("authentication fix", "bug report", "copilot"),
         ];
-        let results = ranked_search(&sessions, "fix the authentication bug");
+        let results = ranked_search(&sessions, "fix the authentication bug", None);
         assert_eq!(results[0].index, 0); // exact phrase match
     }
 
@@ -455,7 +588,7 @@ mod tests {
             make_session("the server has a bug in authentication", "details", "copilot"),
         ];
         // "authentication bug" — both words present but not as exact phrase
-        let results = ranked_search(&sessions, "authentication bug");
+        let results = ranked_search(&sessions, "authentication bug", None);
         assert_eq!(results.len(), 1);
         // Should match via word-level matching (tier 2)
         assert!(results[0].score > 0);

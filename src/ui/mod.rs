@@ -55,12 +55,24 @@ pub struct App {
     log_max_lines: usize,
     /// Sessions archived locally this cycle — filtered out until supervisor confirms.
     pending_archives: Vec<String>,
+    /// Optional semantic search plugin (loaded at startup if DLL present).
+    semantic: crate::search::SemanticPlugin,
 }
 
 impl App {
     pub fn new(provider_keys: Vec<String>, default_provider: String, log_max_lines: usize) -> Self {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
+
+        // Try to load semantic search plugin
+        let mut semantic = crate::search::SemanticPlugin::new();
+        let cache_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("agent-session-tui")
+            .join("models");
+        std::fs::create_dir_all(&cache_dir).ok();
+        semantic.try_load(&cache_dir.to_string_lossy());
+
         Self {
             sessions: Vec::new(),
             hidden_sessions: Vec::new(),
@@ -80,6 +92,7 @@ impl App {
             search_query: String::new(),
             log_max_lines,
             pending_archives: Vec::new(),
+            semantic,
         }
     }
 
@@ -105,7 +118,8 @@ impl App {
         if self.search_query.is_empty() {
             self.filtered_indices = (0..view.len()).collect();
         } else {
-            let results = crate::search::ranked_search(view, &self.search_query, None);
+            let sem = if self.semantic.is_ready() { Some(&self.semantic) } else { None };
+            let results = crate::search::ranked_search(view, &self.search_query, sem);
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
         if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {
@@ -808,7 +822,14 @@ impl App {
             ViewMode::Active => "Shift+Tab: show archived",
             ViewMode::Hidden => "Shift+Tab: show active",
         };
+        let sem_indicator = match self.semantic.status() {
+            crate::search::SemanticStatus::Ready => Span::styled("🧠 Semantic ", Style::default().fg(Color::Green)),
+            crate::search::SemanticStatus::Loading => Span::styled("⏳ Loading model... ", Style::default().fg(Color::Yellow)),
+            crate::search::SemanticStatus::Failed(_) => Span::styled("⚠ Semantic failed ", Style::default().fg(Color::Red)),
+            crate::search::SemanticStatus::Unavailable => Span::raw(""),
+        };
         let status = Paragraph::new(Line::from(vec![
+            sem_indicator,
             Span::styled(" Tab", Style::default().fg(Color::Yellow)),
             Span::raw(": panel  "),
             Span::styled("↑↓", Style::default().fg(Color::Yellow)),
