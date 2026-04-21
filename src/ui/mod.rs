@@ -53,6 +53,12 @@ pub struct App {
     search_active: bool,
     search_query: String,
     log_max_lines: usize,
+    /// Providers that have reported in at least once. Once all are in, initial load is complete.
+    seen_providers: std::collections::HashSet<String>,
+    /// True once all providers have reported their first results.
+    initial_load_complete: bool,
+    /// True once user has manually pressed up/down. Prevents selection reset on refresh.
+    user_navigated: bool,
     /// Sessions archived locally this cycle — filtered out until supervisor confirms.
     pending_archives: Vec<String>,
     /// Which filtered indices had a semantic match boost (for ✨ indicator).
@@ -66,7 +72,8 @@ pub struct App {
 impl App {
     pub fn new(provider_keys: Vec<String>, default_provider: String, log_max_lines: usize) -> Self {
         let mut list_state = ListState::default();
-        list_state.select(Some(0));
+        // No selection until all providers report in
+        list_state.select(None);
 
         // Semantic plugin loaded in background thread (never blocks UI)
         let semantic = std::sync::Arc::new(std::sync::Mutex::new(crate::search::SemanticPlugin::new()));
@@ -84,6 +91,7 @@ impl App {
             });
         }
 
+        let provider_count = provider_keys.len();
         Self {
             sessions: Vec::new(),
             hidden_sessions: Vec::new(),
@@ -94,7 +102,7 @@ impl App {
             view_mode: ViewMode::Active,
             log_lines: vec!["Session manager started. Scanning for sessions...".into()],
             log_scroll: 0,
-            status_message: String::new(),
+            status_message: format!("Loading {} providers...", provider_count),
             should_quit: false,
             default_provider,
             provider_keys,
@@ -102,6 +110,9 @@ impl App {
             search_active: false,
             search_query: String::new(),
             log_max_lines,
+            seen_providers: std::collections::HashSet::new(),
+            initial_load_complete: false,
+            user_navigated: false,
             pending_archives: Vec::new(),
             semantic_matches: std::collections::HashSet::new(),
             semantic,
@@ -228,7 +239,7 @@ impl App {
                         let active_count = active.len();
                         let hidden_count = hidden.len();
 
-                        // Check if data actually changed (avoid needless re-filter + selection reset)
+                        // Check if data actually changed
                         let data_changed = active.len() != self.sessions.len()
                             || active.iter().zip(self.sessions.iter()).any(|(new, old)| {
                                 new.id != old.id
@@ -238,24 +249,45 @@ impl App {
                                     || new.updated_at != old.updated_at
                             });
 
-                        if data_changed {
-                            let prev_selected_id = self.selected_session()
-                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
+                        // Track which providers have reported in
+                        for s in &active {
+                            self.seen_providers.insert(s.provider_name.clone());
+                        }
+                        for s in &hidden {
+                            self.seen_providers.insert(s.provider_name.clone());
+                        }
+                        let all_providers_in = self.provider_keys.iter()
+                            .all(|k| self.seen_providers.contains(k));
 
-                            // Check if the session SET changed (add/remove) vs just field updates
+                        // First time all providers report → complete initial load
+                        if all_providers_in && !self.initial_load_complete {
+                            self.initial_load_complete = true;
+                        }
+
+                        if data_changed {
+                            let prev_selected_id = if self.user_navigated {
+                                self.selected_session()
+                                    .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
+                            } else {
+                                None
+                            };
+
                             let set_changed = active.len() != self.sessions.len()
                                 || active.iter().zip(self.sessions.iter()).any(|(new, old)| new.id != old.id);
 
                             self.sessions = active;
                             self.hidden_sessions = hidden;
 
-                            // Only re-filter if sessions were added/removed OR no search active.
-                            // State/title changes during active search don't change ranking.
                             if set_changed || !self.search_active {
                                 self.apply_filter();
 
-                                // Restore selection if user had navigated
-                                if let Some((prev_provider, prev_id)) = &prev_selected_id {
+                                if self.initial_load_complete && !self.user_navigated {
+                                    // Initial load done, user hasn't navigated → select row 0
+                                    self.selected_index = 0;
+                                    self.list_state.select(Some(0));
+                                    self.detail_scroll = 0;
+                                } else if let Some((prev_provider, prev_id)) = &prev_selected_id {
+                                    // User navigated → restore their position
                                     let view = self.current_view_sessions();
                                     if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
                                         let s = &view[idx];
@@ -264,14 +296,10 @@ impl App {
                                         self.selected_index = pos;
                                         self.list_state.select(Some(pos));
                                     }
+                                } else if !self.initial_load_complete {
+                                    // Still loading — no selection
+                                    self.list_state.select(None);
                                 }
-                            }
-
-                            // Reset detail scroll if selected session changed
-                            let new_selected_id = self.selected_session()
-                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
-                            if new_selected_id != prev_selected_id {
-                                self.detail_scroll = 0;
                             }
 
                             // Background semantic indexing
@@ -284,6 +312,13 @@ impl App {
                                     }
                                 }
                             });
+                        } else {
+                            // Data unchanged but check initial load completion
+                            if all_providers_in && self.list_state.selected().is_none() {
+                                self.selected_index = 0;
+                                self.list_state.select(Some(0));
+                                self.detail_scroll = 0;
+                            }
                         }
 
                         let now = chrono::Local::now().format("%H:%M:%S");
@@ -375,12 +410,14 @@ impl App {
                     if self.selected_index > 0 {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
+                        self.user_navigated = true;
                     }
                 }
                 KeyCode::Down => {
                     if self.selected_index + 1 < self.filtered_indices.len() {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
+                        self.user_navigated = true;
                     }
                 }
                 KeyCode::Backspace => {
@@ -419,6 +456,7 @@ impl App {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
                         self.detail_scroll = 0;
+                        self.user_navigated = true;
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -426,6 +464,7 @@ impl App {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
                         self.detail_scroll = 0;
+                        self.user_navigated = true;
                     }
                 }
                 KeyCode::Tab => {
