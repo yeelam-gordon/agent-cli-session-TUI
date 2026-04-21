@@ -39,6 +39,7 @@ pub enum SupervisorCommand {
         provider_key: String,
     },
     FocusSession {
+        tab_title: Option<String>,
         title: String,
         provider_session_id: String,
     },
@@ -106,8 +107,8 @@ impl Supervisor {
                             self.handle_archive(&provider_key, &provider_session_id, &event_tx);
                             let _ = self.scan_and_notify(&event_tx);
                         }
-                        SupervisorCommand::FocusSession { title, provider_session_id } => {
-                            Self::handle_focus(&title, &provider_session_id, &event_tx);
+                        SupervisorCommand::FocusSession { tab_title, title, provider_session_id } => {
+                            Self::handle_focus(tab_title.as_deref(), &title, &provider_session_id, &event_tx);
                         }
                     }
                 }
@@ -126,6 +127,12 @@ impl Supervisor {
                 s.spawn(move || {
                     let mut sessions = provider.discover_sessions().unwrap_or_default();
                     let _ = provider.match_processes(&mut sessions);
+                    // Extract tab titles for running sessions
+                    for session in &mut sessions {
+                        if session.state.process == crate::models::ProcessState::Running {
+                            session.tab_title = provider.tab_title(session);
+                        }
+                    }
                     sessions
                 })
             }).collect();
@@ -259,14 +266,20 @@ impl Supervisor {
 
     /// Try to focus an existing Windows Terminal tab by matching the title.
     fn handle_focus(
+        tab_title: Option<&str>,
         title: &str,
         session_id: &str,
         event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) {
         #[cfg(windows)]
         {
-            // Try matching by session title first, then by short session ID
-            let search_terms = [title.to_string(), session_id[..8.min(session_id.len())].to_string()];
+            // Search priority: tab_title (from CLI logs) → session title → short session ID
+            let mut search_terms: Vec<String> = Vec::new();
+            if let Some(tt) = tab_title {
+                search_terms.push(tt.to_string());
+            }
+            search_terms.push(title.to_string());
+            search_terms.push(crate::util::short_id(session_id, 8).to_string());
 
             for term in &search_terms {
                 let ps_script = format!(
@@ -318,15 +331,16 @@ exit 1
                 }
             }
 
-            crate::log::warn(&format!("Could not find tab for: {} / {}", title, session_id));
+            let display = tab_title.unwrap_or(title);
+            crate::log::warn(&format!("Could not find tab for: {} / {}", display, session_id));
             let _ = event_tx.send(SupervisorEvent::Error(
-                format!("Tab not found for '{}'", title),
+                format!("Tab not found for '{}'", display),
             ));
         }
 
         #[cfg(not(windows))]
         {
-            let _ = (title, session_id);
+            let _ = (tab_title, title, session_id);
             let _ = event_tx.send(SupervisorEvent::Error(
                 "Tab focus not supported on this platform".to_string(),
             ));

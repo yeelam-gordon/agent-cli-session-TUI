@@ -341,6 +341,7 @@ impl Provider for GeminiProvider {
                     provider_name: "gemini".into(),
                     cwd: cwd.clone(),
                     title,
+                    tab_title: None,
                     summary,
                     state: SessionState {
                         interaction,

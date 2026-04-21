@@ -115,6 +115,9 @@ pub struct Session {
     pub cwd: PathBuf,
     /// Short title derived from plan or first message.
     pub title: String,
+    /// Current terminal tab title (extracted from CLI logs, e.g. report_intent).
+    /// Used for tab-focus matching; `None` when the provider doesn't support it.
+    pub tab_title: Option<String>,
     /// Richer summary of what the session is doing/did.
     pub summary: String,
     /// Composite state.

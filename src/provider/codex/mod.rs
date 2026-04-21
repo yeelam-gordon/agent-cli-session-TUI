@@ -325,6 +325,7 @@ impl Provider for CodexProvider {
                 provider_name: "codex".into(),
                 cwd,
                 title,
+                tab_title: None,
                 summary,
                 state: SessionState::default(),
                 pid: None,

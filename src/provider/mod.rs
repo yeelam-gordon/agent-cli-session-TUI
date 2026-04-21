@@ -25,6 +25,7 @@ use crate::models::{ActivitySource, ProviderCapabilities, Session, SessionState,
 ///   - `session_detail()` — extra detail for the detail panel
 ///   - `activity_sources()` — log/event files for the log viewer
 ///   - `infer_state()` — override default state inference logic
+///   - `tab_title()` — extract terminal tab title from session logs
 pub trait Provider: Send + Sync {
     // ── Identity (required) ──────────────────────────────────────────
 
@@ -82,6 +83,21 @@ pub trait Provider: Send + Sync {
     /// Override state inference. Default uses the multi-signal inference engine.
     fn infer_state(&self, signals: &StateSignals) -> SessionState {
         default_state_inference(signals)
+    }
+
+    /// Extract the current terminal tab title for a session from its logs.
+    ///
+    /// Many agent CLIs dynamically set the terminal tab title (via ANSI OSC
+    /// escape sequences) to reflect their current activity — for example,
+    /// Copilot CLI emits `report_intent` tool calls whose `intent` argument
+    /// becomes the tab title.
+    ///
+    /// Return the **latest** such title so the TUI can focus the correct
+    /// Windows Terminal tab when the user presses Enter on a running session.
+    ///
+    /// Default: `None` (provider does not support tab-title extraction).
+    fn tab_title(&self, _session: &Session) -> Option<String> {
+        None
     }
 }
 

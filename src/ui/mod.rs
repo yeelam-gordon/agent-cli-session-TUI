@@ -369,25 +369,35 @@ impl App {
                         let psid = session.provider_session_id.clone();
                         let pname = session.provider_name.clone();
                         let title = session.title.clone();
+                        let tab_title = session.tab_title.clone();
                         let scwd = session.cwd.to_string_lossy().to_string();
                         let is_running = session.state.process == crate::models::ProcessState::Running;
 
                         if is_running {
-                            // Try to focus the existing terminal tab
-                            let _ = cmd_tx.send(SupervisorCommand::FocusSession {
-                                title: title.clone(),
-                                provider_session_id: psid.clone(),
-                            });
-                            self.status_message = format!(
-                                "🔍 Focusing: {} ({})",
-                                title,
-                                crate::util::short_id(&psid, 8)
-                            );
-                            self.log_lines.push(format!(
-                                "Focusing tab: {} ({})",
-                                title,
-                                crate::util::short_id(&psid, 8)
-                            ));
+                            if let Some(ref tt) = tab_title {
+                                // Provider supports tab-title: try to focus the WT tab
+                                let _ = cmd_tx.send(SupervisorCommand::FocusSession {
+                                    tab_title: Some(tt.clone()),
+                                    title: title.clone(),
+                                    provider_session_id: psid.clone(),
+                                });
+                                self.status_message = format!(
+                                    "🔍 Focusing: {} ({})",
+                                    tt,
+                                    crate::util::short_id(&psid, 8)
+                                );
+                                self.log_lines.push(format!(
+                                    "Focusing tab: {} ({})",
+                                    tt,
+                                    crate::util::short_id(&psid, 8)
+                                ));
+                            } else {
+                                // No tab-title support — can't focus a running session
+                                self.status_message = format!(
+                                    "⚠ Tab focus not available for {} sessions",
+                                    pname
+                                );
+                            }
                         } else {
                             let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
                                 provider_session_id: psid.clone(),

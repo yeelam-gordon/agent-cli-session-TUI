@@ -464,6 +464,7 @@ impl Provider for CopilotProvider {
                 provider_name: "copilot".into(),
                 cwd: cwd_path,
                 title,
+                tab_title: None, // populated later by supervisor via Provider::tab_title()
                 summary,
                 state: SessionState::default(),
                 pid: None,
@@ -621,5 +622,47 @@ impl Provider for CopilotProvider {
             }
         }
         Ok(sources)
+    }
+
+    fn tab_title(&self, session: &Session) -> Option<String> {
+        let dir = session.state_dir.as_ref()?;
+        let events_path = dir.join("events.jsonl");
+        let text = std::fs::read_to_string(&events_path).ok()?;
+
+        // Scan backwards through the last ~200 lines for the latest report_intent
+        let lines: Vec<&str> = text.lines().collect();
+        let scan_start = lines.len().saturating_sub(200);
+        let mut latest_intent: Option<String> = None;
+
+        for line in &lines[scan_start..] {
+            if !line.contains("report_intent") {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                // Structure: {"type":"assistant.message","data":{"toolRequests":[{"name":"report_intent","arguments":{"intent":"..."}}]}}
+                if let Some(requests) = val
+                    .get("data")
+                    .and_then(|d| d.get("toolRequests"))
+                    .and_then(|r| r.as_array())
+                {
+                    for req in requests {
+                        if req.get("name").and_then(|n| n.as_str()) == Some("report_intent") {
+                            if let Some(intent) = req
+                                .get("arguments")
+                                .and_then(|a| a.get("intent"))
+                                .and_then(|i| i.as_str())
+                            {
+                                let trimmed = intent.trim();
+                                if !trimmed.is_empty() {
+                                    latest_intent = Some(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        latest_intent
     }
 }

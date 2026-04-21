@@ -366,6 +366,7 @@ impl Provider for ClaudeProvider {
                     provider_name: "claude".into(),
                     cwd: cwd.clone(),
                     title,
+                    tab_title: None,
                     summary,
                     state: SessionState::default(),
                     pid: None,

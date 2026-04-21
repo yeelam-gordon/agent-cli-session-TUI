@@ -240,6 +240,7 @@ impl Provider for QwenProvider {
                     provider_name: "qwen".into(),
                     cwd: cwd.clone(),
                     title,
+                    tab_title: None,
                     summary,
                     state: SessionState {
                         interaction,

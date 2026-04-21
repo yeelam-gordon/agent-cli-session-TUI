@@ -38,6 +38,16 @@ pub trait Provider: Send + Sync {
     fn session_detail(&self, session: &Session) -> Result<SessionDetail>;
     fn activity_sources(&self, session: &Session) -> Result<Vec<ActivitySource>>;
     fn infer_state(&self, signals: &StateSignals) -> SessionState; // has default impl
+
+    // Tab focus (optional — default returns None)
+    fn tab_title(&self, session: &Session) -> Option<String>;
+    // Extract the current terminal tab title from the session's log files.
+    // Many CLIs dynamically set the terminal tab title via ANSI OSC escape
+    // sequences (e.g., Copilot CLI's `report_intent` tool calls).
+    // Return the **latest** title so the TUI can focus the correct WT tab
+    // when the user presses Enter on a running session.
+    // If your CLI does not set the tab title, leave the default (None).
+    // When None, Enter on a running session is a no-op.
 }
 // NOTE: No build_resume_command, build_new_command, or collect_signals.
 // Launch/resume/kill are config-driven — owned by the supervisor framework.
@@ -86,6 +96,34 @@ This uses WMI on Windows (reliable) with sysinfo fallback.
 4. **File mtime for "last activity"** — don't rely on timestamps inside files. Use the file's modification time as the real-time activity indicator.
 5. **Log diagnostics** — use `crate::log::info/warn/error()` for troubleshooting. Log file is next to the exe.
 6. **Graceful degradation** — if a session file is corrupt or unreadable, skip it and continue. Never crash the TUI.
+
+## Tab Title Extraction (Optional)
+
+Some agent CLIs dynamically set the terminal tab title to reflect their current activity (e.g., Copilot CLI emits `report_intent` tool calls). Implementing `tab_title()` enables the **Tab Focus** feature: when a user presses Enter on a Running/Waiting session, the TUI switches to the correct Windows Terminal tab.
+
+**If your CLI sets the tab title:**
+1. Override `fn tab_title(&self, session: &Session) -> Option<String>`
+2. Parse the session's log/event files for the **latest** title-setting event
+3. Return the title string (the TUI searches all WT tabs via UI Automation)
+
+**If your CLI does NOT set the tab title:**
+- Leave the default (`None`). Enter on a running session will show "Tab focus not available" instead of searching and failing.
+
+**Example** (from the Copilot provider — parses `report_intent` from `events.jsonl`):
+```rust
+fn tab_title(&self, session: &Session) -> Option<String> {
+    let dir = session.state_dir.as_ref()?;
+    let text = std::fs::read_to_string(dir.join("events.jsonl")).ok()?;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut latest_intent: Option<String> = None;
+    for line in &lines[lines.len().saturating_sub(200)..] {
+        if !line.contains("report_intent") { continue; }
+        // Parse JSON: data.toolRequests[].arguments.intent
+        // Update latest_intent with each match
+    }
+    latest_intent
+}
+```
 
 ## Config Structure
 
