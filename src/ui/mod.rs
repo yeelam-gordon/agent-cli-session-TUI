@@ -439,7 +439,23 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
-        // Search mode handles its own keys
+        // Global shortcuts — always work regardless of mode
+        match (key.modifiers, key.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q'))
+                if !self.search_active =>
+            {
+                self.should_quit = true;
+                return;
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                // Ctrl+C in search mode: quit
+                self.should_quit = true;
+                return;
+            }
+            _ => {}
+        }
+
+        // Search mode
         if self.search_active {
             match key.code {
                 KeyCode::Esc => {
@@ -458,10 +474,10 @@ impl App {
                     self.focus = Focus::Detail;
                 }
                 KeyCode::Up => {
-                    // Navigate results while still in search mode
                     if self.selected_index > 0 {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
+                        self.detail_scroll = 0;
                         self.user_navigated = true;
                     }
                 }
@@ -469,6 +485,7 @@ impl App {
                     if self.selected_index + 1 < self.filtered_indices.len() {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
+                        self.detail_scroll = 0;
                         self.user_navigated = true;
                     }
                 }
@@ -483,15 +500,6 @@ impl App {
                 _ => {}
             }
             return;
-        }
-
-        // Global shortcuts
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q')) => {
-                self.should_quit = true;
-                return;
-            }
-            _ => {}
         }
 
         match self.focus {
