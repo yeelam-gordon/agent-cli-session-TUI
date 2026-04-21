@@ -670,8 +670,6 @@ impl App {
         if self.search_active {
             let title = Paragraph::new(Line::from(vec![
                 Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(format!(" /{}", self.search_query)),
-                Span::styled("▌", Style::default().fg(Color::Yellow)),
                 Span::raw("  "),
                 Span::styled("⏎", hl),
                 Span::raw(" open  "),
@@ -774,12 +772,7 @@ impl App {
         let view_count = self.current_view_sessions().len();
 
         let title = if self.search_active {
-            format!(
-                " {} ({}/{}) ",
-                view_label,
-                self.filtered_indices.len(),
-                view_count
-            )
+            format!(" Search: {}▌ ", self.search_query)
         } else if !self.search_query.is_empty() {
             format!(
                 " {} ({}/{}) [{}] ",
