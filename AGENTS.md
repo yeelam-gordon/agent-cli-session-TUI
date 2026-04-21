@@ -135,6 +135,7 @@ Quick summary:
 3. **ListState recreation** — Persist `ListState` across frames or scroll position jumps.
 4. **Lock files** — Copilot sessions can have MULTIPLE lock files (stale + live). Check all, prefer live.
 5. **Empty command lines** — sysinfo returns empty `cmd()` for some processes. Use `process_info.rs` instead.
+6. **Regressions without tests** — Every bug fix MUST include a regression test. See [`testing.instructions.md`](.github/instructions/testing.instructions.md) § Regression Test Policy. No exceptions.
 
 ## Self-Correction Rule
 
