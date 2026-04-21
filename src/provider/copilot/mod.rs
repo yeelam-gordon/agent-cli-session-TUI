@@ -431,40 +431,67 @@ impl CopilotProvider {
 
     /// Extract first user message and last assistant message from events.jsonl.
     /// Returns (first_user_msg, last_assistant_msg, has_user_messages, total_event_count).
+    /// Reads first 50KB for the first user message, and last 512KB for the last assistant message.
     fn read_user_messages_from_events(
         &self,
         session_dir: &Path,
     ) -> (Option<String>, Option<String>, bool, usize) {
+        use std::io::{Read, Seek, SeekFrom};
+
         let events_path = session_dir.join("events.jsonl");
-        let text = match std::fs::read_to_string(&events_path) {
-            Ok(t) => t,
+        let mut file = match std::fs::File::open(&events_path) {
+            Ok(f) => f,
             Err(_) => return (None, None, false, 0),
         };
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
-        let lines: Vec<&str> = text.lines().collect();
-        let event_count = lines.len();
+        // Read first 50KB for the first user message
+        let mut head_buf = String::new();
+        let head_size = file_len.min(50 * 1024) as usize;
+        let mut head_reader = (&mut file).take(head_size as u64);
+        let _ = head_reader.read_to_string(&mut head_buf);
+
         let mut first_user_msg: Option<String> = None;
-        let mut last_assistant_msg: Option<String> = None;
-
-        for line in &lines {
+        let mut event_count = 0usize;
+        for line in head_buf.lines() {
+            event_count += 1;
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
                 let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                if event_type == "user.message" || event_type == "human.message" {
+                if (event_type == "user.message" || event_type == "human.message")
+                    && first_user_msg.is_none()
+                {
                     if let Some(msg) = val
                         .get("data")
                         .and_then(|d| d.get("content").or(d.get("message")).or(d.get("text")))
                         .and_then(|v| v.as_str())
                     {
                         let trimmed = msg.trim();
-                        if !trimmed.is_empty() && first_user_msg.is_none() {
-                            first_user_msg = Some(truncate_str_safe(trimmed, 300));
+                        if !trimmed.is_empty() {
+                            first_user_msg = Some(truncate_str_safe(trimmed, 500));
                         }
                     }
                 }
+            }
+        }
 
-                // Capture last assistant message — this is what tells you
-                // the current state of work in the session
+        // Read last 512KB for the last assistant message
+        const TAIL_SIZE: u64 = 512 * 1024;
+        let tail_start = file_len.saturating_sub(TAIL_SIZE);
+        let _ = file.seek(SeekFrom::Start(tail_start));
+        let mut tail_buf = String::new();
+        let _ = file.read_to_string(&mut tail_buf);
+
+        // Skip first partial line if we seeked into the middle
+        let tail_text = if tail_start > 0 {
+            tail_buf.split_once('\n').map(|(_, rest)| rest).unwrap_or(&tail_buf)
+        } else {
+            &tail_buf
+        };
+
+        let mut last_assistant_msg: Option<String> = None;
+        for line in tail_text.lines() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if event_type == "assistant.message" {
                     if let Some(msg) = val
                         .get("data")
@@ -473,11 +500,18 @@ impl CopilotProvider {
                     {
                         let trimmed = msg.trim();
                         if !trimmed.is_empty() {
-                            last_assistant_msg = Some(truncate_str_safe(trimmed, 500));
+                            // Keep full last response (up to 3000 chars) for detail + semantic
+                            last_assistant_msg = Some(truncate_str_safe(trimmed, 3000));
                         }
                     }
                 }
             }
+        }
+
+        // Approximate event count from file size if we didn't read the whole file
+        if file_len > 50 * 1024 {
+            // Rough estimate: average line ~500 bytes
+            event_count = (file_len / 500) as usize;
         }
 
         let has_user = first_user_msg.is_some();
