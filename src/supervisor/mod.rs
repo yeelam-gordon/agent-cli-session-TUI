@@ -271,81 +271,26 @@ impl Supervisor {
         session_id: &str,
         event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) {
-        #[cfg(windows)]
-        {
-            // Search priority: tab_title (from CLI logs) → session title → short session ID
-            let mut search_terms: Vec<String> = Vec::new();
-            if let Some(tt) = tab_title {
-                search_terms.push(tt.to_string());
+        // Search priority: tab_title (from CLI logs) → session title → short session ID
+        let mut search_terms: Vec<String> = Vec::new();
+        if let Some(tt) = tab_title {
+            search_terms.push(tt.to_string());
+        }
+        search_terms.push(title.to_string());
+        search_terms.push(crate::util::short_id(session_id, 8).to_string());
+
+        for term in &search_terms {
+            if crate::focus::focus_wt_tab(term) {
+                crate::log::info(&format!("Focused tab matching: {}", term));
+                return;
             }
-            search_terms.push(title.to_string());
-            search_terms.push(crate::util::short_id(session_id, 8).to_string());
-
-            for term in &search_terms {
-                let ps_script = format!(
-                    r#"
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-Add-Type -Name W -Namespace U -MemberDefinition @'
-[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
-[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-'@
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$wtWindows = $root.FindAll(
-  [System.Windows.Automation.TreeScope]::Children,
-  (New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::ClassNameProperty,
-    'CASCADIA_HOSTING_WINDOW_CLASS')))
-foreach ($w in $wtWindows) {{
-  $tabs = $w.FindAll(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::TabItem)))
-  foreach ($t in $tabs) {{
-    if ($t.Current.Name -like '*{search}*') {{
-      $si = $t.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-      $si.Select()
-      $hwnd = [IntPtr]$w.Current.NativeWindowHandle
-      if ([U.W]::IsIconic($hwnd)) {{ [U.W]::ShowWindow($hwnd, 9) | Out-Null }}
-      [U.W]::SetForegroundWindow($hwnd) | Out-Null
-      exit 0
-    }}
-  }}
-}}
-exit 1
-"#,
-                    search = term.replace('\'', "''").replace('"', "`\"")
-                );
-
-                let result = std::process::Command::new("pwsh")
-                    .args(["-NoProfile", "-Command", &ps_script])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-
-                if let Ok(status) = result {
-                    if status.success() {
-                        crate::log::info(&format!("Focused tab matching: {}", term));
-                        return;
-                    }
-                }
-            }
-
-            let display = tab_title.unwrap_or(title);
-            crate::log::warn(&format!("Could not find tab for: {} / {}", display, session_id));
-            let _ = event_tx.send(SupervisorEvent::Error(
-                format!("Tab not found for '{}'", display),
-            ));
         }
 
-        #[cfg(not(windows))]
-        {
-            let _ = (tab_title, title, session_id);
-            let _ = event_tx.send(SupervisorEvent::Error(
-                "Tab focus not supported on this platform".to_string(),
-            ));
-        }
+        let display = tab_title.unwrap_or(title);
+        crate::log::warn(&format!("Could not find tab for: {} / {}", display, session_id));
+        let _ = event_tx.send(SupervisorEvent::Error(
+            format!("Tab not found for '{}'", display),
+        ));
     }
 
     fn handle_archive(

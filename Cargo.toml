@@ -28,6 +28,14 @@ unicode-width = "0.2"
 # Process info — disable disk/network/component/user, keep only process lookup
 [target.'cfg(windows)'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system", "windows"] }
+windows = { version = "0.62", features = [
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
 
 [target.'cfg(unix)'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }

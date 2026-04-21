@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod config;
+pub mod focus;
 pub mod log;
 pub mod models;
 pub mod process_info;

@@ -1,5 +1,6 @@
 mod archive;
 mod config;
+mod focus;
 mod log;
 mod models;
 mod process_info;
