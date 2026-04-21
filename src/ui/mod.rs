@@ -55,8 +55,10 @@ pub struct App {
     log_max_lines: usize,
     /// Sessions archived locally this cycle — filtered out until supervisor confirms.
     pending_archives: Vec<String>,
-    /// Optional semantic search plugin (loaded in background if DLL present).
+    /// Semantic plugin (shared with background indexer). Always use try_lock() — never block UI.
     semantic: std::sync::Arc<std::sync::Mutex<crate::search::SemanticPlugin>>,
+    /// Last known semantic status (updated from try_lock, avoids blocking on status read).
+    semantic_status_cache: crate::search::SemanticStatus,
 }
 
 impl App {
@@ -100,6 +102,7 @@ impl App {
             log_max_lines,
             pending_archives: Vec::new(),
             semantic,
+            semantic_status_cache: crate::search::SemanticStatus::Unavailable,
         }
     }
 
@@ -125,9 +128,9 @@ impl App {
         if self.search_query.is_empty() {
             self.filtered_indices = (0..view.len()).collect();
         } else {
-            // Pass semantic plugin for queries ≥5 chars (uses cached vectors, instant)
+            // try_lock: skip semantic if indexer holds the lock (never block UI)
             let sem = if self.search_query.len() >= 5 {
-                self.semantic.lock().ok()
+                self.semantic.try_lock().ok()
             } else {
                 None
             };
@@ -165,6 +168,11 @@ impl App {
         let tick_rate = std::time::Duration::from_millis(100);
 
         loop {
+            // Update semantic status (try_lock: never blocks if indexer holds the lock)
+            if let Ok(sem) = self.semantic.try_lock() {
+                self.semantic_status_cache = sem.status().clone();
+            }
+
             // Draw
             terminal.draw(|f| {
                 self.draw(f);
@@ -846,8 +854,7 @@ impl App {
             ViewMode::Active => "Shift+Tab: show archived",
             ViewMode::Hidden => "Shift+Tab: show active",
         };
-        let sem_status = self.semantic.lock().map(|s| s.status().clone()).unwrap_or(crate::search::SemanticStatus::Unavailable);
-        let sem_indicator = match sem_status {
+        let sem_indicator = match &self.semantic_status_cache {
             crate::search::SemanticStatus::Ready { count } => Span::styled(
                 format!("🧠 {} ", count),
                 Style::default().fg(Color::Green),
