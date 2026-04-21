@@ -5,6 +5,7 @@ mod log;
 mod models;
 mod process_info;
 mod provider;
+mod search;
 mod supervisor;
 mod ui;
 mod util;

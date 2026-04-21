@@ -99,24 +99,14 @@ impl App {
     }
 
     /// Rebuild the filtered indices based on the search query.
+    /// Uses tiered ranking: exact match → word match → partial match → state badge.
     fn apply_filter(&mut self) {
         let view = self.current_view_sessions();
-        let query = self.search_query.to_lowercase();
-        if query.is_empty() {
+        if self.search_query.is_empty() {
             self.filtered_indices = (0..view.len()).collect();
         } else {
-            self.filtered_indices = view
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    s.title.to_lowercase().contains(&query)
-                        || s.summary.to_lowercase().contains(&query)
-                        || s.provider_session_id.to_lowercase().contains(&query)
-                        || s.cwd.to_string_lossy().to_lowercase().contains(&query)
-                        || s.provider_name.to_lowercase().contains(&query)
-                })
-                .map(|(i, _)| i)
-                .collect();
+            let results = crate::search::ranked_search(view, &self.search_query);
+            self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
         if self.selected_index >= self.filtered_indices.len() && !self.filtered_indices.is_empty() {
             self.selected_index = 0;
