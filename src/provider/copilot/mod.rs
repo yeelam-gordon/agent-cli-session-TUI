@@ -190,6 +190,8 @@ impl CopilotProvider {
 
     /// Analyze events.jsonl for session state signals.
     fn check_events_jsonl(&self, session_dir: &Path) -> EventsState {
+        use std::io::{Read, Seek, SeekFrom};
+
         let events_path = session_dir.join("events.jsonl");
 
         // File modification time = real "last activity" (not the DB timestamp)
@@ -201,8 +203,27 @@ impl CopilotProvider {
                 dt.to_rfc3339()
             });
 
-        let text = match std::fs::read_to_string(&events_path) {
-            Ok(t) => t,
+        // Read only the tail (last 256 KB) — state signals are always in recent events
+        let text = match std::fs::File::open(&events_path) {
+            Ok(mut file) => {
+                let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                const TAIL_SIZE: u64 = 256 * 1024;
+                let start_pos = file_len.saturating_sub(TAIL_SIZE);
+                if start_pos > 0 {
+                    let _ = file.seek(SeekFrom::Start(start_pos));
+                }
+                let mut buf = String::new();
+                if file.read_to_string(&mut buf).is_err() {
+                    return EventsState { file_mtime, ..Default::default() };
+                }
+                // Skip first partial line if we seeked
+                if start_pos > 0 {
+                    if let Some(pos) = buf.find('\n') {
+                        buf.drain(..=pos);
+                    }
+                }
+                buf
+            }
             Err(_) => {
                 return EventsState {
                     file_mtime,
@@ -625,19 +646,37 @@ impl Provider for CopilotProvider {
     }
 
     fn tab_title(&self, session: &Session) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+
         let dir = session.state_dir.as_ref()?;
         let events_path = dir.join("events.jsonl");
-        let text = std::fs::read_to_string(&events_path).ok()?;
+        let mut file = std::fs::File::open(&events_path).ok()?;
+        let file_len = file.metadata().ok()?.len();
 
-        // Scan backwards from end to find the latest report_intent efficiently
+        // Read only the tail of the file (last 512 KB) — report_intent is always recent
+        const TAIL_SIZE: u64 = 512 * 1024;
+        let start_pos = file_len.saturating_sub(TAIL_SIZE);
+        if start_pos > 0 {
+            file.seek(SeekFrom::Start(start_pos)).ok()?;
+        }
+
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).ok()?;
+
+        // If we seeked into the middle, skip the first partial line
+        let text = if start_pos > 0 {
+            buf.split_once('\n').map(|(_, rest)| rest).unwrap_or(&buf)
+        } else {
+            &buf
+        };
+
+        // Scan backwards from end to find the latest report_intent
         let lines: Vec<&str> = text.lines().collect();
-
         for line in lines.iter().rev() {
             if !line.contains("report_intent") {
                 continue;
             }
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                // Only match assistant.message events (skip system.message text mentions)
                 if val.get("type").and_then(|v| v.as_str()) != Some("assistant.message") {
                     continue;
                 }

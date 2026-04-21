@@ -18,7 +18,13 @@ use windows::core::BSTR;
 ///
 /// Returns `true` if a matching tab was found and focused.
 pub fn focus_wt_tab(search: &str) -> bool {
-    unsafe { focus_wt_tab_inner(search).unwrap_or(false) }
+    let start = std::time::Instant::now();
+    let result = unsafe { focus_wt_tab_inner(search).unwrap_or(false) };
+    crate::log::info(&format!(
+        "focus_wt_tab('{}') = {} in {:?}",
+        search, result, start.elapsed()
+    ));
+    result
 }
 
 unsafe fn focus_wt_tab_inner(search: &str) -> windows::core::Result<bool> {

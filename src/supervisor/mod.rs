@@ -86,12 +86,15 @@ impl Supervisor {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    let scan_start = std::time::Instant::now();
                     if let Err(e) = self.scan_and_notify(&event_tx) {
                         crate::log::warn(&format!("Scan error: {}", e));
                         let _ = event_tx.send(SupervisorEvent::Error(e.to_string()));
                     }
+                    crate::log::info(&format!("Scan cycle: {:?}", scan_start.elapsed()));
                 }
                 Some(cmd) = cmd_rx.recv() => {
+                    let cmd_start = std::time::Instant::now();
                     match cmd {
                         SupervisorCommand::Shutdown => break,
                         SupervisorCommand::NewSession { provider_key, cwd } => {
@@ -108,9 +111,11 @@ impl Supervisor {
                             let _ = self.scan_and_notify(&event_tx);
                         }
                         SupervisorCommand::FocusSession { tab_title, title, provider_session_id } => {
+                            crate::log::info(&format!("FocusSession cmd received after {:?}", cmd_start.elapsed()));
                             Self::handle_focus(tab_title.as_deref(), &title, &provider_session_id, &event_tx);
                         }
                     }
+                    crate::log::info(&format!("Command processed in {:?}", cmd_start.elapsed()));
                 }
             }
         }
@@ -125,14 +130,27 @@ impl Supervisor {
         let results: Vec<Vec<Session>> = std::thread::scope(|s| {
             let handles: Vec<_> = providers.iter().map(|provider| {
                 s.spawn(move || {
+                    let pstart = std::time::Instant::now();
                     let mut sessions = provider.discover_sessions().unwrap_or_default();
                     let _ = provider.match_processes(&mut sessions);
                     // Extract tab titles for running sessions
                     for session in &mut sessions {
                         if session.state.process == crate::models::ProcessState::Running {
+                            let tt_start = std::time::Instant::now();
                             session.tab_title = provider.tab_title(session);
+                            crate::log::info(&format!(
+                                "tab_title({}, {}) = {:?} in {:?}",
+                                provider.key(),
+                                crate::util::short_id(&session.provider_session_id, 8),
+                                session.tab_title.as_deref().unwrap_or("None"),
+                                tt_start.elapsed()
+                            ));
                         }
                     }
+                    crate::log::info(&format!(
+                        "Provider '{}' scan: {} sessions in {:?}",
+                        provider.key(), sessions.len(), pstart.elapsed()
+                    ));
                     sessions
                 })
             }).collect();
