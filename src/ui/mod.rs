@@ -859,19 +859,66 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
 
-            // Pad every line with trailing spaces to fill the panel width.
-            // Without Wrap, lines longer than inner_width are truncated by ratatui
-            // but we still need padding for shorter lines to overwrite stale content.
-            // Tabs and zero-width chars are replaced to ensure accurate width calc.
-            let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+            // Manual word-wrap: split long lines at panel width.
+            // We can't use ratatui's Wrap because it interferes with our padding.
+            let inner_width = area.width.saturating_sub(2) as usize;
             let inner_height = area.height.saturating_sub(2) as usize;
-            for line in &mut lines {
-                // Replace tabs with spaces in each span (tabs have width 0 but render wider)
-                for span in &mut line.spans {
-                    if span.content.contains('\t') {
-                        span.content = span.content.replace('\t', "    ").into();
+
+            let mut wrapped_lines: Vec<Line<'_>> = Vec::new();
+            for line in lines {
+                // Flatten all spans into a single string for wrapping
+                let mut full_text = String::new();
+                let mut style = Style::default();
+                for span in &line.spans {
+                    full_text.push_str(&span.content);
+                    if full_text.len() == span.content.len() {
+                        style = span.style; // use first span's style
                     }
                 }
+                full_text = full_text.replace('\t', "    ");
+
+                // Wrap the text at inner_width using unicode-width
+                if UnicodeWidthStr::width(full_text.as_str()) <= inner_width {
+                    wrapped_lines.push(Line::from(Span::styled(full_text, style)));
+                } else {
+                    // Word-wrap: split at word boundaries near inner_width
+                    let mut remaining = full_text.as_str();
+                    while !remaining.is_empty() {
+                        let mut cut = 0;
+                        let mut last_space = 0;
+                        for (i, ch) in remaining.char_indices() {
+                            let w = UnicodeWidthStr::width(&remaining[..i + ch.len_utf8()]);
+                            if w > inner_width {
+                                break;
+                            }
+                            cut = i + ch.len_utf8();
+                            if ch == ' ' || ch == '-' {
+                                last_space = cut;
+                            }
+                        }
+                        if cut == 0 {
+                            // Single char wider than panel — force 1 char
+                            cut = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                        }
+                        // Prefer breaking at word boundary
+                        let break_at = if last_space > 0 && last_space > cut / 2 {
+                            last_space
+                        } else {
+                            cut
+                        };
+                        wrapped_lines.push(Line::from(Span::styled(
+                            remaining[..break_at].to_string(),
+                            style,
+                        )));
+                        remaining = &remaining[break_at..];
+                        // Skip leading space on continuation line
+                        remaining = remaining.strip_prefix(' ').unwrap_or(remaining);
+                    }
+                }
+            }
+
+            // Pad every line with trailing spaces to fill panel width
+            for line in &mut wrapped_lines {
                 let display_width: usize = line
                     .spans
                     .iter()
@@ -882,12 +929,12 @@ impl App {
                         .push(Span::raw(" ".repeat(inner_width - display_width)));
                 }
             }
-            // Pad remaining rows with full-width space lines
-            while lines.len() < inner_height {
-                lines.push(Line::from(" ".repeat(inner_width)));
+            // Pad remaining rows
+            while wrapped_lines.len() < inner_height {
+                wrapped_lines.push(Line::from(" ".repeat(inner_width)));
             }
 
-            let detail = Paragraph::new(lines)
+            let detail = Paragraph::new(wrapped_lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
