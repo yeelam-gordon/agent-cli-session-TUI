@@ -505,6 +505,14 @@ impl App {
                         let scwd = session.cwd.to_string_lossy().to_string();
                         let is_running = session.state.process == crate::models::ProcessState::Running;
 
+                        crate::log::info(&format!(
+                            "Enter: {} state={:?} process={:?} tab_title={:?}",
+                            crate::util::short_id(&psid, 8),
+                            session.state.label(),
+                            session.state.process,
+                            tab_title.as_deref().unwrap_or("None"),
+                        ));
+
                         if is_running {
                             if let Some(ref tt) = tab_title {
                                 // Provider supports tab-title: try to focus the WT tab
