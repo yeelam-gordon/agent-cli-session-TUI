@@ -268,6 +268,10 @@ impl App {
                         }
 
                         if data_changed {
+                            // If user is reading the detail pane (focused + scrolled), 
+                            // silently update data but DON'T touch filter/selection/scroll
+                            let user_reading_detail = self.focus == Focus::Detail && self.detail_scroll > 0;
+
                             let prev_selected_id = if self.user_navigated {
                                 self.selected_session()
                                     .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
@@ -281,7 +285,7 @@ impl App {
                             self.sessions = active;
                             self.hidden_sessions = hidden;
 
-                            if set_changed || !self.search_active {
+                            if !user_reading_detail && (set_changed || !self.search_active) {
                                 self.apply_filter();
 
                                 if self.initial_load_complete && !self.user_navigated {
