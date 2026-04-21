@@ -774,7 +774,12 @@ impl App {
         let view_count = self.current_view_sessions().len();
 
         let title = if self.search_active {
-            format!(" Search: {}▌ ", self.search_query)
+            format!(
+                " {} ({}/{}) ",
+                view_label,
+                self.filtered_indices.len(),
+                view_count
+            )
         } else if !self.search_query.is_empty() {
             format!(
                 " {} ({}/{}) [{}] ",
