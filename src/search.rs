@@ -66,7 +66,7 @@ pub fn ranked_search(
         .collect();
 
     // Sort by score descending (highest relevance first)
-    results.sort_by(|a, b| b.score.cmp(&a.score));
+    results.sort_by_key(|r| std::cmp::Reverse(r.score));
     results
 }
 

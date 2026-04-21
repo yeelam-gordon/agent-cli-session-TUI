@@ -473,21 +473,19 @@ impl App {
                     // Switch to detail pane while keeping search results
                     self.focus = Focus::Detail;
                 }
-                KeyCode::Up => {
-                    if self.selected_index > 0 {
+                KeyCode::Up
+                    if self.selected_index > 0 => {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
                         self.detail_scroll = 0;
                         self.user_navigated = true;
-                    }
                 }
-                KeyCode::Down => {
-                    if self.selected_index + 1 < self.filtered_indices.len() {
+                KeyCode::Down
+                    if self.selected_index + 1 < self.filtered_indices.len() => {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
                         self.detail_scroll = 0;
                         self.user_navigated = true;
-                    }
                 }
                 KeyCode::Backspace => {
                     self.search_query.pop();
@@ -504,28 +502,24 @@ impl App {
 
         match self.focus {
             Focus::SessionList => match key.code {
-                KeyCode::Esc => {
-                    // Clear search filter if one is active
-                    if !self.search_query.is_empty() {
+                KeyCode::Esc
+                    if !self.search_query.is_empty() => {
                         self.search_query.clear();
                         self.apply_filter();
-                    }
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if self.selected_index > 0 {
+                KeyCode::Up | KeyCode::Char('k')
+                    if self.selected_index > 0 => {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
                         self.detail_scroll = 0;
                         self.user_navigated = true;
-                    }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if self.selected_index + 1 < self.filtered_indices.len() {
+                KeyCode::Down | KeyCode::Char('j')
+                    if self.selected_index + 1 < self.filtered_indices.len() => {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
                         self.detail_scroll = 0;
                         self.user_navigated = true;
-                    }
                 }
                 KeyCode::Tab => {
                     self.focus = Focus::Detail;
@@ -631,10 +625,9 @@ impl App {
                 KeyCode::Up => {
                     self.log_scroll = self.log_scroll.saturating_sub(1);
                 }
-                KeyCode::Down => {
-                    if self.log_scroll + 1 < self.log_lines.len() {
+                KeyCode::Down
+                    if self.log_scroll + 1 < self.log_lines.len() => {
                         self.log_scroll += 1;
-                    }
                 }
                 _ => {}
             },
