@@ -87,6 +87,7 @@ jobs:
 
   build-semantic:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -98,11 +99,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             core_artifact: agent-session-tui
             dll_artifact: libsemantic_search_plugin.so
-            archive_ext: tar.gz
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            core_artifact: agent-session-tui
-            dll_artifact: libsemantic_search_plugin.dylib
             archive_ext: tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
