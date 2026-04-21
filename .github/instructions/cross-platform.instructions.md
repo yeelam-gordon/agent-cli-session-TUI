@@ -25,6 +25,11 @@ globs: ["**/*.rs"]
 - **Unix**: The current implementation uses `sh -c "xterm -e '...'"` which is a placeholder. Real Unix support should try `tmux`, `screen`, or the user's `$TERMINAL`.
 - **Shell escaping**: On Unix, CWD and command strings passed to `sh -c` MUST be properly escaped (spaces, quotes, special chars). Use `shell-escape` crate or manual quoting.
 
+## Windows-Only Modules
+
+- `src/focus/` is gated with `#[cfg(windows)]` — it uses the `windows` crate for UI Automation (tab focus via WT). This module does not compile on non-Windows targets.
+- The `windows` crate requires the MSVC toolchain (`x86_64-pc-windows-msvc`). MinGW builds will fail on the `windows` dependency.
+
 ## Provider Code
 
 - Claude/Qwen path decoding (`C--Users-john` → `C:\Users\john`) is Windows-specific. On Unix, paths would encode differently (e.g., `-home-user` → `/home/user`).
@@ -34,5 +39,5 @@ globs: ["**/*.rs"]
 ## CI/Release
 
 - CI builds on `ubuntu-latest` + `windows-latest` — good
-- Release builds Windows, Linux, macOS — good
-- Consider adding `aarch64-apple-darwin` (Apple Silicon) to the release matrix
+- Release builds Windows (x86_64 + aarch64), Linux, macOS (x86_64 + aarch64) — good
+- Windows ARM64 (`aarch64-pc-windows-msvc`) is in the release matrix for Surface/Snapdragon devices

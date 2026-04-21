@@ -34,7 +34,11 @@ agent-session-tui/
 │   ├── archive.rs          # JSON-based archive store
 │   ├── log.rs              # File-based logging (%TEMP%/agent-session-tui.log)
 │   ├── process_info.rs     # Shared process discovery (WMI on Windows + sysinfo fallback)
+│   ├── search.rs           # Tiered search: exact → fuzzy → semantic (optional DLL plugin)
 │   ├── util.rs             # UTF-8 safe string truncation
+│   ├── focus/
+│   │   ├── mod.rs          # Tab focus API (platform-gated)
+│   │   └── win.rs          # Windows UI Automation: find & focus WT tabs via COM
 │   ├── provider/
 │   │   ├── mod.rs          # Provider trait + ProviderRegistry + default state inference
 │   │   ├── copilot/mod.rs  # Copilot CLI plugin
@@ -47,6 +51,7 @@ agent-session-tui/
 │   │   ├── mod.rs          # TestRunner (shared by all provider tests)
 │   │   └── scenarios.rs    # Provider-agnostic test scenarios (discover, graceful, launch, kill)
 │   └── ui/mod.rs           # ratatui TUI: session list, detail, log viewer, search, keybindings
+├── semantic-plugin/        # Optional semantic search DLL (separate crate, ~26 MB with ONNX model)
 ├── tests/
 │   ├── copilot_lifecycle_test.rs
 │   ├── claude_lifecycle_test.rs
@@ -59,6 +64,8 @@ agent-session-tui/
 ```
 
 ## How to Build
+
+Requires the **MSVC toolchain** on Windows — the `windows` crate (used for tab focus via UI Automation) needs MSVC link libraries. The `rust-toolchain.toml` pins `stable-x86_64-pc-windows-msvc` so `cargo` selects it automatically.
 
 ```bash
 # Debug build (fast, for development)
@@ -112,6 +119,9 @@ Quick summary:
 | Decision | Rationale |
 |----------|-----------|
 | **Multi-axis state model** | Process, Interaction, Persistence, Health are independent axes — avoids ambiguous flat enums. User-facing display simplified to Running/Waiting/Resumable. |
+| **SessionViewModel** | Merges scan results incrementally per-provider. Enables progressive loading — first page renders instantly, remaining pages load in background. |
+| **AtomicBool scan guard** | Prevents overlapping scan cycles. Non-blocking — if a scan is already in progress the next poll is skipped rather than queued. |
+| **Phased selection** | First page of all providers loads synchronously (fast initial render). Remaining pages load asynchronously and merge into the viewmodel without flicker. |
 | **WMI for process detection** | sysinfo can't read command-line args for some Windows processes; WMI is reliable |
 | **No internal DB** | We read from each CLI's own state (read-only). Only `archived.json` for hide/show. No sync issues. |
 | **Parallel provider scans** | All providers scan concurrently via `std::thread::scope` for fast refresh |
@@ -139,6 +149,8 @@ This project has multiple agents and humans working on it. Stale docs cause real
 | `src/models.rs` (state enums, Session struct) | `plugin.instructions.md` state model table, `AGENTS.md` design decisions |
 | `src/config.rs` (ProviderConfig fields) | `plugin.instructions.md` config structure, `config.toml` example |
 | `src/process_info.rs` | `rust.instructions.md` process detection section, `plugin.instructions.md` code example |
+| `src/search.rs` or `semantic-plugin/` | `README.md` semantic search section |
+| `src/focus/` | `README.md` tab focus section |
 | `src/testing/` (test framework) | `plugin.instructions.md` testing section, `AGENTS.md` how to test |
 | `Cargo.toml` (deps, bin entries) | `AGENTS.md` how to build |
 | Any file move or rename | `AGENTS.md` project structure, `lib.rs` exports, `main.rs` mod declarations |

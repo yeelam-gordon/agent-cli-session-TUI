@@ -39,6 +39,12 @@ Current CI runs `cargo build` + `cargo test --lib`. Consider adding:
 - `cargo audit` — checks for known dependency vulnerabilities
 - `cargo fmt --check` — enforces consistent formatting
 
+## Search & Semantic Plugin Tests
+
+- **22 search unit tests** in `src/search/mod.rs` cover the tiered ranking system: exact matches, prefix matches, fuzzy matches, keyword scoring, and combined ranking. These run on CI.
+- **5 semantic plugin unit tests** in `src/search/semantic_plugin.rs` cover cosine similarity, embedding normalization, score thresholds, cache hit/miss, and graceful fallback when the model is unavailable.
+- **Future:** `tab_title()` extraction and `discover_sessions_paged()` pagination need dedicated unit tests per provider. Track these as test debt.
+
 ## What NOT to Test
 
 - Don't test ratatui rendering output (too brittle)

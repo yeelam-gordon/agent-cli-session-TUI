@@ -31,6 +31,12 @@ pub trait Provider: Send + Sync {
     fn discover_sessions(&self) -> Result<Vec<Session>>;
     // Scan CLI state dir → return sessions with title, summary, timestamps
 
+    fn discover_sessions_paged(&self, offset: usize, limit: usize) -> Result<PagedSessions>;
+    // Paginated variant — returns PagedSessions { sessions, total_count, has_more }.
+    // The supervisor calls this for providers with 100+ sessions to avoid
+    // loading everything into memory at once. Default impl delegates to
+    // discover_sessions() and slices in-memory.
+
     fn match_processes(&self, sessions: &mut [Session]) -> Result<()>;
     // Find live OS processes, match to sessions, set pid + state
 
@@ -109,14 +115,28 @@ Some agent CLIs dynamically set the terminal tab title to reflect their current 
 **If your CLI does NOT set the tab title:**
 - Leave the default (`None`). Enter on a running session will show "Tab focus not available" instead of searching and failing.
 
-**Example** (from the Copilot provider — parses `report_intent` from `events.jsonl`):
+**Tab title by provider:**
+| Provider | Returns |
+|----------|---------|
+| Copilot CLI | `report_intent` value from last tool call in `events.jsonl` |
+| Claude Code | `✳` static marker (Claude sets its own OSC title) |
+| Gemini CLI | CWD folder name (no dynamic title) |
+| Codex CLI | CWD folder name |
+| Qwen CLI | CWD folder name |
+
+**Example** (from the Copilot provider — tail-reads `events.jsonl`):
 ```rust
 fn tab_title(&self, session: &Session) -> Option<String> {
     let dir = session.state_dir.as_ref()?;
-    let text = std::fs::read_to_string(dir.join("events.jsonl")).ok()?;
-    let lines: Vec<&str> = text.lines().collect();
+    let path = dir.join("events.jsonl");
+    // Tail-read: seek to last 32KB, not read_to_string on multi-MB file
+    let file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let tail_start = len.saturating_sub(32 * 1024);
+    let mut reader = std::io::BufReader::new(file);
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(tail_start)).ok()?;
     let mut latest_intent: Option<String> = None;
-    for line in &lines[lines.len().saturating_sub(200)..] {
+    for line in std::io::BufRead::lines(reader).flatten() {
         if !line.contains("report_intent") { continue; }
         // Parse JSON: data.toolRequests[].arguments.intent
         // Update latest_intent with each match
@@ -199,3 +219,17 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 | Gemini CLI | `src/provider/gemini/mod.rs` | `~/.gemini/tmp/<project>/chats/session-*.jsonl` + subdirs |
 
 Study these for patterns on summary extraction, state inference, and edge case handling.
+
+## Response Extraction
+
+Each CLI stores its last meaningful assistant response differently. Use these patterns when extracting summaries or task completion status:
+
+| Provider | Where | Format |
+|----------|-------|--------|
+| Copilot CLI | `events.jsonl` | `assistant.message` content field; check `toolRequests` array for `task_complete` entries with `result.summary` |
+| Claude Code | `<session>.jsonl` | `message.content[]` — array of text blocks, concatenate `.text` fields |
+| Codex CLI | `rollout-*.jsonl` | `payload.content[]` — filter for `type: "output_text"`, read `.text` |
+| Gemini CLI | `session-*.jsonl` | `content` field directly on the response object |
+| Qwen CLI | `<session>.jsonl` | `message.parts[].text` — array of text parts |
+
+**Copilot `task_complete` pattern:** The Copilot CLI signals task completion via a `task_complete` tool call in the `toolRequests` array of an assistant turn. Extract `arguments.result.summary` for a one-line task summary. This is more reliable than parsing the full assistant message.

@@ -42,6 +42,18 @@ Based on [The Rust Book](https://doc.rust-lang.org/book/) and [Rust API Guidelin
 - Test binaries are thin wrappers: create provider → call shared scenarios.
 - Tests run with: `cargo test --test <name> -- --nocapture`
 
+### SessionViewModel Pattern
+- `SessionViewModel` wraps the filtered/sorted session list for the UI. It holds a content hash to detect changes — if the underlying data hasn't changed, skip re-rendering.
+- Background scan threads build a new `Vec<Session>` locally, then swap it into the shared `Arc<Mutex<Vec<Session>>>` under a brief lock. The viewmodel detects the change on next frame.
+
+### try_lock for Shared State
+- When background threads (scan, semantic indexing) share state with the UI thread, use `Mutex::try_lock()` instead of `lock()`. If the lock is held, skip the operation rather than blocking the UI.
+- Pattern: `if let Ok(mut guard) = shared.try_lock() { /* update */ }` — never unwrap a lock in the render path.
+
+### Tail-Read Pattern for Large JSONL
+- For files that grow unboundedly (e.g., `events.jsonl`), seek to `file_len - 32KB`, discard the first partial line, then iterate with `BufRead::lines()`.
+- `read_to_string` is acceptable for small bounded files (`workspace.yaml`, `plan.md`, config files).
+
 ## General Rust Style
 
 - Use `cargo fmt` before committing.

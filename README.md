@@ -10,6 +10,7 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 - **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later
 - **Resume after reboot** — session summaries, last activity, work state help you decide what to pick up
 - **Fast search + resume** — `/` to search across title, summary, CWD, provider, then `Enter` to resume
+- **Semantic search** — optional DLL plugin adds meaning-aware search on top of exact + fuzzy matching
 - **One place for all agents** — manage Copilot, Claude, Codex, Qwen, Gemini sessions from a single TUI
 
 ## Architecture
@@ -19,18 +20,21 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 │ TUI (ratatui + crossterm)                                   │
 │  Session List  │  Session Detail  │  Activity Log           │
 ├─────────────────────────────────────────────────────────────┤
-│ Supervisor (tokio — parallel provider scans)                │
+│ SessionViewModel (incremental merge, phased loading)        │
+│ Supervisor (tokio — parallel provider scans, AtomicBool)    │
 │  Discovery · Process matching · Launch/Resume (config-driven)│
 ├─────────────────────────────────────────────────────────────┤
 │ Provider plugins (data-only — read from each CLI's state)   │
 │  Copilot │ Claude │ Codex │ Qwen │ Gemini │ (extensible)   │
 ├─────────────────────────────────────────────────────────────┤
+│ Search (exact → fuzzy → semantic via optional DLL plugin)   │
+│ Tab Focus (Windows UI Automation — focus running WT tabs)   │
 │ Process detection (WMI on Windows, sysinfo on Linux/macOS)  │
 │ archived.json — simple list of hidden session IDs           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh. The only file we write is `archived.json` for tracking hidden sessions.
+No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh (non-blocking — `AtomicBool` scan guard prevents overlapping scans). The `SessionViewModel` merges results incrementally per-provider for progressive loading. The only file we write is `archived.json` for tracking hidden sessions.
 
 ### Multi-Axis State Model
 
@@ -50,12 +54,12 @@ Internally tracked for diagnostics; user-facing states are simplified to just: �
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` or `j`/`k` | Navigate sessions |
-| `Enter` (⏎) | Open/resume selected session (in original CWD) |
+| `Enter` (⏎) | Resume selected session — focuses the WT tab if Running, launches otherwise |
 | `n` | New session (launches default provider) |
 | `a` | Archive session (instantly hidden) |
 | `/` | Search (type to filter, `↑`/`↓` to browse, `Enter` to resume, `Esc` to cancel) |
 | `Shift+Tab` | Toggle between active and archived view |
-| `Tab` | Switch panel focus |
+| `Tab` | Switch panel focus (works for all 5 providers) |
 | `PgUp`/`PgDn` | Scroll detail panel |
 | `Esc` | Cancel search |
 | `q` / `Ctrl+C` | Quit |
@@ -113,6 +117,36 @@ Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI comma
 
 Config search order: next to exe → `%APPDATA%/agent-session-tui/config.toml` → built-in defaults.
 
+## Semantic Search
+
+Search uses a three-tier ranking system: **exact substring** → **fuzzy word** → **semantic similarity**. The semantic tier is an optional DLL plugin (`semantic_search.dll` / `.so` / `.dylib`) that adds meaning-aware matching using cached embeddings.
+
+- Results with a semantic boost show a ✨ indicator in the search list
+- Embeddings are pre-computed and cached per session — no embedding during search
+- Status bar shows 🧠 when the semantic plugin is loaded and ready
+- If the DLL is missing, search falls back gracefully to exact + fuzzy only
+
+The plugin lives in `semantic-plugin/` and is built separately (see [Release Packages](#release-packages)).
+
+## Tab Focus
+
+When you press `Enter` on a **Running** session, the TUI focuses the existing Windows Terminal tab instead of launching a new one. This uses native Windows UI Automation (COM-based, via the `windows` crate):
+
+1. Finds all `CASCADIA_HOSTING_WINDOW_CLASS` windows (WT + Agentic Terminal)
+2. Searches descendant `TabItem` elements for a name match
+3. Selects the tab via `SelectionItemPattern` and brings the window to foreground
+
+Tab names are extracted by each provider's `tab_title()` method (e.g., Copilot uses `report_intent` tool calls). On non-Windows platforms, `focus_wt_tab()` is a no-op.
+
+## Release Packages
+
+| Package | Size | Contents |
+|---------|------|----------|
+| **Core** | ~1.1 MB | `agent-session-tui` binary only |
+| **Semantic** | ~26 MB | Core + `semantic_search` DLL + ONNX model |
+
+Built for **x64** and **arm64** across all three platforms (Windows, Linux, macOS).
+
 ## Adding a Provider
 
 See [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.instructions.md) for the full guide.
@@ -126,7 +160,8 @@ pub trait Provider: Send + Sync {
     fn capabilities(&self) -> ProviderCapabilities;
     fn discover_sessions(&self) -> Result<Vec<Session>>;
     fn match_processes(&self, sessions: &mut [Session]) -> Result<()>;
-    // Optional: session_detail(), activity_sources(), infer_state()
+    // Optional: discover_sessions_paged(), session_detail(), activity_sources(),
+    //           infer_state(), tab_title()
 }
 ```
 
@@ -134,10 +169,14 @@ Launch/resume/kill are handled by the framework from `config.toml`. Register you
 
 ## Building
 
+Requires the **MSVC toolchain** on Windows (for the `windows` crate used by tab focus):
+
 ```bash
 cargo build --release
 # Binary: target/release/agent-session-tui(.exe)
 ```
+
+The `rust-toolchain.toml` pins `stable-x86_64-pc-windows-msvc` automatically.
 
 ## Testing
 

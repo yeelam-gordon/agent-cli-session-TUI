@@ -24,10 +24,30 @@ CI runs automatically on PRs: build + unit tests on both Ubuntu and Windows.
 See [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.instructions.md) for the full guide. Quick summary:
 
 1. Create `src/provider/<name>/mod.rs` implementing the `Provider` trait
+   - Required: `discover_sessions()`, `detect_state()`, `parse_log()`
+   - Paginated: `discover_sessions_paged(offset, limit)` — default impl calls `discover_sessions()` with slicing; override for lazy discovery
+   - Optional: `tab_title(session)` — return a custom tab label (e.g. branch name); defaults to `None`
 2. Add match arm in `main.rs::create_provider()`
 3. Add `pub mod <name>;` in `src/provider/mod.rs`
 4. Add unit tests for state detection (waiting vs busy) with fixture JSONL data
 5. Create `tests/<name>_lifecycle_test.rs` using the shared test framework
+
+## Semantic Search Plugin
+
+The optional semantic search plugin lives in `semantic-plugin/` (a separate Cargo crate that builds a cdylib DLL).
+
+1. **Build**: `cd semantic-plugin && cargo build --release` — produces `semantic_plugin.dll` (Windows) / `libsemantic_plugin.so` (Linux)
+2. **Install**: copy the DLL next to the TUI binary or into the `data_dir`; the TUI loads it at startup if found
+3. **Test**: `cd semantic-plugin && cargo test` — runs the plugin's own unit tests
+4. **MSVC toolchain**: Windows builds require the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`); MinGW is not supported
+
+## Search Module
+
+The `src/search.rs` module handles fuzzy and semantic search across sessions. It contains 22 unit tests covering tokenisation, ranking, embedding cache I/O, and query parsing. Run them with:
+
+```
+cargo test --lib search
+```
 
 ## Code Standards
 

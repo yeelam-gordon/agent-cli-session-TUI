@@ -28,13 +28,19 @@ Rules:
 - Consider adding `cargo audit` to CI workflow
 - Keep dependencies minimal — this project intentionally uses few crates
 
+## DLL Loading Surface
+
+- The semantic search plugin (`ort` / ONNX Runtime) loads native DLLs from the executable directory. An attacker who can write to the exe directory can substitute a malicious DLL. Ensure the install directory has appropriate ACLs.
+- The embedding model file is loaded from `data_dir/models/` — same trust boundary applies.
+
 ## Sensitive Data
 
 - `config.toml` contains file paths and CLI commands — it's gitignored for a reason
 - Log files (`%TEMP%/agent-session-tui.log`) may contain session IDs and file paths — they should not be shared publicly
 - `archived.json` contains provider:session_id pairs — low sensitivity but still user data
+- `embeddings_cache.json` in `data_dir/models/` stores cached embedding vectors — writable user data, same sensitivity as `archived.json`
 
 ## File Permissions
 
-- On Unix, `archived.json` and `config.toml` should be user-readable only (0600)
+- On Unix, `archived.json`, `embeddings_cache.json`, and `config.toml` should be user-readable only (0600)
 - Currently files are written with default permissions — a future improvement
