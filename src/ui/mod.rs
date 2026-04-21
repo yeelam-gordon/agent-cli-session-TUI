@@ -598,7 +598,19 @@ impl App {
                     self.detail_scroll = self.detail_scroll.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.detail_scroll += 1;
+                    self.detail_scroll = self.detail_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(20);
+                }
+                KeyCode::PageDown => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(20);
+                }
+                KeyCode::Home => {
+                    self.detail_scroll = 0;
+                }
+                KeyCode::End => {
+                    self.detail_scroll = u16::MAX; // capped during render
                 }
                 _ => {}
             },
@@ -929,8 +941,9 @@ impl App {
                         .push(Span::raw(" ".repeat(inner_width - display_width)));
                 }
             }
-            // Pad remaining rows
-            while wrapped_lines.len() < inner_height {
+            // Pad to fill visible area after scroll
+            let total_needed = inner_height + self.detail_scroll as usize;
+            while wrapped_lines.len() < total_needed {
                 wrapped_lines.push(Line::from(" ".repeat(inner_width)));
             }
 
