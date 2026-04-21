@@ -466,6 +466,12 @@ impl Provider for GeminiProvider {
         }
         Ok(sources)
     }
+
+    fn tab_title(&self, session: &Session) -> Option<String> {
+        // Gemini CLI sets tab title to "◇ <status> (<folder-name>)"
+        // Return the CWD folder name — substring match will find it
+        session.cwd.file_name().map(|n| n.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(test)]

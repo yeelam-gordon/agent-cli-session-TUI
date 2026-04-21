@@ -476,4 +476,9 @@ impl Provider for CodexProvider {
         }
         Ok(sources)
     }
+
+    fn tab_title(&self, session: &Session) -> Option<String> {
+        // Codex CLI sets tab title to the CWD folder name
+        session.cwd.file_name().map(|n| n.to_string_lossy().to_string())
+    }
 }

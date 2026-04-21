@@ -315,6 +315,11 @@ impl Provider for QwenProvider {
 
         Ok(())
     }
+
+    fn tab_title(&self, session: &Session) -> Option<String> {
+        // Qwen CLI sets tab title to the CWD folder name
+        session.cwd.file_name().map(|n| n.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(test)]

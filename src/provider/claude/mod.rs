@@ -554,6 +554,13 @@ impl Provider for ClaudeProvider {
         }
         Ok(sources)
     }
+
+    fn tab_title(&self, session: &Session) -> Option<String> {
+        // Claude Code sets tab title to "✳ Claude Code" (static).
+        // Use CWD folder name as a secondary search term — won't match the
+        // static title but will match if Claude shows the project name.
+        session.cwd.file_name().map(|n| n.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(test)]
