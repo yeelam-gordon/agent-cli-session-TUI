@@ -19,18 +19,17 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 ┌─────────────────────────────────────────────────────────────┐
 │ TUI (ratatui + crossterm)                                   │
 │  Session List  │  Session Detail  │  Activity Log           │
+│  Search (exact → fuzzy → semantic)  │  Tab Focus            │
 ├─────────────────────────────────────────────────────────────┤
 │ SessionViewModel (incremental merge, phased loading)        │
-│ Supervisor (tokio — parallel provider scans, AtomicBool)    │
+│ Supervisor (tokio — parallel provider scans, non-blocking)  │
 │  Discovery · Process matching · Launch/Resume (config-driven)│
 ├─────────────────────────────────────────────────────────────┤
 │ Provider plugins (data-only — read from each CLI's state)   │
 │  Copilot │ Claude │ Codex │ Qwen │ Gemini │ (extensible)   │
 ├─────────────────────────────────────────────────────────────┤
-│ Search (exact → fuzzy → semantic via optional DLL plugin)   │
-│ Tab Focus (Windows UI Automation — focus running WT tabs)   │
-│ Process detection (WMI on Windows, sysinfo on Linux/macOS)  │
-│ archived.json — simple list of hidden session IDs           │
+│ Shared infrastructure                                       │
+│  Process detection │ Semantic DLL (optional) │ Archive store │
 └─────────────────────────────────────────────────────────────┘
 ```
 
