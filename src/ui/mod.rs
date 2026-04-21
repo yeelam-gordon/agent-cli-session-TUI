@@ -240,13 +240,16 @@ impl App {
                         let hidden_count = hidden.len();
 
                         // Check if data actually changed
+                        // Check if data actually changed
+                        // Exclude updated_at: mtime changes every scan for running sessions
+                        // Compare summary instead — it only changes when content actually changes
                         let data_changed = active.len() != self.sessions.len()
                             || active.iter().zip(self.sessions.iter()).any(|(new, old)| {
                                 new.id != old.id
                                     || new.state != old.state
                                     || new.title != old.title
                                     || new.tab_title != old.tab_title
-                                    || new.updated_at != old.updated_at
+                                    || new.summary != old.summary
                             });
 
                         // Track which providers have reported in
@@ -855,7 +858,7 @@ impl App {
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 )));
-                for summary_line in session.summary.lines().take(15) {
+                for summary_line in session.summary.lines() {
                     lines.push(Line::from(Span::raw(summary_line)));
                 }
             }
