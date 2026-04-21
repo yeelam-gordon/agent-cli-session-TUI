@@ -673,21 +673,41 @@ impl App {
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
         let hl = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("⏎", hl),
-            Span::raw(" open  "),
-            Span::styled("n", hl),
-            Span::raw("ew  "),
-            Span::styled("a", hl),
-            Span::raw("rchive  "),
-            Span::styled("/", hl),
-            Span::raw("search  "),
-            Span::styled("q", hl),
-            Span::raw("uit"),
-        ]));
-        f.render_widget(title, area);
+
+        if self.search_active {
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!(" /{}", self.search_query)),
+                Span::styled("▌", Style::default().fg(Color::Yellow)),
+                Span::raw("  "),
+                Span::styled("⏎", hl),
+                Span::raw(" open  "),
+                Span::styled("Tab", hl),
+                Span::raw(" detail  "),
+                Span::styled("↑↓", hl),
+                Span::raw(" nav  "),
+                Span::styled("Esc", hl),
+                Span::raw(" quit search"),
+            ]));
+            f.render_widget(title, area);
+        } else {
+            // Normal mode
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw("  "),
+                Span::styled("⏎", hl),
+                Span::raw(" open  "),
+                Span::styled("n", hl),
+                Span::raw("ew  "),
+                Span::styled("a", hl),
+                Span::raw("rchive  "),
+                Span::styled("/", hl),
+                Span::raw("search  "),
+                Span::styled("q", hl),
+                Span::raw("uit"),
+            ]));
+            f.render_widget(title, area);
+        }
     }
 
     fn draw_session_list(&mut self, f: &mut Frame, area: Rect) {
