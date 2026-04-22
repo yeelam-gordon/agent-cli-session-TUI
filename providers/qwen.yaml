@@ -1,0 +1,93 @@
+name: qwen
+display_name: Qwen Code
+
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+
+# Qwen stores one JSONL file per session at
+#   ~/.qwen/projects/<drive-dash-cwd>/chats/<UUID>.jsonl
+# The extra `chats/` segment distinguishes it from Claude's layout.
+discovery:
+  base_dir: ${HOME}/.qwen/projects
+  strategy: file_per_session
+  glob: "*/chats/*.jsonl"
+  tail_bytes: 524288
+
+session_id:
+  source: filename_stem
+
+# Every event line carries the literal `cwd` value (`D:\\Demo\\...`),
+# so we use event_field rather than decoding the dir-dash leaf. The
+# grandparent dir name is the encoded cwd but it's lossy (can't tell
+# whether `c-users-a-b` is `C:\users\a-b` or `C:\users\a\b`) and Qwen
+# luckily doesn't require that dance — the cwd field is canonical.
+cwd:
+  source: event_field
+  event_type: "user"
+  field: "cwd"
+
+# `type == "system"` records are UI telemetry (`subtype: ui_telemetry`)
+# emitted on every API response; they would dominate last_event_map and
+# drown out the user/assistant signal. Drop them before state inference
+# and title extraction.
+events:
+  format: jsonl
+  filter_out:
+    - 'type == "system"'
+
+fields:
+  # Qwen message content lives under `message.parts[0].text`. The array
+  # indexing (`.0.`) is handled by the expression DSL the same way Codex
+  # uses it for `payload.content.0.text`.
+  title:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "message.parts.0.text"
+    transforms:
+      - first_line
+      - truncate:60
+  summary:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "message.parts.0.text"
+    transforms:
+      - truncate:4000
+  created_at:
+    strategy: first_event_field
+    path: "timestamp"
+    fallback:
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime
+
+# After filtering out `system` events, the tail alternates user/assistant.
+# Interaction state follows the Claude pattern: last assistant ⇒ Qwen is
+# done and waiting for the next user prompt; last user ⇒ Qwen is working.
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "assistant": { interaction: waiting_input }
+    "user":      { interaction: busy }
+
+# Qwen is shipped as a Node.js CLI — the process appears as
+#   node <install-path>\qwen.js ... <session-uuid>
+# where the UUID is a positional argument (no `--flag` prefix). The
+# cmdline substring "qwen" matches either the executable name or the
+# qwen.js script path, which is how WMI-based discovery finds it.
+process_match:
+  strategy: cmdline
+  executable: qwen
+  id_match_kind: positional_uuid
+  recently_active_secs: 15
+
+# Qwen sets the terminal tab title to the cwd folder basename; we do
+# the same when launching new tabs, so reuse the shared cwd_basename
+# strategy added for Codex.
+tab_title:
+  strategy: cwd_basename

@@ -1590,4 +1590,90 @@ mod tests {
         );
         assert_eq!(signals.has_unfinished_turn, Some(false));
     }
+
+    /// End-to-end smoke test: parse `providers/qwen.yaml` against a synthetic
+    /// `<projects>/<encoded>/chats/<uuid>.jsonl` tree. Exercises the
+    /// two-level `*/chats/*.jsonl` glob, `cwd` extraction from event_field
+    /// on `type==user` lines, `system`-event filtering (ui_telemetry noise),
+    /// `message.parts.0.text` array-indexed title path, last_event_map
+    /// state inference after filtering, and `cwd_basename` tab title.
+    #[test]
+    fn qwen_yaml_end_to_end() {
+        use std::fs;
+
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("qwen.yaml");
+        assert!(yaml.exists(), "providers/qwen.yaml missing");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "1761af36-3cff-4b40-bdc5-c5d054eef157";
+        // <projects>/<encoded-cwd>/chats/<uuid>.jsonl
+        let chats = tmp.path().join("d--demo-agent-session-tui").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            chats.join(format!("{}.jsonl", sid)),
+            r#"{"uuid":"u1","sessionId":"1761af36-3cff-4b40-bdc5-c5d054eef157","timestamp":"2026-04-20T01:52:17Z","type":"user","cwd":"D:\\Demo\\qwen-demo","version":"0.14.5","message":{"role":"user","parts":[{"text":"testing qwen yaml\nsecond line"}]}}
+{"uuid":"u2","sessionId":"1761af36-3cff-4b40-bdc5-c5d054eef157","timestamp":"2026-04-20T01:52:18Z","type":"system","cwd":"D:\\Demo\\qwen-demo","subtype":"ui_telemetry","systemPayload":{"uiEvent":{"event.name":"qwen-code.api_response"}}}
+{"uuid":"u3","sessionId":"1761af36-3cff-4b40-bdc5-c5d054eef157","timestamp":"2026-04-20T01:52:20Z","type":"assistant","cwd":"D:\\Demo\\qwen-demo","version":"0.14.5","model":"model-router","message":{"role":"model","parts":[{"text":"Hi! How can I help?"}]}}
+"#,
+        )
+        .unwrap();
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "qwen".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
+            .expect("load providers/qwen.yaml");
+
+        let sessions = prov.discover_sessions().expect("discover_sessions");
+        assert_eq!(sessions.len(), 1, "expected exactly one Qwen session");
+        let s = &sessions[0];
+
+        assert_eq!(s.provider_session_id, sid);
+        assert_eq!(s.provider_name, "qwen");
+        // Title: first_line of message.parts[0].text, truncated.
+        assert_eq!(s.title, "testing qwen yaml");
+        assert!(
+            s.summary.starts_with("testing qwen yaml"),
+            "summary: {:?}",
+            s.summary
+        );
+        // cwd from event_field (user-type line).
+        assert!(s.cwd.ends_with("qwen-demo"), "cwd: {:?}", s.cwd);
+        assert!(!s.updated_at.is_empty(), "updated_at missing");
+
+        // Tab title is the cwd basename (shared with Codex).
+        let tab = prov.tab_title(s);
+        assert_eq!(tab.as_deref(), Some("qwen-demo"));
+
+        // State inference: the last non-filtered event is `assistant`, so
+        // last_event_map should force interaction = waiting_input. The
+        // intervening `system` (ui_telemetry) line must be filtered out —
+        // if it leaked through, no last_event_map key would match.
+        let events: Vec<serde_json::Value> = vec![
+            serde_json::from_str(r#"{"timestamp":"2026-04-20T01:52:17Z","type":"user","cwd":"D:\\Demo\\qwen-demo","message":{"parts":[{"text":"testing qwen yaml"}]}}"#).unwrap(),
+            serde_json::from_str(r#"{"timestamp":"2026-04-20T01:52:18Z","type":"system","subtype":"ui_telemetry"}"#).unwrap(),
+            serde_json::from_str(r#"{"timestamp":"2026-04-20T01:52:20Z","type":"assistant","message":{"parts":[{"text":"Hi!"}]}}"#).unwrap(),
+        ];
+        let signals = build_state_signals(&prov, &events, s);
+        assert_eq!(
+            signals.forced_interaction.as_deref(),
+            Some("waiting_input"),
+            "last_event_map should resolve latest assistant → waiting_input"
+        );
+    }
 }
