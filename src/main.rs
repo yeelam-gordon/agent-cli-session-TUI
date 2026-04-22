@@ -17,49 +17,25 @@ use tokio::sync::mpsc;
 
 use archive::ArchiveStore;
 use config::AppConfig;
-use provider::claude::ClaudeProvider;
-use provider::codex::CodexProvider;
 use provider::config_driven::ConfigDrivenProvider;
-use provider::copilot::CopilotProvider;
-use provider::gemini::GeminiProvider;
-use provider::qwen::QwenProvider;
 use provider::ProviderRegistry;
 use supervisor::Supervisor;
 use ui::App;
 
-/// Create a provider instance from a config key.
+/// Create a provider instance by loading `providers/<key>.yaml`.
+///
+/// All five providers (copilot, claude, codex, qwen, gemini) are defined
+/// declaratively in YAML and driven by `ConfigDrivenProvider`. If the
+/// YAML file for a given key is missing or fails to parse, the provider
+/// is skipped with a log line — same behaviour as an unknown provider.
 fn create_provider(
     key: &str,
     config: &config::ProviderConfig,
 ) -> Option<Box<dyn provider::Provider>> {
-    // Opt-in YAML-backed provider via env var: `COPILOT_PROVIDER=yaml` etc.
-    // Looks for `providers/<key>.yaml` relative to CWD or the binary dir.
-    if std::env::var(format!("{}_PROVIDER", key.to_uppercase())).as_deref() == Ok("yaml") {
-        if let Some(p) = try_load_yaml_provider(key, config) {
-            log::info(&format!("Provider '{}' loaded from YAML", key));
-            return Some(p);
-        } else {
-            log::info(&format!("Provider '{}' YAML opt-in set but file not found; using legacy", key));
-        }
-    }
-    match key {
-        "copilot" => Some(Box::new(CopilotProvider::new(config))),
-        "claude" => Some(Box::new(ClaudeProvider::new(config))),
-        "codex" => Some(Box::new(CodexProvider::new(config))),
-        "qwen" => Some(Box::new(QwenProvider::new(config))),
-        "gemini" => Some(Box::new(GeminiProvider::new(config))),
-        _ => None,
-    }
-}
-
-fn try_load_yaml_provider(
-    key: &str,
-    config: &config::ProviderConfig,
-) -> Option<Box<dyn provider::Provider>> {
     // Candidate search paths for `providers/<key>.yaml`:
-    //   1. cwd/providers/<key>.yaml
-    //   2. <exe-dir>/providers/<key>.yaml
-    //   3. <exe-dir>/../providers/<key>.yaml
+    //   1. cwd/providers/<key>.yaml                (developer / cargo run)
+    //   2. <exe-dir>/providers/<key>.yaml          (installed layout)
+    //   3. <exe-dir>/../providers/<key>.yaml       (cargo target/debug)
     let rel = std::path::PathBuf::from("providers").join(format!("{}.yaml", key));
     let mut candidates: Vec<std::path::PathBuf> = vec![rel.clone()];
     if let Ok(exe) = std::env::current_exe() {
@@ -70,14 +46,23 @@ fn try_load_yaml_provider(
             }
         }
     }
-    for path in candidates {
+    for path in &candidates {
         if path.exists() {
-            match ConfigDrivenProvider::load_from_yaml(&path, config) {
-                Ok(p) => return Some(Box::new(p)),
-                Err(e) => log::info(&format!("YAML load failed for {:?}: {}", path, e)),
+            match ConfigDrivenProvider::load_from_yaml(path, config) {
+                Ok(p) => {
+                    log::info(&format!("Provider '{}' loaded from {:?}", key, path));
+                    return Some(Box::new(p));
+                }
+                Err(e) => {
+                    log::warn(&format!("YAML load failed for {:?}: {}", path, e));
+                }
             }
         }
     }
+    log::warn(&format!(
+        "Provider '{}' skipped — providers/{}.yaml not found in any of {:?}",
+        key, key, candidates
+    ));
     None
 }
 

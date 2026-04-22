@@ -267,10 +267,8 @@ impl ProviderRegistry {
     }
 }
 
-// Re-export submodules
-pub mod claude;
-pub mod codex;
-pub mod copilot;
-pub mod qwen;
-pub mod gemini;
+// Re-export the YAML-driven provider engine. All concrete providers
+// (copilot, claude, codex, qwen, gemini) are defined by `providers/*.yaml`
+// and instantiated via `ConfigDrivenProvider`. The legacy per-provider
+// Rust modules have been removed — see git history if you need them.
 pub mod config_driven;
