@@ -224,6 +224,13 @@ pub struct StateSignalsConfig {
     /// from most-recent event backward.
     #[serde(default)]
     pub last_event_map: BTreeMap<String, StateSignalDelta>,
+    /// Ordered list of `(where-predicate → delta)` pairs. Used when the
+    /// relevant discriminator is nested (e.g. Codex's `payload.type`) rather
+    /// than the outer `type`. Evaluated after `last_event_map`: we scan events
+    /// most-recent-first and, for each event, check predicates in order — the
+    /// first matching (event, predicate) pair wins.
+    #[serde(default)]
+    pub event_predicates: Vec<EventPredicate>,
     /// Seconds of inactivity before the session is considered idle.
     #[serde(default = "default_idle_secs")]
     pub idle_threshold_seconds: u64,
@@ -233,6 +240,14 @@ pub struct StateSignalsConfig {
     /// Optional predicate that means "recent tool activity".
     #[serde(default)]
     pub recent_tool_activity_when: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EventPredicate {
+    /// Expression evaluated against each scanned event.
+    pub r#where: String,
+    #[serde(flatten)]
+    pub delta: StateSignalDelta,
 }
 
 fn default_idle_secs() -> u64 {
@@ -346,6 +361,10 @@ pub enum TabTitleConfig {
     /// tab whose title *contains* this value. Used for Claude Code, which sets
     /// its own tab title (e.g. `"✳ …"`) that we can only detect by prefix.
     Literal { value: String },
+    /// Use the basename of the session's `cwd`. Used by Codex, which has no
+    /// in-band tab title signal — the terminal title is set by the launcher
+    /// from the working directory's folder name.
+    CwdBasename,
     /// No tab title support.
     None,
 }

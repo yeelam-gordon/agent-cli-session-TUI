@@ -143,6 +143,12 @@ impl Provider for ConfigDrivenProvider {
 
     fn tab_title(&self, session: &Session) -> Option<String> {
         let tab = self.cfg.tab_title.as_ref()?;
+        if let TabTitleConfig::CwdBasename = tab {
+            return session
+                .cwd
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+        }
         let events = read_session_events(self, session.state_dir.as_deref()?).ok()?;
         extract_tab_title(self, tab, &events)
     }
@@ -949,6 +955,26 @@ fn build_state_signals(
         }
     }
 
+    // event_predicates — ordered list of (where-predicate → delta) pairs.
+    // Scan events most-recent-first; for each event, check predicates in
+    // order. The first (event, predicate) match wins. Only applied when
+    // last_event_map did not already force an interaction.
+    if !cfg.event_predicates.is_empty() && signals.forced_interaction.is_none() {
+        let compiled: Vec<(Expr, &StateSignalDelta)> = cfg
+            .event_predicates
+            .iter()
+            .map(|p| (prov.expr(&p.r#where), &p.delta))
+            .collect();
+        'outer: for ev in events.iter().rev() {
+            for (expr, delta) in compiled.iter() {
+                if expr.eval_bool(ev) {
+                    apply_state_delta(&mut signals, delta, session);
+                    break 'outer;
+                }
+            }
+        }
+    }
+
     if let Some(expr_src) = &cfg.unfinished_turn_when {
         let e = prov.expr(expr_src);
         signals.has_unfinished_turn = Some(events.iter().any(|ev| e.eval_bool(ev)));
@@ -1008,6 +1034,9 @@ fn extract_tab_title(
     match cfg {
         TabTitleConfig::None => None,
         TabTitleConfig::Literal { value } => Some(value.clone()),
+        // Handled in the provider's `tab_title()` method where `session.cwd`
+        // is available; reaching here means no events will help.
+        TabTitleConfig::CwdBasename => None,
         TabTitleConfig::FromField { r#where, path } => {
             let w = prov.expr(r#where);
             let p = prov.expr(path);
@@ -1466,5 +1495,99 @@ mod tests {
         // `tab_title(&Session)` returns the sentinel value for matching.
         let tab = prov.tab_title(s);
         assert_eq!(tab.as_deref(), Some("✳"));
+    }
+
+    /// End-to-end smoke test: parse `providers/codex.yaml` against a synthetic
+    /// Codex sessions tree. Exercises `date_partitioned` discovery, the
+    /// `session_meta` → `payload.id` / `payload.cwd` extraction, the
+    /// `event_predicates` state inference (task_started/task_complete,
+    /// response_item role), the `payload.content.0.text` title path, and the
+    /// `cwd_basename` tab title.
+    #[test]
+    fn codex_yaml_end_to_end() {
+        use std::fs;
+
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("codex.yaml");
+        assert!(yaml.exists(), "providers/codex.yaml missing");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "019d6fa7-45f6-7951-aefa-efafb1f3b826";
+        // Real layout: YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl
+        let day = tmp.path().join("2026").join("04").join("20");
+        fs::create_dir_all(&day).unwrap();
+        let file = day.join(format!("rollout-2026-04-20T00-00-00-{}.jsonl", sid));
+        // cwd uses a Windows-style path in payload.cwd; the basename should be
+        // "yaml-demo" which is what the tab title test asserts.
+        fs::write(
+            &file,
+            r#"{"timestamp":"2026-04-20T00:00:00Z","type":"session_meta","payload":{"id":"019d6fa7-45f6-7951-aefa-efafb1f3b826","timestamp":"2026-04-20T00:00:00Z","cwd":"C:\\Users\\yeelam\\yaml-demo","cli_version":"0.118.0"}}
+{"timestamp":"2026-04-20T00:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-04-20T00:00:02Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>ignored bootstrap</permissions instructions>"}]}}
+{"timestamp":"2026-04-20T00:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"refactor the config loader\nfollow-up line"}]}}
+{"timestamp":"2026-04-20T00:00:04Z","type":"event_msg","payload":{"type":"token_count","total":12345}}
+{"timestamp":"2026-04-20T00:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will refactor the config loader."}]}}
+{"timestamp":"2026-04-20T00:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}
+"#,
+        )
+        .unwrap();
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "codex".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
+            .expect("load providers/codex.yaml");
+
+        let sessions = prov.discover_sessions().expect("discover_sessions");
+        assert_eq!(sessions.len(), 1, "expected exactly one Codex session");
+        let s = &sessions[0];
+
+        // session_id comes from payload.id in session_meta, NOT from filename.
+        assert_eq!(s.provider_session_id, sid);
+        assert_eq!(s.provider_name, "codex");
+
+        // Title skips the `developer` bootstrap message and picks the first
+        // real user response_item, first line, truncated.
+        assert_eq!(s.title, "refactor the config loader");
+        assert!(
+            s.summary.starts_with("refactor the config loader"),
+            "summary: {:?}",
+            s.summary
+        );
+
+        // cwd from session_meta.payload.cwd — ends with the last folder.
+        assert!(s.cwd.ends_with("yaml-demo"), "cwd: {:?}", s.cwd);
+        assert!(!s.updated_at.is_empty(), "updated_at missing");
+
+        // Tab title is the cwd basename.
+        let tab = prov.tab_title(s);
+        assert_eq!(tab.as_deref(), Some("yaml-demo"));
+
+        // State signals: the most recent matching event is task_complete,
+        // which should force interaction=waiting_input.
+        let signals = build_state_signals(&prov, &[
+            serde_json::from_str(r#"{"timestamp":"2026-04-20T00:00:01Z","type":"event_msg","payload":{"type":"task_started"}}"#).unwrap(),
+            serde_json::from_str(r#"{"timestamp":"2026-04-20T00:00:06Z","type":"event_msg","payload":{"type":"task_complete"}}"#).unwrap(),
+        ], s);
+        assert_eq!(
+            signals.forced_interaction.as_deref(),
+            Some("waiting_input"),
+            "event_predicates should resolve latest task_complete → waiting_input"
+        );
+        assert_eq!(signals.has_unfinished_turn, Some(false));
     }
 }
