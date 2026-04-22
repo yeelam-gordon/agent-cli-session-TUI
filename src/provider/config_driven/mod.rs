@@ -150,8 +150,27 @@ impl Provider for ConfigDrivenProvider {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string());
         }
-        let events = read_session_events(self, session.state_dir.as_deref()?).ok()?;
-        extract_tab_title(self, tab, &events)
+        let state_dir = session.state_dir.as_deref()?;
+        // Try configured tail first (fast path). If the required event (e.g. a
+        // report_intent tool call) is older than the tail — common for long-running
+        // sessions with large tool outputs — grow the tail progressively up to a
+        // cap, then fall back to reading the whole file.
+        let base_tail = base_tail_bytes(self);
+        let mut tail = base_tail.max(1);
+        let caps = [tail, tail.saturating_mul(4), tail.saturating_mul(16), usize::MAX];
+        for &cap in &caps {
+            let events = read_session_events_with_tail(self, state_dir, cap).ok()?;
+            if let Some(t) = extract_tab_title(self, tab, &events) {
+                return Some(t);
+            }
+            // If we already read the whole file, stop.
+            if let Ok(md) = std::fs::metadata(session_events_path(self, state_dir)) {
+                if (md.len() as usize) <= cap { break; }
+            }
+            tail = cap;
+        }
+        let _ = tail; // silence unused warning when caps end early
+        None
     }
 
     fn infer_state(&self, signals: &StateSignals) -> SessionState {
@@ -1024,6 +1043,37 @@ fn read_session_events(prov: &ConfigDrivenProvider, state_dir: &Path) -> Result<
     }
 }
 
+/// Returns the path to the events file for a session (the same path
+/// `read_session_events` reads).
+fn session_events_path(prov: &ConfigDrivenProvider, state_dir: &Path) -> PathBuf {
+    match &prov.cfg.discovery.strategy {
+        DiscoveryStrategy::DirPerSession { events_file, .. } => state_dir.join(events_file),
+        DiscoveryStrategy::FilePerSession { .. } | DiscoveryStrategy::DatePartitioned { .. } => {
+            state_dir.to_path_buf()
+        }
+    }
+}
+
+/// The configured tail size in bytes (from discovery strategy).
+fn base_tail_bytes(prov: &ConfigDrivenProvider) -> usize {
+    match &prov.cfg.discovery.strategy {
+        DiscoveryStrategy::DirPerSession { tail_bytes, .. }
+        | DiscoveryStrategy::FilePerSession { tail_bytes, .. }
+        | DiscoveryStrategy::DatePartitioned { tail_bytes, .. } => *tail_bytes,
+    }
+}
+
+/// Like `read_session_events`, but allows overriding `tail_bytes` (e.g. for
+/// growing-tail tab_title extraction on long-running sessions where the
+/// `report_intent` tool call is older than the default tail window).
+fn read_session_events_with_tail(
+    prov: &ConfigDrivenProvider,
+    state_dir: &Path,
+    tail_bytes: usize,
+) -> Result<Vec<Value>> {
+    read_jsonl_tail(&session_events_path(prov, state_dir), tail_bytes)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // State signals
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1517,6 +1567,89 @@ mod tests {
         // Tab title from `report_intent` tool call.
         let tab = prov.tab_title(s);
         assert_eq!(tab.as_deref(), Some("Exploring codebase"));
+    }
+
+    /// Regression: long-running Copilot sessions can push the most recent
+    /// `report_intent` tool call >2 MB from the end of `events.jsonl` (seen
+    /// at ~5 MB offset in a real 10 MB session). The configured `tail_bytes`
+    /// (2 MB in copilot.yaml) is too small to see it, so `tab_title()` must
+    /// grow the tail progressively and/or fall back to reading the whole file.
+    #[test]
+    fn copilot_tab_title_growing_tail_on_large_events_file() {
+        use std::fs;
+        use std::io::Write;
+
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers").join("copilot.yaml");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let sess = tmp.path().join(sid);
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("workspace.yaml"),
+            "cwd: D:\\Demo\\agent-session-tui\nsummary: Long-running session\n",
+        )
+        .unwrap();
+
+        // Write: one report_intent line, then ~5 MB of unrelated tail events
+        // (each an assistant.message with a large text blob — bigger than
+        // the 2 MB configured tail, so the fast path misses).
+        let events_path = sess.join("events.jsonl");
+        let mut f = std::fs::File::create(&events_path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user.message","timestamp":"2024-01-01T00:00:00Z","data":{{"content":"kick off"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant.message","timestamp":"2024-01-01T00:00:01Z","data":{{"toolRequests":[{{"name":"report_intent","arguments":{{"intent":"Tracking a long task"}}}}]}}}}"#
+        ).unwrap();
+        let big_text = "x".repeat(100_000);
+        let line = format!(
+            r#"{{"type":"assistant.message","timestamp":"2024-01-01T00:00:02Z","data":{{"content":"{}"}}}}"#,
+            big_text
+        );
+        // ~5 MB of trailing noise (50 * ~100 KB per line).
+        for _ in 0..50 {
+            writeln!(f, "{}", line).unwrap();
+        }
+        drop(f);
+        let sz = fs::metadata(&events_path).unwrap().len();
+        assert!(sz > 5_000_000, "fixture should exceed 5 MB, got {}", sz);
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "copilot".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
+            .expect("load providers/copilot.yaml");
+
+        let sessions = prov.discover_sessions().expect("discover_sessions");
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+
+        // The fix must find the intent even though it sits well beyond the
+        // configured 2 MB tail window.
+        let tab = prov.tab_title(s);
+        assert_eq!(
+            tab.as_deref(),
+            Some("Tracking a long task"),
+            "growing-tail should recover the intent despite trailing {} bytes of noise",
+            sz
+        );
     }
 
     /// End-to-end smoke test: parse `providers/claude.yaml` against a synthetic
