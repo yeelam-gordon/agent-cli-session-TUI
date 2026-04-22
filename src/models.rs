@@ -172,6 +172,10 @@ pub struct StateSignals {
     pub has_unfinished_turn: Option<bool>,
     pub recent_tool_activity: Option<bool>,
     pub cpu_active: Option<bool>,
+    /// Optional direct override for the interaction state, set by config-driven
+    /// providers from their YAML `last_event_map.interaction`. Values: "busy",
+    /// "waiting_input", "idle". When set, the provider's `infer_state` uses it.
+    pub forced_interaction: Option<String>,
 }
 
 #[cfg(test)]

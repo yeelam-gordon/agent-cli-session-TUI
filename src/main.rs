@@ -19,6 +19,7 @@ use archive::ArchiveStore;
 use config::AppConfig;
 use provider::claude::ClaudeProvider;
 use provider::codex::CodexProvider;
+use provider::config_driven::ConfigDrivenProvider;
 use provider::copilot::CopilotProvider;
 use provider::gemini::GeminiProvider;
 use provider::qwen::QwenProvider;
@@ -31,6 +32,16 @@ fn create_provider(
     key: &str,
     config: &config::ProviderConfig,
 ) -> Option<Box<dyn provider::Provider>> {
+    // Opt-in YAML-backed provider via env var: `COPILOT_PROVIDER=yaml` etc.
+    // Looks for `providers/<key>.yaml` relative to CWD or the binary dir.
+    if std::env::var(format!("{}_PROVIDER", key.to_uppercase())).as_deref() == Ok("yaml") {
+        if let Some(p) = try_load_yaml_provider(key, config) {
+            log::info(&format!("Provider '{}' loaded from YAML", key));
+            return Some(p);
+        } else {
+            log::info(&format!("Provider '{}' YAML opt-in set but file not found; using legacy", key));
+        }
+    }
     match key {
         "copilot" => Some(Box::new(CopilotProvider::new(config))),
         "claude" => Some(Box::new(ClaudeProvider::new(config))),
@@ -39,6 +50,35 @@ fn create_provider(
         "gemini" => Some(Box::new(GeminiProvider::new(config))),
         _ => None,
     }
+}
+
+fn try_load_yaml_provider(
+    key: &str,
+    config: &config::ProviderConfig,
+) -> Option<Box<dyn provider::Provider>> {
+    // Candidate search paths for `providers/<key>.yaml`:
+    //   1. cwd/providers/<key>.yaml
+    //   2. <exe-dir>/providers/<key>.yaml
+    //   3. <exe-dir>/../providers/<key>.yaml
+    let rel = std::path::PathBuf::from("providers").join(format!("{}.yaml", key));
+    let mut candidates: Vec<std::path::PathBuf> = vec![rel.clone()];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(p) = exe.parent() {
+            candidates.push(p.join(&rel));
+            if let Some(pp) = p.parent() {
+                candidates.push(pp.join(&rel));
+            }
+        }
+    }
+    for path in candidates {
+        if path.exists() {
+            match ConfigDrivenProvider::load_from_yaml(&path, config) {
+                Ok(p) => return Some(Box::new(p)),
+                Err(e) => log::info(&format!("YAML load failed for {:?}: {}", path, e)),
+            }
+        }
+    }
+    None
 }
 
 #[tokio::main]

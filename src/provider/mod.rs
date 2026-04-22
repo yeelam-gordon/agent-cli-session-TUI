@@ -162,7 +162,7 @@ pub struct PlanItem {
 // Default state inference from signals (multi-signal)
 // ---------------------------------------------------------------------------
 
-fn default_state_inference(s: &StateSignals) -> SessionState {
+pub(crate) fn default_state_inference(s: &StateSignals) -> SessionState {
     use crate::models::*;
 
     let process = match (s.process_alive, s.lock_file_exists, s.lock_file_pid) {
@@ -273,3 +273,4 @@ pub mod codex;
 pub mod copilot;
 pub mod qwen;
 pub mod gemini;
+pub mod config_driven;

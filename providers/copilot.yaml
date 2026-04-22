@@ -1,0 +1,91 @@
+# Copilot CLI provider — declarative config.
+#
+# Fresh re-investigation of on-disk layout (~/.copilot/session-state/<UUID>/):
+#   - workspace.yaml         — session metadata (cwd, summary)
+#   - events.jsonl           — append-only event stream
+#   - inuse.<PID>.lock       — per-process live-lock file(s)
+#
+# Dead code INTENTIONALLY dropped:
+#   - human.message fallback (never observed in real sessions)
+#   - plan.md parsing (rare; not worth special-casing)
+
+name: copilot
+display_name: Copilot
+
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+
+discovery:
+  base_dir: ${HOME}/.copilot/session-state
+  strategy: dir_per_session
+  metadata_file: workspace.yaml
+  events_file: events.jsonl
+  tail_bytes: 524288          # 512 KB; enough for tab-title + last messages
+  lockfile_pattern: "inuse.*.lock"
+
+session_id:
+  source: dirname
+
+cwd:
+  source: yaml_field
+  path: cwd
+
+events:
+  format: jsonl
+  filter_out: []              # no noise events in Copilot's stream
+
+fields:
+  title:
+    strategy: first_matching_event
+    where: 'type == "user.message"'
+    path: data.content // data.message // data.text
+    transforms:
+      - strip_newlines
+      - trim
+      - truncate:60
+  summary:
+    strategy: metadata_field
+    path: summary
+    transforms:
+      - trim
+      - truncate:500
+  created_at:
+    strategy: first_event_field
+    path: timestamp
+    fallback:
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime       # events.jsonl mtime = real-time activity
+
+state_signals:
+  # Scanned most-recent-first; the first event type that matches wins.
+  last_event_map:
+    "assistant.turn_start":     { interaction: busy }
+    "assistant.turn_end":       { interaction: waiting_input }
+    "assistant.turn_complete":  { interaction: waiting_input }
+    "session.task_complete":    { interaction: waiting_input }
+    "user.message":             { interaction: busy }
+    "tool.execution_start":     { interaction: busy }
+    "tool.execution_complete":  { interaction: busy }
+  idle_threshold_seconds: 1800
+
+process_match:
+  strategy: lockfile
+  lockfile_pattern: "inuse.*.lock"
+  # Capture the PID from filename: `inuse.12345.lock` → `12345`.
+  pid_extract_regex: 'inuse\.(\d+)\.lock'
+
+tab_title:
+  strategy: from_tool_call
+  where: 'type == "assistant.message"'
+  iterate_path: data.toolRequests
+  tool_name_path: name
+  tool_name: report_intent
+  args_path: arguments
+  arg_field: intent

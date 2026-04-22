@@ -511,6 +511,7 @@ impl Provider for ClaudeProvider {
                 has_unfinished_turn: Some(scan.assistant_working),
                 recent_tool_activity: None,
                 cpu_active: None,
+                ..Default::default()
             };
 
             session.state = self.infer_state(&signals);

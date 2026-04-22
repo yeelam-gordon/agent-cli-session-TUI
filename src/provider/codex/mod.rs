@@ -429,6 +429,7 @@ impl Provider for CodexProvider {
                 has_unfinished_turn: Some(scan.active_task),
                 recent_tool_activity: None,
                 cpu_active: None,
+                ..Default::default()
             };
 
             session.state = self.infer_state(&signals);

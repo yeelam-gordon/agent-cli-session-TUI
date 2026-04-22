@@ -817,6 +817,7 @@ impl Provider for CopilotProvider {
                 has_unfinished_turn: Some(events.has_unfinished_turn),
                 recent_tool_activity: None,
                 cpu_active: None,
+                ..Default::default()
             };
 
             session.state = self.infer_state(&signals);
