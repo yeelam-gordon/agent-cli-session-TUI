@@ -41,6 +41,7 @@ events:
   filter_out: []              # no noise events in Copilot's stream
 
 fields:
+  discard_if_empty: true
   title:
     # Prefer the workspace.yaml summary (Copilot writes a human-readable
     # summary there). Fall back to the first user.message event if no

@@ -207,6 +207,12 @@ pub struct FieldsConfig {
     /// produced.
     #[serde(default)]
     pub summary_parts: Vec<SummaryPart>,
+    /// If true, sessions with no extractable title AND no summary content
+    /// are dropped entirely (matches legacy main's "skip sessions with zero
+    /// user interaction" behavior). When false (default), empty sessions
+    /// surface with a fallback "<Provider> session" title.
+    #[serde(default)]
+    pub discard_if_empty: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

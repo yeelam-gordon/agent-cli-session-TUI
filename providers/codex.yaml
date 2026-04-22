@@ -41,6 +41,7 @@ events:
     - 'type == "event_msg" and payload.type == "token_count"'
 
 fields:
+  discard_if_empty: true
   # Title: first `response_item` authored by the real USER (role=="user",
   # not "developer" which carries bootstrapping instructions).
   # Content is an array; pull the first text-bearing item.

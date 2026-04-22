@@ -461,7 +461,9 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     let cwd = resolve_cwd(prov, cand, &kept)?.unwrap_or_else(|| PathBuf::from("."));
 
     // title
-    let title = extract_field(prov, &cand.metadata, &kept, &cfg.fields.title)
+    let title_extracted = extract_field(prov, &cand.metadata, &kept, &cfg.fields.title);
+    let title_used_fallback = title_extracted.is_none();
+    let title = title_extracted
         .unwrap_or_else(|| format!("{} session", cfg.display_name));
     let title = truncate_str_safe(&title, 120);
 
@@ -500,6 +502,12 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
                 format!("{summary}\n\n{parts_block}")
             };
         }
+    }
+
+    // Discard truly empty sessions (no title, no summary content). Mirrors
+    // legacy main's "skip sessions with zero user interaction" guard.
+    if cfg.fields.discard_if_empty && title_used_fallback && summary.is_empty() {
+        return Ok(None);
     }
 
     // timestamps

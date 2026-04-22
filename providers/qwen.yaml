@@ -42,6 +42,7 @@ events:
     - 'type == "system"'
 
 fields:
+  discard_if_empty: true
   # Qwen message content lives under `message.parts[0].text`. The array
   # indexing (`.0.`) is handled by the expression DSL the same way Codex
   # uses it for `payload.content.0.text`.
