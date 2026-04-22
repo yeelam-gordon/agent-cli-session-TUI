@@ -177,9 +177,9 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                 let n: f64 = slice.parse().map_err(|e| format!("bad number '{slice}': {e}"))?;
                 out.push(Token::Number(n));
             }
-            c if c.is_ascii_alphabetic() || c == b'_' => {
+            c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
                 let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-') {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-' || bytes[i] == b'$') {
                     i += 1;
                 }
                 let word = std::str::from_utf8(&bytes[start..i])

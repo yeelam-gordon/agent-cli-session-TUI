@@ -150,6 +150,22 @@ pub enum CwdConfig {
         /// Path inside each entry where the full CWD lives.
         value_path: String,
     },
+    /// Reverse-lookup in a JSON map whose KEYS are CWDs and VALUES are project
+    /// names (Gemini's `~/.gemini/projects.json`). The session's ancestor
+    /// directory name matches a VALUE; we scan the map for the entry whose
+    /// value matches and return its KEY as the cwd.
+    ConfigReverseLookup {
+        /// File path with `${HOME}` expansion.
+        lookup_file: String,
+        /// Our key comes from the session's parent directory name.
+        /// "parent_dir_name" | "parent_parent_dir_name"
+        key_source: String,
+        /// Dot path from the JSON root to the map object whose entries are
+        /// `<cwd>: <project-name>` (e.g. `"projects"`). If empty, the root
+        /// object itself is treated as the map.
+        #[serde(default)]
+        container_path: String,
+    },
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────

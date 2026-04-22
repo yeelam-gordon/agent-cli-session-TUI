@@ -1,0 +1,111 @@
+name: gemini
+display_name: Gemini CLI
+
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+
+# Gemini writes main sessions as one JSONL file per session at
+#   ~/.gemini/tmp/<project-name>/chats/session-<ISO>-<short>.jsonl
+# Subagent continuations live deeper at
+#   ~/.gemini/tmp/<project-name>/chats/<UUID>/*.jsonl
+# and MUST be hidden (they're not user-facing sessions). Our glob
+# `*/chats/session-*.jsonl` excludes the subagent subdirs by shape —
+# their filenames never start with `session-`.
+discovery:
+  base_dir: ${HOME}/.gemini/tmp
+  strategy: file_per_session
+  glob: "*/chats/session-*.jsonl"
+  tail_bytes: 524288
+
+# The session UUID is stored in the very first line of the JSONL as
+# `sessionId` (e.g. 992fb9b6-1a53-4a59-84fd-9cae1de984c2). The filename
+# only carries a short prefix, so we extract the canonical id from the
+# payload — matching how Gemini CLI itself identifies sessions.
+session_id:
+  source: first_event_field
+  field: "sessionId"
+
+# Gemini's `~/.gemini/projects.json` maps
+#   { "projects": { "<lowercase-cwd>": "<project-name>", ... } }
+# i.e. KEYS are cwds, VALUES are project names. From the session's file
+# path we only know the project-name (two levels up from the jsonl), so
+# we reverse-scan the map and return the key whose value matches.
+cwd:
+  source: config_reverse_lookup
+  lookup_file: ${HOME}/.gemini/projects.json
+  key_source: parent_parent_dir_name
+  container_path: "projects"
+
+# Two kinds of junk to drop before title/state inference:
+#   1. `{"$set": {...}}` metadata-only records emitted after every event
+#      to update `lastUpdated`. They have no `type` field.
+#   2. `type == "info"` records like "Request cancelled." — status
+#      messages, not real interaction turns.
+# The session-meta first line (no `type`, but has `sessionId`) must be
+# KEPT because `session_id.first_event_field` reads from it.
+events:
+  format: jsonl
+  filter_out:
+    - '$set != null'
+    - 'type == "info"'
+
+fields:
+  # First real user turn supplies the title. Content is an array of
+  # parts; the first text part is what appears in the chat UI.
+  title:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "content.0.text"
+    transforms:
+      - first_line
+      - truncate:60
+  summary:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "content.0.text"
+    transforms:
+      - truncate:4000
+  created_at:
+    strategy: first_event_field
+    path: "startTime"
+    fallback:
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime
+
+# After filtering, the tail alternates `user` ↔ `gemini`. A final
+# `gemini` entry means Gemini finished replying and is awaiting the
+# next prompt; a final `user` entry means Gemini is working.
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "user":   { interaction: busy }
+    "gemini": { interaction: waiting_input }
+
+# Gemini CLI is distributed as a Node.js app. Real processes appear as
+#   node.exe <install-path>\gemini.js ...
+# The WMI match on `executable: gemini` is a case-insensitive substring
+# that hits either the exe basename or the cmdline script path.
+# `script_contains: gemini.js` tightens this — legacy code only checked
+# "gemini" which could match unrelated programs. Session UUID is NOT
+# passed on the cmdline, so id_match is Contains (cheap fallback to
+# false) and we rely on recently_active_secs to associate a running
+# node process with the most recent session event.
+process_match:
+  strategy: cmdline
+  executable: gemini
+  script_contains: "gemini.js"
+  id_match_kind: contains
+  recently_active_secs: 15
+
+# Gemini's tab title in Windows Terminal is `✦ Working… (<cwd-basename>)`
+# while busy and `✦ Waiting (<cwd-basename>)` while idle. We key off
+# the cwd folder basename — the same strategy Codex/Qwen use.
+tab_title:
+  strategy: cwd_basename

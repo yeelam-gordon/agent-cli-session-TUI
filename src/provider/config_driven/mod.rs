@@ -558,23 +558,60 @@ fn resolve_cwd(
             let p = expand_path(lookup_file);
             let text = std::fs::read_to_string(&p).unwrap_or_default();
             let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let key = match key_source.as_str() {
-                "parent_dir_name" => cand.path.parent()
-                    .and_then(|p| p.file_name().and_then(|s| s.to_str()))
-                    .unwrap_or("")
-                    .to_string(),
-                "parent_parent_dir_name" => cand.path.parent().and_then(|p| p.parent())
-                    .and_then(|p| p.file_name().and_then(|s| s.to_str()))
-                    .unwrap_or("")
-                    .to_string(),
-                other => other.to_string(),
-            };
+            let key = resolve_key_source(key_source, &cand.path);
             if let Some(entry) = json.get(&key) {
                 let expr = prov.expr(value_path);
                 return Ok(expr.eval_str(entry).map(PathBuf::from));
             }
             Ok(None)
         }
+        CwdConfig::ConfigReverseLookup { lookup_file, key_source, container_path } => {
+            let p = expand_path(lookup_file);
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let key = resolve_key_source(key_source, &cand.path);
+            // Navigate to the container object that holds the <cwd>: <name> map.
+            let mut container = &json;
+            if !container_path.is_empty() {
+                for seg in container_path.split('.') {
+                    container = match container.get(seg) {
+                        Some(c) => c,
+                        None => return Ok(None),
+                    };
+                }
+            }
+            let map = match container.as_object() {
+                Some(m) => m,
+                None => return Ok(None),
+            };
+            // Find the key whose value equals our lookup name.
+            for (cwd_str, name_val) in map.iter() {
+                if name_val.as_str() == Some(key.as_str()) {
+                    return Ok(Some(PathBuf::from(cwd_str)));
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Resolve a `key_source` string (e.g. "parent_dir_name",
+/// "parent_parent_dir_name") against a session candidate's path.
+/// Literal strings fall through unchanged.
+fn resolve_key_source(key_source: &str, path: &Path) -> String {
+    match key_source {
+        "parent_dir_name" => path
+            .parent()
+            .and_then(|p| p.file_name().and_then(|s| s.to_str()))
+            .unwrap_or("")
+            .to_string(),
+        "parent_parent_dir_name" => path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name().and_then(|s| s.to_str()))
+            .unwrap_or("")
+            .to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -1675,5 +1712,254 @@ mod tests {
             Some("waiting_input"),
             "last_event_map should resolve latest assistant → waiting_input"
         );
+    }
+
+    /// End-to-end smoke test: parse a Gemini-shaped YAML (mirroring the
+    /// shipped `providers/gemini.yaml` but with a tempdir-scoped
+    /// `lookup_file` for the config_reverse_lookup) against a synthetic
+    /// `<tmp>/<project-name>/chats/session-*.jsonl` tree plus a
+    /// `projects.json` map. Exercises the new `config_reverse_lookup`
+    /// cwd strategy, the `"$set" != null` metadata filter, the
+    /// `first_event_field sessionId` strategy on the first-line meta
+    /// record, the `content.0.text` title path, and last_event_map
+    /// state inference with user/gemini event types.
+    #[test]
+    fn gemini_yaml_end_to_end() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "992fb9b6-1a53-4a59-84fd-9cae1de984c2";
+        let project_name = "agent-session-tui";
+        let cwd_literal = "D:\\Demo\\agent-session-tui";
+
+        // <tmp>/<project-name>/chats/session-<iso>-<short>.jsonl
+        let chats = tmp.path().join(project_name).join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let session_file = chats.join("session-2026-04-20T07-54-992fb9b6.jsonl");
+        fs::write(
+            &session_file,
+            r#"{"sessionId":"992fb9b6-1a53-4a59-84fd-9cae1de984c2","projectHash":"abc","startTime":"2026-04-20T07:54:30.298Z","lastUpdated":"2026-04-20T07:54:30.298Z","kind":"main"}
+{"id":"c8d803a5","timestamp":"2026-04-20T07:56:15.010Z","type":"user","content":[{"text":"write a plugin\nsecond paragraph"}]}
+{"$set":{"lastUpdated":"2026-04-20T07:56:15.011Z"}}
+{"id":"fb166ac2","timestamp":"2026-04-20T07:56:20.351Z","type":"gemini","content":"Starting the plugin work.","thoughts":[{"subject":"plan","description":"assess"}]}
+{"$set":{"lastUpdated":"2026-04-20T07:56:20.353Z"}}
+{"id":"541effcd","timestamp":"2026-04-20T07:57:12.037Z","type":"info","content":"Request cancelled."}
+{"$set":{"lastUpdated":"2026-04-20T07:57:12.039Z"}}
+"#,
+        )
+        .unwrap();
+
+        // Also lay down a sibling subagent continuation dir that the glob
+        // MUST skip (`chats/<UUID>/*.jsonl`).
+        let subagent_dir = chats.join("992fb9b6-1a53-4a59-84fd-9cae1de984c2");
+        fs::create_dir_all(&subagent_dir).unwrap();
+        fs::write(
+            subagent_dir.join("ptun6d.jsonl"),
+            r#"{"sessionId":"sub-1","kind":"subagent"}
+"#,
+        )
+        .unwrap();
+
+        // Fake `projects.json` — keys are cwds, values are project-names.
+        let projects_json = tmp.path().join("projects.json");
+        fs::write(
+            &projects_json,
+            r#"{"projects":{"c:\\users\\yeelam":"yeelam","d:\\demo\\agent-session-tui":"agent-session-tui"}}"#,
+        )
+        .unwrap();
+
+        // Inline YAML mirroring providers/gemini.yaml with a tempdir
+        // lookup_file. (The shipped YAML uses ${HOME}/.gemini/projects.json
+        // which we can't safely redirect inside a parallel test run.)
+        let yaml_src = format!(
+            r#"name: gemini
+display_name: Gemini CLI
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+discovery:
+  base_dir: {base}
+  strategy: file_per_session
+  glob: "*/chats/session-*.jsonl"
+  tail_bytes: 524288
+session_id:
+  source: first_event_field
+  field: "sessionId"
+cwd:
+  source: config_reverse_lookup
+  lookup_file: {lookup}
+  key_source: parent_parent_dir_name
+  container_path: "projects"
+events:
+  format: jsonl
+  filter_out:
+    - '$set != null'
+    - 'type == "info"'
+fields:
+  title:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "content.0.text"
+    transforms:
+      - first_line
+      - truncate:60
+  summary:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "content.0.text"
+    transforms:
+      - truncate:4000
+  created_at:
+    strategy: first_event_field
+    path: "startTime"
+    fallback:
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "user":   {{ interaction: busy }}
+    "gemini": {{ interaction: waiting_input }}
+process_match:
+  strategy: cmdline
+  executable: gemini
+  script_contains: "gemini.js"
+  id_match_kind: contains
+  recently_active_secs: 15
+tab_title:
+  strategy: cwd_basename
+"#,
+            base = tmp.path().display().to_string().replace('\\', "\\\\"),
+            lookup = projects_json.display().to_string().replace('\\', "\\\\"),
+        );
+
+        let cfg: ProviderConfigFile =
+            serde_yaml::from_str(&yaml_src).expect("parse inline gemini yaml");
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "gemini".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: None,
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov =
+            ConfigDrivenProvider::from_config(cfg, &app_cfg).expect("construct gemini provider");
+
+        let sessions = prov.discover_sessions().expect("discover_sessions");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "glob must skip chats/<UUID>/*.jsonl subagent continuations"
+        );
+        let s = &sessions[0];
+
+        // session_id comes from first-line meta sessionId (first_event_field),
+        // not the filename — which only carries a short prefix.
+        assert_eq!(s.provider_session_id, sid);
+        assert_eq!(s.provider_name, "gemini");
+
+        // Title: first `type == "user"` line, content.0.text, first_line only.
+        assert_eq!(s.title, "write a plugin");
+        assert!(
+            s.summary.starts_with("write a plugin"),
+            "summary: {:?}",
+            s.summary
+        );
+
+        // cwd from ConfigReverseLookup on projects.json: the directory
+        // `agent-session-tui` matches the VALUE, so we return the KEY
+        // (`D:\Demo\agent-session-tui`).
+        assert_eq!(
+            s.cwd.to_string_lossy().to_lowercase(),
+            cwd_literal.to_lowercase()
+        );
+        assert!(!s.updated_at.is_empty(), "updated_at missing");
+
+        // Tab title uses cwd basename (shared strategy).
+        let tab = prov.tab_title(s);
+        assert_eq!(tab.as_deref(), Some("agent-session-tui"));
+
+        // State inference: after filtering out `{"$set":...}` metadata and
+        // `type == "info"` status, the tail event is `type == "gemini"`,
+        // which last_event_map forces to waiting_input. Critically, the
+        // `info` line ("Request cancelled.") MUST NOT leak through —
+        // it would otherwise be the last event and produce no mapping.
+        let events: Vec<serde_json::Value> = vec![
+            serde_json::from_str(
+                r#"{"timestamp":"2026-04-20T07:56:15.010Z","type":"user","content":[{"text":"write a plugin"}]}"#,
+            )
+            .unwrap(),
+            serde_json::from_str(r#"{"$set":{"lastUpdated":"x"}}"#).unwrap(),
+            serde_json::from_str(
+                r#"{"timestamp":"2026-04-20T07:56:20.351Z","type":"gemini","content":"ok"}"#,
+            )
+            .unwrap(),
+            serde_json::from_str(
+                r#"{"timestamp":"2026-04-20T07:57:12.037Z","type":"info","content":"Request cancelled."}"#,
+            )
+            .unwrap(),
+        ];
+        // Filter events as parse_session would.
+        let filters: Vec<Expr> = prov
+            .cfg
+            .events
+            .filter_out
+            .iter()
+            .map(|s| prov.expr(s))
+            .collect();
+        let kept: Vec<serde_json::Value> = events
+            .into_iter()
+            .filter(|ev| !filters.iter().any(|f| f.eval_bool(ev)))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            2,
+            "$set and info lines must both be filtered out, leaving only user+gemini"
+        );
+        let signals = build_state_signals(&prov, &kept, s);
+        assert_eq!(
+            signals.forced_interaction.as_deref(),
+            Some("waiting_input"),
+            "last kept event is type=gemini → waiting_input"
+        );
+    }
+
+    /// Sanity check: the shipped `providers/gemini.yaml` deserializes
+    /// into a ProviderConfigFile without errors. We don't invoke
+    /// discovery (it reads the real ${HOME}/.gemini map), just prove
+    /// the schema/YAML stay in sync.
+    #[test]
+    fn providers_gemini_yaml_parses() {
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("gemini.yaml");
+        assert!(yaml.exists(), "providers/gemini.yaml missing");
+        let text = std::fs::read_to_string(&yaml).unwrap();
+        let cfg: ProviderConfigFile =
+            serde_yaml::from_str(&text).expect("providers/gemini.yaml must parse");
+        assert_eq!(cfg.name, "gemini");
+        // config_reverse_lookup must round-trip.
+        match &cfg.cwd {
+            CwdConfig::ConfigReverseLookup { container_path, .. } => {
+                assert_eq!(container_path, "projects");
+            }
+            other => panic!("expected ConfigReverseLookup, got {other:?}"),
+        }
     }
 }
