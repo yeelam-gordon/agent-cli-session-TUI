@@ -259,18 +259,19 @@ fn list_file_per_session(
         return Ok(vec![]);
     }
     let mut out = Vec::new();
-    collect_files_recursive(base, glob_pat, hide_globs, &mut out, tail_bytes);
+    collect_files_recursive(base, base, glob_pat, hide_globs, &mut out, tail_bytes);
     Ok(out)
 }
 
 fn collect_files_recursive(
-    base: &Path,
+    root: &Path,
+    dir: &Path,
     glob_pat: &str,
     hide_globs: &[String],
     out: &mut Vec<Candidate>,
     tail_bytes: usize,
 ) {
-    let Ok(entries) = std::fs::read_dir(base) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let p = entry.path();
         let ft = match entry.file_type() {
@@ -278,13 +279,13 @@ fn collect_files_recursive(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            collect_files_recursive(&p, glob_pat, hide_globs, out, tail_bytes);
+            collect_files_recursive(root, &p, glob_pat, hide_globs, out, tail_bytes);
             continue;
         }
-        if !matches_simple_glob(&p, base, glob_pat) {
+        if !matches_simple_glob(&p, root, glob_pat) {
             continue;
         }
-        if hide_globs.iter().any(|pat| matches_simple_glob(&p, base, pat)) {
+        if hide_globs.iter().any(|pat| matches_simple_glob(&p, root, pat)) {
             continue;
         }
         let session_id = p
@@ -533,9 +534,19 @@ fn resolve_cwd(
             }
             Ok(None)
         }
-        CwdConfig::DirnameDecode { decoder, backtrack: _ } => {
-            let name = cand.path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            Ok(Some(decode_cwd_name(name, decoder)))
+        CwdConfig::DirnameDecode { decoder, backtrack, from_parent } => {
+            // For FilePerSession, the encoded CWD lives in the PARENT directory name.
+            // For DirPerSession, the session dir itself carries the encoded CWD.
+            let name_src: Option<&Path> = if *from_parent {
+                cand.path.parent()
+            } else {
+                Some(cand.path.as_path())
+            };
+            let name = name_src
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            Ok(Some(decode_cwd_name(name, decoder, *backtrack)))
         }
         CwdConfig::ConfigLookup { lookup_file, key_source, value_path } => {
             let p = expand_path(lookup_file);
@@ -563,15 +574,24 @@ fn resolve_cwd(
 
 /// Decode CWD from a Windows dash-encoded directory name.
 /// Example: `D--Demo--agent-session-tui` → `D:\Demo\agent-session-tui`.
-fn decode_cwd_name(name: &str, decoder: &str) -> PathBuf {
+///
+/// When `backtrack` is true, hyphens in the remainder are ambiguous (they could
+/// be path separators or literal hyphens). We try greedy prefixes against disk
+/// to find the longest prefix that exists as a directory, then recurse. This
+/// matches the legacy Claude behavior for paths like `C--Users-a2a-cli` where
+/// the leaf could be `a2a\cli` or `a2a-cli`.
+fn decode_cwd_name(name: &str, decoder: &str, backtrack: bool) -> PathBuf {
     match decoder {
         "drive_dash" => {
-            // Convert leading single letter + "--" → "X:\", internal "--" → "\"
-            // Leaves single dashes as literal dashes.
+            if backtrack {
+                if let Some(p) = drive_dash_backtrack(name) {
+                    return p;
+                }
+            }
+            // Naive: leading "X--" → "X:\", internal "--" → "\", single '-' stays
             let mut out = String::new();
             let bytes = name.as_bytes();
             let mut i = 0usize;
-            // Leading drive letter?
             if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'-' && bytes[2] == b'-' {
                 out.push(bytes[0] as char);
                 out.push(':');
@@ -591,6 +611,55 @@ fn decode_cwd_name(name: &str, decoder: &str) -> PathBuf {
         }
         _ => PathBuf::from(name),
     }
+}
+
+/// Backtracking decoder for Claude-style lossy dash-encoded paths.
+/// Splits drive prefix `X--…`, then tries progressively-longer hyphen groupings
+/// for each segment, probing disk existence to disambiguate.
+fn drive_dash_backtrack(encoded: &str) -> Option<PathBuf> {
+    let (drive, remainder) = match encoded.find("--") {
+        Some(pos) => {
+            let drive = format!("{}:\\", &encoded[..pos]);
+            let rest = if pos + 2 < encoded.len() { &encoded[pos + 2..] } else { "" };
+            (drive, rest)
+        }
+        None => return None,
+    };
+    if remainder.is_empty() {
+        return Some(PathBuf::from(drive));
+    }
+    let segments: Vec<&str> = remainder.split('-').collect();
+
+    fn go(base: &Path, segs: &[&str], idx: usize) -> Option<PathBuf> {
+        if idx >= segs.len() {
+            return Some(base.to_path_buf());
+        }
+        let mut combined = segs[idx].to_string();
+        for end in idx + 1..=segs.len() {
+            let candidate = base.join(&combined);
+            if end == segs.len() {
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            } else if candidate.is_dir() {
+                if let Some(result) = go(&candidate, segs, end) {
+                    return Some(result);
+                }
+            }
+            if end < segs.len() {
+                combined = format!("{}-{}", combined, segs[end]);
+            }
+        }
+        // No disk match; consume the rest as a literal hyphenated leaf.
+        let mut fallback = segs[idx].to_string();
+        for s in &segs[idx + 1..] {
+            fallback = format!("{}-{}", fallback, s);
+        }
+        Some(base.join(fallback))
+    }
+
+    let drive_path = PathBuf::from(&drive);
+    go(&drive_path, &segments, 0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -704,8 +773,8 @@ fn match_processes_dispatch(
         ProcessMatchConfig::Lockfile { lockfile_pattern, pid_extract_regex } => {
             match_lockfile(sessions, lockfile_pattern, pid_extract_regex);
         }
-        ProcessMatchConfig::Cmdline { executable, script_contains, id_match, recently_active_secs } => {
-            match_cmdline(sessions, executable, script_contains.as_deref(), id_match, *recently_active_secs);
+        ProcessMatchConfig::Cmdline { executable, script_contains, not_contains, id_match, recently_active_secs } => {
+            match_cmdline(sessions, executable, script_contains.as_deref(), not_contains.as_deref(), id_match, *recently_active_secs);
         }
     }
 
@@ -752,6 +821,7 @@ fn match_cmdline(
     sessions: &mut [Session],
     executable: &str,
     script_contains: Option<&str>,
+    not_contains: Option<&str>,
     id_match: &CmdlineIdMatch,
     recently_active_secs: Option<u64>,
 ) {
@@ -759,18 +829,28 @@ fn match_cmdline(
     use std::collections::HashSet;
     let mut claimed: HashSet<u32> = HashSet::new();
 
+    let cmd_passes_filters = |cmd: &str| -> bool {
+        if let Some(req) = script_contains {
+            if !cmd.contains(req) { return false; }
+        }
+        if let Some(forbidden) = not_contains {
+            if cmd.contains(forbidden) { return false; }
+        }
+        true
+    };
+
     // Direct ID match pass
     for s in sessions.iter_mut() {
         let mut found: Option<u32> = None;
         for (pid, p) in &procs {
             if claimed.contains(pid) { continue; }
             let cmd = &p.command_line;
-            if let Some(req) = script_contains {
-                if !cmd.contains(req) { continue; }
-            }
+            if !cmd_passes_filters(cmd) { continue; }
             let matched = match id_match {
                 CmdlineIdMatch::Flag { flag } => {
-                    extract_flag_value(cmd, flag).as_deref() == Some(s.provider_session_id.as_str())
+                    flag.as_slice().iter().any(|f|
+                        extract_flag_value(cmd, f).as_deref() == Some(s.provider_session_id.as_str())
+                    )
                 }
                 CmdlineIdMatch::PositionalUuid => {
                     cmd.split_whitespace().any(|a| a == s.provider_session_id)
@@ -799,9 +879,7 @@ fn match_cmdline(
             for (pid, p) in &procs {
                 if claimed.contains(pid) { continue; }
                 let cmd = &p.command_line;
-                if let Some(req) = script_contains {
-                    if !cmd.contains(req) { continue; }
-                }
+                if !cmd_passes_filters(cmd) { continue; }
                 claimed.insert(*pid);
                 s.pid = Some(*pid);
                 s.state.process = ProcessState::Running;
@@ -929,6 +1007,7 @@ fn extract_tab_title(
 ) -> Option<String> {
     match cfg {
         TabTitleConfig::None => None,
+        TabTitleConfig::Literal { value } => Some(value.clone()),
         TabTitleConfig::FromField { r#where, path } => {
             let w = prov.expr(r#where);
             let p = prov.expr(path);
@@ -1198,9 +1277,22 @@ mod tests {
     #[test]
     fn drive_dash_decodes() {
         assert_eq!(
-            decode_cwd_name("D--Demo--agent-session-tui", "drive_dash"),
+            decode_cwd_name("D--Demo--agent-session-tui", "drive_dash", false),
             PathBuf::from("D:\\Demo\\agent-session-tui")
         );
+    }
+
+    #[test]
+    fn drive_dash_backtrack_handles_hyphen_in_leaf() {
+        // No disk → backtrack gives up and returns the fully-hyphenated leaf.
+        // This confirms we at least do not crash and prefer the conservative
+        // "keep the hyphen" interpretation when the path doesn't exist.
+        let p = decode_cwd_name(
+            "Z--DoesNotExist-subdir-with-hyphens",
+            "drive_dash",
+            true,
+        );
+        assert_eq!(p, PathBuf::from("Z:\\DoesNotExist-subdir-with-hyphens"));
     }
 
     #[test]
@@ -1286,5 +1378,93 @@ mod tests {
         // Tab title from `report_intent` tool call.
         let tab = prov.tab_title(s);
         assert_eq!(tab.as_deref(), Some("Exploring codebase"));
+    }
+
+    /// End-to-end smoke test: parse `providers/claude.yaml` against a synthetic
+    /// Claude project tree. Exercises file_per_session discovery, dirname_decode
+    /// with backtracking, hide_paths_glob (memory/subagents), last-role state
+    /// inference, and the literal tab title strategy.
+    #[test]
+    fn claude_yaml_end_to_end() {
+        use std::fs;
+
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers").join("claude.yaml");
+        assert!(yaml.exists(), "providers/claude.yaml missing");
+
+        // Synthetic `projects/` tree.
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        // Encoded CWD — `Z:` is almost never a real drive, so backtracking
+        // harmlessly falls back to the literal hyphenated leaf.
+        let proj_dir = tmp.path().join("Z--synth-proj");
+        fs::create_dir_all(&proj_dir).unwrap();
+        fs::write(
+            proj_dir.join(format!("{}.jsonl", sid)),
+            r#"{"type":"user","timestamp":"2024-02-01T00:00:00Z","message":{"content":"first user question\nsecond line"}}
+{"type":"assistant","timestamp":"2024-02-01T00:00:01Z","message":{"content":"first assistant reply"}}
+{"type":"user","timestamp":"2024-02-01T00:00:02Z","message":{"content":"follow up"}}
+{"type":"assistant","timestamp":"2024-02-01T00:00:03Z","message":{"content":"final reply"}}
+"#,
+        )
+        .unwrap();
+
+        // Hidden: memory dir (Claude's own memory) — must be skipped.
+        let mem = tmp.path().join("memory");
+        fs::create_dir_all(&mem).unwrap();
+        fs::write(
+            mem.join("abc.jsonl"),
+            r#"{"type":"user","message":{"content":"should be hidden"}}
+"#,
+        )
+        .unwrap();
+
+        // Hidden: subagents dir — must be skipped.
+        let sub = tmp.path().join("Z--synth-proj").join("subagents");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(
+            sub.join("sub.jsonl"),
+            r#"{"type":"user","message":{"content":"also hidden"}}
+"#,
+        )
+        .unwrap();
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "claude".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--continue".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
+            .expect("load providers/claude.yaml");
+
+        let sessions = prov.discover_sessions().expect("discover_sessions");
+        assert_eq!(sessions.len(), 1, "memory + subagents should be hidden");
+        for s in &sessions {
+            eprintln!("  -> id={} cwd={:?} title={:?}", s.provider_session_id, s.cwd, s.title);
+        }
+        assert_eq!(sessions.len(), 1, "memory + subagents should be hidden");
+        let s = &sessions[0];
+        assert_eq!(s.provider_session_id, sid);
+        assert_eq!(s.provider_name, "claude");
+        assert_eq!(s.title, "first user question");
+        assert!(s.summary.starts_with("first user question"), "summary: {:?}", s.summary);
+        // Backtracking with a non-existent drive falls back to literal leaf.
+        assert!(s.cwd.ends_with("synth-proj"), "cwd: {:?}", s.cwd);
+        assert!(!s.updated_at.is_empty(), "updated_at missing");
+
+        // Literal tab title — any terminal tab containing "✳" matches.
+        // `tab_title(&Session)` returns the sentinel value for matching.
+        let tab = prov.tab_title(s);
+        assert_eq!(tab.as_deref(), Some("✳"));
     }
 }

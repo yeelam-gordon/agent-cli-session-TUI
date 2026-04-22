@@ -132,9 +132,13 @@ pub enum CwdConfig {
     DirnameDecode {
         /// `drive_dash`: Windows dash-encoded path.
         decoder: String,
-        /// For Claude: try shorter fallbacks when glob doesn't match.
+        /// For Claude: try shorter fallbacks by probing disk when glob doesn't match.
         #[serde(default)]
         backtrack: bool,
+        /// When `true` and the candidate path points at a file (FilePerSession),
+        /// decode the *parent* directory name instead of the file name.
+        #[serde(default)]
+        from_parent: bool,
     },
     /// Look up in a JSON config file by key (Gemini's reverse-path map).
     ConfigLookup {
@@ -264,6 +268,12 @@ pub enum ProcessMatchConfig {
         /// Optional substring that must appear in the cmdline (e.g. `qwen.js`).
         #[serde(default)]
         script_contains: Option<String>,
+        /// Optional substring that must NOT appear in the cmdline. Used to
+        /// disambiguate co-tenant agents (e.g. Claude's cmdline can mention
+        /// `claude` when another tool like `copilot` is also running under
+        /// `node.exe`; set `not_contains: "copilot"` to skip those).
+        #[serde(default)]
+        not_contains: Option<String>,
         /// How to match session ID against cmdline: a flag, or a positional UUID.
         #[serde(flatten)]
         id_match: CmdlineIdMatch,
@@ -277,12 +287,31 @@ pub enum ProcessMatchConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "id_match_kind", rename_all = "snake_case")]
 pub enum CmdlineIdMatch {
-    /// Look for `--flag <session_id>` in cmdline.
-    Flag { flag: String },
+    /// Look for `--flag <session_id>` in cmdline. Accepts either a single
+    /// flag (`flag: "--session-id"`) or a list tried in priority order
+    /// (`flag: ["--session-id", "--continue", "--resume"]`).
+    Flag { flag: FlagSpec },
     /// Any cmdline arg must equal the session UUID literally.
     PositionalUuid,
     /// Any cmdline substring contains the session ID.
     Contains,
+}
+
+/// Either a single flag or a list of fallback flags (tried in order).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FlagSpec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl FlagSpec {
+    pub fn as_slice(&self) -> Vec<&str> {
+        match self {
+            FlagSpec::One(s) => vec![s.as_str()],
+            FlagSpec::Many(v) => v.iter().map(|s| s.as_str()).collect(),
+        }
+    }
 }
 
 // ── Tab title ────────────────────────────────────────────────────────────────
@@ -313,6 +342,10 @@ pub enum TabTitleConfig {
         r#where: String,
         path: String,
     },
+    /// A constant sentinel — the supervisor will substring-match any terminal
+    /// tab whose title *contains* this value. Used for Claude Code, which sets
+    /// its own tab title (e.g. `"✳ …"`) that we can only detect by prefix.
+    Literal { value: String },
     /// No tab title support.
     None,
 }
