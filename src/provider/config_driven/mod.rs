@@ -1940,19 +1940,47 @@ tab_title:
         );
     }
 
-    /// Sanity check: the shipped `providers/gemini.yaml` deserializes
-    /// into a ProviderConfigFile without errors. We don't invoke
-    /// discovery (it reads the real ${HOME}/.gemini map), just prove
-    /// the schema/YAML stay in sync.
-    #[test]
-    fn providers_gemini_yaml_parses() {
+    /// Sanity check: every shipped `providers/<name>.yaml` deserializes
+    /// into a ProviderConfigFile without errors. These tests guard the
+    /// atomic replacement — if the schema evolves and a YAML lags, CI
+    /// fails here instead of at runtime when a user launches the TUI.
+    fn load_shipped_yaml(name: &str) -> ProviderConfigFile {
         let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("providers")
-            .join("gemini.yaml");
-        assert!(yaml.exists(), "providers/gemini.yaml missing");
+            .join(format!("{name}.yaml"));
+        assert!(yaml.exists(), "providers/{name}.yaml missing");
         let text = std::fs::read_to_string(&yaml).unwrap();
-        let cfg: ProviderConfigFile =
-            serde_yaml::from_str(&text).expect("providers/gemini.yaml must parse");
+        serde_yaml::from_str(&text)
+            .unwrap_or_else(|e| panic!("providers/{name}.yaml must parse: {e}"))
+    }
+
+    #[test]
+    fn providers_copilot_yaml_parses() {
+        let cfg = load_shipped_yaml("copilot");
+        assert_eq!(cfg.name, "copilot");
+    }
+
+    #[test]
+    fn providers_claude_yaml_parses() {
+        let cfg = load_shipped_yaml("claude");
+        assert_eq!(cfg.name, "claude");
+    }
+
+    #[test]
+    fn providers_codex_yaml_parses() {
+        let cfg = load_shipped_yaml("codex");
+        assert_eq!(cfg.name, "codex");
+    }
+
+    #[test]
+    fn providers_qwen_yaml_parses() {
+        let cfg = load_shipped_yaml("qwen");
+        assert_eq!(cfg.name, "qwen");
+    }
+
+    #[test]
+    fn providers_gemini_yaml_parses() {
+        let cfg = load_shipped_yaml("gemini");
         assert_eq!(cfg.name, "gemini");
         // config_reverse_lookup must round-trip.
         match &cfg.cwd {
