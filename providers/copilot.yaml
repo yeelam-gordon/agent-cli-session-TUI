@@ -26,7 +26,7 @@ discovery:
   strategy: dir_per_session
   metadata_file: workspace.yaml
   events_file: events.jsonl
-  tail_bytes: 524288          # 512 KB; enough for tab-title + last messages
+  tail_bytes: 2097152          # 512 KB; enough for tab-title + last messages
   lockfile_pattern: "inuse.*.lock"
 
 session_id:
@@ -42,19 +42,68 @@ events:
 
 fields:
   title:
-    strategy: first_matching_event
-    where: 'type == "user.message"'
-    path: data.content // data.message // data.text
+    # Prefer the workspace.yaml summary (Copilot writes a human-readable
+    # summary there). Fall back to the first user.message event if no
+    # summary has been written yet.
+    strategy: metadata_field
+    path: summary
     transforms:
       - strip_newlines
       - trim
       - truncate:60
+    fallback:
+      - strategy: first_matching_event
+        where: 'type == "user.message"'
+        path: data.content // data.message // data.text
+        transforms:
+          - strip_newlines
+          - trim
+          - truncate:60
   summary:
     strategy: metadata_field
     path: summary
     transforms:
       - trim
       - truncate:500
+  summary_parts:
+    - name: first_user
+      label: "── First message ──"
+      spec:
+        strategy: first_matching_event
+        where: 'type == "user.message"'
+        path: data.content // data.message // data.text
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_user
+      label: "── Last user message ──"
+      skip_if_same_as: first_user
+      spec:
+        strategy: last_matching_event
+        where: 'type == "user.message"'
+        path: data.content // data.message // data.text
+        transforms:
+          - trim
+          - truncate:2000
+    - name: prev_assistant
+      label: "── Previous response ──"
+      spec:
+        strategy: nth_from_end_matching_event
+        where: 'type == "assistant.message" and data.content != null and data.content != "" and (not data.toolRequests or len(data.content) > 100)'
+        nth: 2
+        path: data.content // data.message // data.text
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_assistant
+      label: "── Last Copilot response ──"
+      spec:
+        strategy: last_matching_event
+        where: 'type == "assistant.message" and data.content != null and data.content != "" and (not data.toolRequests or len(data.content) > 100)'
+        path: data.content // data.message // data.text
+        transforms:
+          - trim
+          - truncate:2000
   created_at:
     strategy: first_event_field
     path: timestamp

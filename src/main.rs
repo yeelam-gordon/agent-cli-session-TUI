@@ -32,20 +32,27 @@ fn create_provider(
     key: &str,
     config: &config::ProviderConfig,
 ) -> Option<Box<dyn provider::Provider>> {
-    // Candidate search paths for `providers/<key>.yaml`:
-    //   1. cwd/providers/<key>.yaml                (developer / cargo run)
-    //   2. <exe-dir>/providers/<key>.yaml          (installed layout)
-    //   3. <exe-dir>/../providers/<key>.yaml       (cargo target/debug)
+    // Candidate search paths for `providers/<key>.yaml`, tried in order.
+    // Priority: installed layout (next to exe) > crate-root > cwd (last-resort,
+    // since the cwd may contain a stale copy from a prior build).
+    //   1. <exe-dir>/providers/<key>.yaml          (installed layout / target/release after sync)
+    //   2. <exe-dir>/../providers/<key>.yaml       (cargo target/debug next to target/)
+    //   3. <exe-dir>/../../providers/<key>.yaml    (cargo target/release — crate root)
+    //   4. cwd/providers/<key>.yaml                (developer / cargo run — last-resort)
     let rel = std::path::PathBuf::from("providers").join(format!("{}.yaml", key));
-    let mut candidates: Vec<std::path::PathBuf> = vec![rel.clone()];
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(p) = exe.parent() {
             candidates.push(p.join(&rel));
             if let Some(pp) = p.parent() {
                 candidates.push(pp.join(&rel));
+                if let Some(ppp) = pp.parent() {
+                    candidates.push(ppp.join(&rel));
+                }
             }
         }
     }
+    candidates.push(rel.clone());
     for path in &candidates {
         if path.exists() {
             match ConfigDrivenProvider::load_from_yaml(path, config) {
@@ -106,6 +113,42 @@ async fn main() -> Result<()> {
             }
         }
     }
+
+    // --- dump-json comparison hook -----------------------------------------
+    // `--dump-json [N]` runs discovery on every registered provider, merges
+    // all Session objects, sorts by updated_at desc, and prints the top N
+    // (default 20) as JSON. Skips the TUI entirely — used for side-by-side
+    // golden comparison vs the legacy branch.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--dump-json") {
+        let n: usize = args
+            .get(pos + 1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let mut all: Vec<serde_json::Value> = Vec::new();
+        for prov in registry.providers() {
+            match prov.discover_sessions() {
+                Ok(sessions) => {
+                    for s in sessions {
+                        all.push(serde_json::to_value(&s).unwrap_or(serde_json::Value::Null));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("discover failed for {}: {}", prov.name(), e);
+                }
+            }
+        }
+        // Sort newest first by updated_at string (ISO-8601 sorts lexically).
+        all.sort_by(|a, b| {
+            let ka = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+            let kb = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+            kb.cmp(ka)
+        });
+        all.truncate(n);
+        println!("{}", serde_json::to_string_pretty(&all)?);
+        return Ok(());
+    }
+    // -----------------------------------------------------------------------
 
     let registry = Arc::new(registry);
 

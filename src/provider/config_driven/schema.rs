@@ -199,11 +199,36 @@ pub struct FieldsConfig {
     pub summary: FieldSpec,
     pub created_at: TimestampSpec,
     pub updated_at: TimestampSpec,
+    /// Optional labeled parts appended to the primary `summary` value.
+    /// When present, the final Session.summary is composed by appending each
+    /// resolved part below the primary summary. Lets provider YAMLs build the
+    /// 4-section "First message / Last user message / Previous response /
+    /// Last <Provider> response" block the legacy hand-written providers
+    /// produced.
+    #[serde(default)]
+    pub summary_parts: Vec<SummaryPart>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SummaryPart {
+    /// Optional name so later parts can reference via `skip_if_same_as`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Label rendered above the extracted value (e.g. "--- First message ---").
+    pub label: String,
+    /// Extraction spec for this part's value.
+    pub spec: FieldSpec,
+    /// If this part's resolved value equals the named earlier part's value,
+    /// skip rendering it. Used to avoid "last user message == first user
+    /// message" duplication.
+    #[serde(default)]
+    pub skip_if_same_as: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FieldSpec {
-    /// `first_matching_event`, `last_matching_event`, `metadata_field`, `joined_events`.
+    /// `first_matching_event`, `last_matching_event`,
+    /// `nth_from_end_matching_event`, `metadata_field`, `joined_events`.
     pub strategy: String,
     /// Optional predicate expression to filter events before picking.
     #[serde(default)]
@@ -219,6 +244,15 @@ pub struct FieldSpec {
     /// For `joined_events` strategy — hard cap on result length.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// For `nth_from_end_matching_event` — 1-based index from end.
+    /// n=1 behaves like `last_matching_event`; n=2 is "second-to-last".
+    #[serde(default)]
+    pub nth: Option<usize>,
+    /// Additional specs tried in order if the primary strategy returns
+    /// nothing. Each fallback runs independently (same event/metadata
+    /// context) and may itself specify transforms, `where`, etc.
+    #[serde(default)]
+    pub fallback: Vec<FieldSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

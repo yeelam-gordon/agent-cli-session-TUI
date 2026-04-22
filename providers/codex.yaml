@@ -57,6 +57,45 @@ fields:
     path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
     transforms:
       - truncate:4000
+  summary_parts:
+    - name: first_user
+      label: "── First message ──"
+      spec:
+        strategy: first_matching_event
+        where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_user
+      label: "── Last user message ──"
+      skip_if_same_as: first_user
+      spec:
+        strategy: last_matching_event
+        where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+    - name: prev_assistant
+      label: "── Previous response ──"
+      spec:
+        strategy: nth_from_end_matching_event
+        where: 'type == "response_item" and payload.role == "assistant" and payload.type == "message"'
+        nth: 2
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_assistant
+      label: "── Last Codex response ──"
+      spec:
+        strategy: last_matching_event
+        where: 'type == "response_item" and payload.role == "assistant" and payload.type == "message"'
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
   created_at:
     strategy: first_event_field
     path: "payload.timestamp"

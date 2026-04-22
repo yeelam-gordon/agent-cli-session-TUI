@@ -5,10 +5,11 @@
 //!   - Path alternative:     `a.b // c.d`     → left if non-null else right (jq-style)
 //!   - Array index:          `a.0.b`          → numeric segment picks that array element
 //!   - Literal values:       `"str"`, `true`, `false`, `null`, `42`
-//!   - Comparisons:          `a == b`, `a != b`
+//!   - Comparisons:          `a == b`, `a != b`, `a > b`, `a < b`, `a >= b`, `a <= b`
 //!   - Null-checks:          `a != null`, `a == null`
 //!   - Logical operators:    `a and b`, `a or b`, `not a`
 //!   - Parenthesis grouping: `(a or b) and c`
+//!   - Length function:      `len(a.b)` — chars for strings, items for arrays/objects
 //!
 //! This is **not** jq. If we ever need full jq semantics we can swap in `jaq`
 //! without touching any YAML — simple paths are syntactically identical.
@@ -98,6 +99,18 @@ enum Node {
     And(Box<Node>, Box<Node>),
     Or(Box<Node>, Box<Node>),
     Not(Box<Node>),
+    /// len(expr) — returns array length, string char length, or 0.
+    Len(Box<Node>),
+    /// Numeric comparison: a > b / a < b / a >= b / a <= b. Strings compared lexicographically.
+    Cmp(Box<Node>, CmpOp, Box<Node>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CmpOp {
+    Gt,
+    Lt,
+    Ge,
+    Le,
 }
 
 // ── Tokenizer ───────────────────────────────────────────────────────────────
@@ -109,6 +122,10 @@ enum Token {
     Str(String),
     Eq,      // ==
     Ne,      // !=
+    Gt,      // >
+    Lt,      // <
+    Ge,      // >=
+    Le,      // <=
     And,     // 'and'
     Or,      // 'or'
     Not,     // 'not'
@@ -131,6 +148,10 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
             b'.' => { out.push(Token::Dot); i += 1; }
             b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Eq); i += 2; }
             b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Ne); i += 2; }
+            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Ge); i += 2; }
+            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Le); i += 2; }
+            b'>' => { out.push(Token::Gt); i += 1; }
+            b'<' => { out.push(Token::Lt); i += 1; }
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => { out.push(Token::DblSlash); i += 2; }
             b'"' => {
                 // string literal, no escape support (keep it simple)
@@ -252,6 +273,22 @@ impl Parser {
             let rhs = self.parse_alt()?;
             return Ok(Node::Ne(Box::new(lhs), Box::new(rhs)));
         }
+        if self.eat(&Token::Gt) {
+            let rhs = self.parse_alt()?;
+            return Ok(Node::Cmp(Box::new(lhs), CmpOp::Gt, Box::new(rhs)));
+        }
+        if self.eat(&Token::Lt) {
+            let rhs = self.parse_alt()?;
+            return Ok(Node::Cmp(Box::new(lhs), CmpOp::Lt, Box::new(rhs)));
+        }
+        if self.eat(&Token::Ge) {
+            let rhs = self.parse_alt()?;
+            return Ok(Node::Cmp(Box::new(lhs), CmpOp::Ge, Box::new(rhs)));
+        }
+        if self.eat(&Token::Le) {
+            let rhs = self.parse_alt()?;
+            return Ok(Node::Cmp(Box::new(lhs), CmpOp::Le, Box::new(rhs)));
+        }
         Ok(lhs)
     }
     fn parse_alt(&mut self) -> Result<Node, String> {
@@ -289,6 +326,15 @@ impl Parser {
                     "null" => return Ok(Node::Literal(Value::Null)),
                     _ => {}
                 }
+                // function call: len(expr)
+                if id == "len" && self.peek() == Some(&Token::LParen) {
+                    self.bump(); // consume '('
+                    let inner = self.parse_or()?;
+                    if !self.eat(&Token::RParen) {
+                        return Err("expected ')' after len(".into());
+                    }
+                    return Ok(Node::Len(Box::new(inner)));
+                }
                 // otherwise, a path: id (. segment)*
                 let mut parts = vec![id];
                 while self.eat(&Token::Dot) {
@@ -320,6 +366,41 @@ fn eval(node: &Node, input: &Value) -> Value {
         Node::And(a, b) => Value::Bool(truthy(&eval(a, input)) && truthy(&eval(b, input))),
         Node::Or(a, b) => Value::Bool(truthy(&eval(a, input)) || truthy(&eval(b, input))),
         Node::Not(a) => Value::Bool(!truthy(&eval(a, input))),
+        Node::Len(a) => {
+            let v = eval(a, input);
+            let n = match &v {
+                Value::Null => 0,
+                Value::String(s) => s.chars().count(),
+                Value::Array(arr) => arr.len(),
+                Value::Object(o) => o.len(),
+                Value::Bool(_) | Value::Number(_) => 0,
+            };
+            Value::Number(serde_json::Number::from(n as u64))
+        }
+        Node::Cmp(a, op, b) => {
+            let va = eval(a, input);
+            let vb = eval(b, input);
+            let ord = value_cmp(&va, &vb);
+            let res = match (op, ord) {
+                (_, None) => false,
+                (CmpOp::Gt, Some(Ordering::Greater)) => true,
+                (CmpOp::Lt, Some(Ordering::Less)) => true,
+                (CmpOp::Ge, Some(Ordering::Greater | Ordering::Equal)) => true,
+                (CmpOp::Le, Some(Ordering::Less | Ordering::Equal)) => true,
+                _ => false,
+            };
+            Value::Bool(res)
+        }
+    }
+}
+
+fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            x.as_f64().and_then(|xf| y.as_f64().map(|yf| xf.partial_cmp(&yf)))?
+        }
+        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
+        _ => None,
     }
 }
 

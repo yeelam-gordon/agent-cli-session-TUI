@@ -466,8 +466,41 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     let title = truncate_str_safe(&title, 120);
 
     // summary
-    let summary = extract_field(prov, &cand.metadata, &kept, &cfg.fields.summary)
+    let mut summary = extract_field(prov, &cand.metadata, &kept, &cfg.fields.summary)
         .unwrap_or_default();
+
+    // summary_parts — labeled multi-section composition (the richer detail
+    // pane body the legacy hand-written providers produced).
+    if !cfg.fields.summary_parts.is_empty() {
+        let mut resolved: Vec<(String, String, String)> = Vec::new(); // (name, label, value)
+        for part in &cfg.fields.summary_parts {
+            let Some(val) = extract_field(prov, &cand.metadata, &kept, &part.spec) else {
+                continue;
+            };
+            if let Some(skip_ref) = &part.skip_if_same_as {
+                if resolved.iter().any(|(n, _, v)| n == skip_ref && v == &val) {
+                    continue;
+                }
+            }
+            resolved.push((
+                part.name.clone().unwrap_or_default(),
+                part.label.clone(),
+                val,
+            ));
+        }
+        if !resolved.is_empty() {
+            let rendered: Vec<String> = resolved
+                .iter()
+                .map(|(_, label, val)| format!("{label}\n{val}"))
+                .collect();
+            let parts_block = rendered.join("\n\n");
+            summary = if summary.is_empty() {
+                parts_block
+            } else {
+                format!("{summary}\n\n{parts_block}")
+            };
+        }
+    }
 
     // timestamps
     let created_at = extract_timestamp(prov, &cand.metadata, &kept, &cfg.fields.created_at, cand.file_mtime.as_deref())
@@ -716,6 +749,24 @@ fn extract_field(
     events: &[&Value],
     spec: &FieldSpec,
 ) -> Option<String> {
+    if let Some(v) = extract_field_one(prov, meta, events, spec) {
+        return Some(v);
+    }
+    // Fallback chain — try each in order until one resolves.
+    for fb in &spec.fallback {
+        if let Some(v) = extract_field_one(prov, meta, events, fb) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn extract_field_one(
+    prov: &ConfigDrivenProvider,
+    meta: &Option<Value>,
+    events: &[&Value],
+    spec: &FieldSpec,
+) -> Option<String> {
     let path = prov.expr(&spec.path);
     let predicate = spec.r#where.as_ref().map(|s| prov.expr(s));
 
@@ -729,6 +780,18 @@ fn extract_field(
             Some(p) => p.eval_bool(ev),
             None => true,
         }).and_then(|ev| path.eval_str(ev)),
+        "nth_from_end_matching_event" => {
+            let n = spec.nth.unwrap_or(1).max(1);
+            events
+                .iter()
+                .rev()
+                .filter(|ev| match &predicate {
+                    Some(p) => p.eval_bool(ev),
+                    None => true,
+                })
+                .nth(n - 1)
+                .and_then(|ev| path.eval_str(ev))
+        }
         "joined_events" => {
             let sep = spec.join.as_deref().unwrap_or("\n");
             let parts: Vec<String> = events
@@ -745,6 +808,7 @@ fn extract_field(
     };
 
     raw.map(|s| apply_transforms(&s, &spec.transforms, spec.limit))
+        .filter(|s| !s.is_empty())
 }
 
 fn apply_transforms(input: &str, transforms: &[String], limit: Option<usize>) -> String {
