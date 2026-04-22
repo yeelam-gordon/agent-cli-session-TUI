@@ -54,7 +54,8 @@ impl ConfigDrivenProvider {
     pub fn from_config(cfg: ProviderConfigFile, app_cfg: &AppProviderConfig) -> Result<Self> {
         let base_dir = app_cfg
             .state_dir
-            .clone()
+            .as_ref()
+            .map(|p| expand_path(&p.to_string_lossy()))
             .unwrap_or_else(|| expand_path(&cfg.discovery.base_dir));
         Ok(Self {
             cfg,

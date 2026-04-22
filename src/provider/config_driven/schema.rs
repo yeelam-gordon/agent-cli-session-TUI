@@ -409,5 +409,43 @@ pub fn expand_path(s: &str) -> PathBuf {
         .replace("${HOME}", &home.to_string_lossy())
         .replace("${CACHE_DIR}", &cache.to_string_lossy())
         .replace("${CONFIG_DIR}", &config.to_string_lossy());
+    // Expand leading `~/` or `~\` (tilde) to the user's home directory.
+    let expanded = if let Some(rest) = expanded
+        .strip_prefix("~/")
+        .or_else(|| expanded.strip_prefix("~\\"))
+    {
+        home.join(rest).to_string_lossy().into_owned()
+    } else if expanded == "~" {
+        home.to_string_lossy().into_owned()
+    } else {
+        expanded
+    };
     PathBuf::from(expanded)
+}
+
+#[cfg(test)]
+mod expand_path_tests {
+    use super::*;
+
+    #[test]
+    fn expands_tilde_prefix() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_path("~/foo/bar"), home.join("foo/bar"));
+        assert_eq!(expand_path("~\\foo\\bar"), home.join("foo\\bar"));
+        assert_eq!(expand_path("~"), home);
+    }
+
+    #[test]
+    fn does_not_expand_embedded_tilde() {
+        assert_eq!(expand_path("/tmp/~something"), PathBuf::from("/tmp/~something"));
+    }
+
+    #[test]
+    fn expands_home_token() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            expand_path("${HOME}/foo"),
+            PathBuf::from(format!("{}/foo", home.to_string_lossy()))
+        );
+    }
 }
