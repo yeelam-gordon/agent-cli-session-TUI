@@ -33,11 +33,12 @@ pub struct ProviderConfigFile {
     pub session_detail: Option<SessionDetailConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CapabilitiesConfig {
     #[serde(default)]
     pub supports_resume: bool,
-    #[serde(default)]
+    /// Defaults to true — the only capability flag actually checked at runtime.
+    #[serde(default = "default_true")]
     pub supports_discovery: bool,
     #[serde(default)]
     pub supports_logs: bool,
@@ -49,6 +50,20 @@ pub struct CapabilitiesConfig {
     pub supports_archive: bool,
     #[serde(default)]
     pub supports_summary_extraction: bool,
+}
+
+impl Default for CapabilitiesConfig {
+    fn default() -> Self {
+        Self {
+            supports_resume: false,
+            supports_discovery: true, // only flag checked at runtime
+            supports_logs: false,
+            supports_wait_detection: false,
+            supports_kill: false,
+            supports_archive: false,
+            supports_summary_extraction: false,
+        }
+    }
 }
 
 // ── Discovery ────────────────────────────────────────────────────────────────
