@@ -90,14 +90,16 @@ CI (`.github/workflows/rust.yml`) runs `cargo clippy -- -D warnings` on **BOTH**
 **Before every `git push`, run BOTH commands and fix any findings:**
 
 ```bash
-# Core crate
+# Core crate — DO NOT pass --lib; CI checks lib + bin + tests
 cargo clippy --release -- -D warnings
 
 # Semantic plugin crate (separate workspace member)
 cargo clippy --release --manifest-path semantic-plugin/Cargo.toml -- -D warnings
 ```
 
-Both must exit 0. If clippy complains about a lint that is intentionally allowed for the situation (e.g. FFI raw-pointer args on `pub extern "C" fn`), scope an `#[allow(clippy::<lint>)]` to that function — do not globally silence it.
+Both must exit 0. **Do not shortcut with `--lib`** — the bin target surfaces its own lints (notably `dead_code` on library-public API that `main.rs` doesn't call). CI runs plain `cargo clippy`, which defaults to all targets.
+
+If clippy complains about a lint that is intentionally allowed for the situation (e.g. FFI raw-pointer args on `pub extern "C" fn`, or library-public API preserved for future use), scope an `#[allow(clippy::<lint>)]` or `#[allow(dead_code)]` to that item — do not globally silence it.
 
 ## How to Run Tests
 
