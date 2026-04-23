@@ -1,21 +1,22 @@
-# Codex CLI — minimal provider (list-only TUI, no detail pane).
+# Codex CLI — essentials only.
+#
+# WHY each section exists:
+#   discovery      — WHERE: ~/.codex/sessions/YYYY/MM/DD/*.jsonl (date-partitioned)
+#   session_id     — UUID from first event's payload.id (not filename)
+#   cwd            — from session_meta event's payload.cwd
+#   filter_out     — drop token_count events (constant noise during streaming)
+#   title          — first real user message (skip "developer" bootstrap instructions)
+#   state_signals  — event_predicates because Codex uses nested payload.type, not outer type
+#   process_match  — Codex passes UUID as positional cmdline arg
+#   tab_title      — cwd folder basename (Codex sets no in-band title)
+
 name: codex
 display_name: Codex CLI
-
-capabilities:
-  supports_resume: true
-  supports_discovery: true
-  supports_logs: false
-  supports_wait_detection: true
-  supports_kill: true
-  supports_archive: true
-  supports_summary_extraction: false
 
 discovery:
   base_dir: ${HOME}/.codex/sessions
   strategy: date_partitioned
-  pattern: "{YYYY}/{MM}/{DD}/*.jsonl"
-  tail_bytes: 524288
+  pattern: "{YYYY}/{MM}/{DD}/*.jsonl"   # required by schema (not used at runtime)
 
 session_id:
   source: first_event_field
@@ -27,12 +28,10 @@ cwd:
   field: "payload.cwd"
 
 events:
-  format: jsonl
   filter_out:
     - 'type == "event_msg" and payload.type == "token_count"'
 
 fields:
-  discard_if_empty: true
   title:
     strategy: first_matching_event
     where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
@@ -42,8 +41,7 @@ fields:
     strategy: file_mtime
 
 state_signals:
-  idle_threshold_seconds: 1800
-  event_predicates:
+  event_predicates:                    # Codex needs nested predicates (payload.type)
     - where: 'type == "event_msg" and payload.type == "task_started"'
       interaction: busy
     - where: 'type == "event_msg" and payload.type == "task_complete"'
@@ -58,7 +56,7 @@ state_signals:
 process_match:
   strategy: cmdline
   executable: codex
-  id_match_kind: positional_uuid
+  id_match_kind: positional_uuid       # UUID is a positional arg, no flag prefix
   recently_active_secs: 15
 
 tab_title:

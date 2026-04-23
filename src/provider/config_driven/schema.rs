@@ -14,10 +14,15 @@ use serde::{Deserialize, Serialize};
 pub struct ProviderConfigFile {
     pub name: String,
     pub display_name: String,
+    /// Optional — defaults to all-false. Only `supports_discovery` is
+    /// checked at runtime (supervisor uses it to gate scanning).
+    #[serde(default)]
     pub capabilities: CapabilitiesConfig,
     pub discovery: DiscoveryConfig,
     pub session_id: SessionIdConfig,
     pub cwd: CwdConfig,
+    /// Optional — defaults to JSONL format with no filters.
+    #[serde(default)]
     pub events: EventsConfig,
     pub fields: FieldsConfig,
     pub state_signals: StateSignalsConfig,
@@ -179,6 +184,12 @@ pub struct EventsConfig {
     pub filter_out: Vec<String>,
 }
 
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self { format: EventFormat::Jsonl, filter_out: Vec::new() }
+    }
+}
+
 fn default_format() -> EventFormat {
     EventFormat::Jsonl
 }
@@ -214,11 +225,12 @@ pub struct FieldsConfig {
     pub summary_parts: Vec<SummaryPart>,
     /// If true, sessions with no extractable title AND no summary content
     /// are dropped entirely (matches legacy main's "skip sessions with zero
-    /// user interaction" behavior). When false (default), empty sessions
-    /// surface with a fallback "<Provider> session" title.
-    #[serde(default)]
+    /// user interaction" behavior). Defaults to true.
+    #[serde(default = "default_true")]
     pub discard_if_empty: bool,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SummaryPart {

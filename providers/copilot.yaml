@@ -1,48 +1,45 @@
-# Copilot CLI — minimal provider (list-only TUI, no detail pane).
+# Copilot CLI — essentials only.
+#
+# WHY each section exists:
+#   name/display_name  — identity: which provider this is
+#   discovery          — WHERE to find sessions on disk
+#   session_id         — HOW to extract the unique session identifier
+#   cwd                — HOW to resolve the working directory (needed for launch + tab title)
+#   events.filter_out  — WHICH event types are noise (Copilot has none, so omitted — defaults empty)
+#   fields.title       — WHAT to show in the session list
+#   fields.updated_at  — WHEN the session was last active
+#   state_signals      — IS IT busy or waiting? (maps event types to interaction state)
+#   process_match      — IS IT running? (how to find the live OS process)
+#   tab_title          — HOW to match/extract the terminal tab title
+
 name: copilot
 display_name: Copilot
-
-capabilities:
-  supports_resume: true
-  supports_discovery: true
-  supports_logs: false
-  supports_wait_detection: true
-  supports_kill: true
-  supports_archive: true
-  supports_summary_extraction: false
 
 discovery:
   base_dir: ${HOME}/.copilot/session-state
   strategy: dir_per_session
-  metadata_file: workspace.yaml
-  events_file: events.jsonl
-  tail_bytes: 2097152
-  lockfile_pattern: "inuse.*.lock"
+  metadata_file: workspace.yaml        # contains cwd + summary
+  events_file: events.jsonl            # the JSONL event stream inside each session dir
 
 session_id:
-  source: dirname
+  source: dirname                      # session dir name IS the UUID
 
 cwd:
-  source: yaml_field
+  source: yaml_field                   # read from workspace.yaml
   path: cwd
 
-events:
-  format: jsonl
-  filter_out: []
-
 fields:
-  discard_if_empty: true
   title:
-    strategy: metadata_field
+    strategy: metadata_field           # prefer workspace.yaml summary
     path: summary
     transforms: [strip_newlines, trim, "truncate:60"]
     fallback:
-      - strategy: first_matching_event
+      - strategy: first_matching_event # no summary yet? use first user message
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
         transforms: [strip_newlines, trim, "truncate:60"]
   updated_at:
-    strategy: file_mtime
+    strategy: file_mtime               # events.jsonl mtime = real-time activity
 
 state_signals:
   last_event_map:
@@ -53,15 +50,14 @@ state_signals:
     "user.message":             { interaction: busy }
     "tool.execution_start":     { interaction: busy }
     "tool.execution_complete":  { interaction: busy }
-  idle_threshold_seconds: 1800
 
 process_match:
-  strategy: lockfile
+  strategy: lockfile                   # Copilot uses inuse.<PID>.lock files
   lockfile_pattern: "inuse.*.lock"
   pid_extract_regex: 'inuse\.(\d+)\.lock'
 
 tab_title:
-  strategy: from_tool_call
+  strategy: from_tool_call             # extract from report_intent tool calls
   where: 'type == "assistant.message"'
   iterate_path: data.toolRequests
   tool_name_path: name

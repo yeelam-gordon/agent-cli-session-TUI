@@ -1,22 +1,25 @@
-# Claude Code — minimal provider (list-only TUI, no detail pane).
+# Claude Code — essentials only.
+#
+# WHY each section exists:
+#   discovery      — WHERE: ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl
+#                    The .jsonl file IS the session (file_per_session).
+#   hide_paths_glob — skip Claude's internal memory/ and subagents/ dirs
+#   session_id     — filename stem IS the UUID
+#   cwd            — decode the parent dir name (drive-dash encoding: C--Users-john → C:\Users\john)
+#   filter_out     — drop metadata-only lines (isMeta) and synthetic model lines
+#   title          — first user message
+#   state_signals  — last event type: "assistant" = waiting, "user" = busy
+#   process_match  — find `claude` process by --session-id/--continue/--resume flags
+#   tab_title      — Claude sets tab title with ✳ prefix (literal match)
+
 name: claude
 display_name: Claude Code
-
-capabilities:
-  supports_resume: true
-  supports_discovery: true
-  supports_logs: false
-  supports_wait_detection: true
-  supports_kill: true
-  supports_archive: true
-  supports_summary_extraction: false
 
 discovery:
   base_dir: ${HOME}/.claude/projects
   strategy: file_per_session
   glob: "*/*.jsonl"
-  tail_bytes: 524288
-  hide_paths_glob:
+  hide_paths_glob:                     # exclude internal sessions
     - "memory/*.jsonl"
     - "*/subagents/*.jsonl"
 
@@ -24,19 +27,17 @@ session_id:
   source: filename_stem
 
 cwd:
-  source: dirname_decode
+  source: dirname_decode               # parent dir is drive-dash encoded cwd
   decoder: drive_dash
-  backtrack: true
+  backtrack: true                      # probe disk to disambiguate hyphens
   from_parent: true
 
 events:
-  format: jsonl
   filter_out:
     - "isMeta == true"
     - 'message.model == "<synthetic>"'
 
 fields:
-  discard_if_empty: true
   title:
     strategy: first_matching_event
     where: 'type == "user"'
@@ -46,7 +47,6 @@ fields:
     strategy: file_mtime
 
 state_signals:
-  idle_threshold_seconds: 1800
   last_event_map:
     "assistant": { interaction: waiting_input }
     "user":      { interaction: busy }
@@ -54,7 +54,7 @@ state_signals:
 process_match:
   strategy: cmdline
   executable: claude
-  not_contains: copilot
+  not_contains: copilot                # exclude Copilot CLI processes
   id_match_kind: flag
   flag: ["--session-id", "--continue", "--resume"]
   recently_active_secs: 10

@@ -1,21 +1,22 @@
-# Qwen Code — minimal provider (list-only TUI, no detail pane).
+# Qwen Code — essentials only.
+#
+# WHY each section exists:
+#   discovery      — WHERE: ~/.qwen/projects/<encoded-cwd>/chats/<uuid>.jsonl
+#   session_id     — filename stem IS the UUID
+#   cwd            — every event carries a literal `cwd` field (no decoding needed)
+#   filter_out     — drop system/ui_telemetry events (constant noise)
+#   title          — first user message (message.parts[0].text)
+#   state_signals  — same as Claude: last "assistant" = waiting, last "user" = busy
+#   process_match  — UUID is positional arg (resumed sessions only); 30min fallback
+#   tab_title      — cwd folder basename
+
 name: qwen
 display_name: Qwen Code
-
-capabilities:
-  supports_resume: true
-  supports_discovery: true
-  supports_logs: false
-  supports_wait_detection: true
-  supports_kill: true
-  supports_archive: true
-  supports_summary_extraction: false
 
 discovery:
   base_dir: ${HOME}/.qwen/projects
   strategy: file_per_session
   glob: "*/chats/*.jsonl"
-  tail_bytes: 524288
 
 session_id:
   source: filename_stem
@@ -26,12 +27,10 @@ cwd:
   field: "cwd"
 
 events:
-  format: jsonl
   filter_out:
     - 'type == "system"'
 
 fields:
-  discard_if_empty: true
   title:
     strategy: first_matching_event
     where: 'type == "user"'
@@ -41,7 +40,6 @@ fields:
     strategy: file_mtime
 
 state_signals:
-  idle_threshold_seconds: 1800
   last_event_map:
     "assistant": { interaction: waiting_input }
     "user":      { interaction: busy }
@@ -50,7 +48,7 @@ process_match:
   strategy: cmdline
   executable: qwen
   id_match_kind: positional_uuid
-  recently_active_secs: 1800
+  recently_active_secs: 1800           # fresh sessions have no UUID on cmdline
 
 tab_title:
   strategy: cwd_basename

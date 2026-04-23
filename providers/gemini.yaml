@@ -1,40 +1,40 @@
-# Gemini CLI — minimal provider (list-only TUI, no detail pane).
+# Gemini CLI — essentials only.
+#
+# WHY each section exists:
+#   discovery      — WHERE: ~/.gemini/tmp/<project>/chats/session-*.jsonl
+#                    The glob shape excludes subagent subdirs (no session- prefix).
+#   session_id     — UUID from first line's sessionId field (filename only has short prefix)
+#   cwd            — reverse-lookup in ~/.gemini/projects.json (keys=cwds, values=project names)
+#   filter_out     — drop $set metadata records and "info" status messages
+#   title          — first user turn's content[0].text
+#   state_signals  — last "gemini" = waiting, last "user" = busy
+#   process_match  — Gemini is node.js; no UUID on cmdline, so cmdline_contains + 30min fallback
+#   tab_title      — cwd folder basename
+
 name: gemini
 display_name: Gemini CLI
-
-capabilities:
-  supports_resume: true
-  supports_discovery: true
-  supports_logs: false
-  supports_wait_detection: true
-  supports_kill: true
-  supports_archive: true
-  supports_summary_extraction: false
 
 discovery:
   base_dir: ${HOME}/.gemini/tmp
   strategy: file_per_session
   glob: "*/chats/session-*.jsonl"
-  tail_bytes: 524288
 
 session_id:
   source: first_event_field
   field: "sessionId"
 
 cwd:
-  source: config_reverse_lookup
+  source: config_reverse_lookup        # Gemini maps project-name → cwd in projects.json
   lookup_file: ${HOME}/.gemini/projects.json
   key_source: parent_parent_dir_name
   container_path: "projects"
 
 events:
-  format: jsonl
   filter_out:
-    - '$set != null'
-    - 'type == "info"'
+    - '$set != null'                   # metadata-only records
+    - 'type == "info"'                 # status messages like "Request cancelled."
 
 fields:
-  discard_if_empty: true
   title:
     strategy: first_matching_event
     where: 'type == "user"'
@@ -44,7 +44,6 @@ fields:
     strategy: file_mtime
 
 state_signals:
-  idle_threshold_seconds: 1800
   last_event_map:
     "user":   { interaction: busy }
     "gemini": { interaction: waiting_input }
@@ -52,8 +51,8 @@ state_signals:
 process_match:
   strategy: cmdline
   executable: gemini
-  script_contains: "gemini.js"
-  id_match_kind: contains
+  script_contains: "gemini.js"         # tighten match to the actual script
+  id_match_kind: contains              # no UUID on cmdline; loose match
   recently_active_secs: 1800
 
 tab_title:
