@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn isMeta_filter() {
+    fn is_meta_filter() {
         let e = Expr::parse("isMeta == true").unwrap();
         assert!(e.eval_bool(&json!({"isMeta":true})));
         assert!(!e.eval_bool(&json!({"isMeta":false})));

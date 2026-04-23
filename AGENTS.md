@@ -95,6 +95,10 @@ cargo clippy --release -- -D warnings
 
 # Semantic plugin crate (separate workspace member)
 cargo clippy --release --manifest-path semantic-plugin/Cargo.toml -- -D warnings
+
+# Tests — CI runs `cargo test --lib`. Linux CI runner exposes Windows-path
+# hardcoding in fixtures. Gate Windows-only tests with `#[cfg(windows)]`.
+cargo test --lib
 ```
 
 Both must exit 0. **Do not shortcut with `--lib`** — the bin target surfaces its own lints (notably `dead_code` on library-public API that `main.rs` doesn't call). CI runs plain `cargo clippy`, which defaults to all targets.

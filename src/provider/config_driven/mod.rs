@@ -2053,6 +2053,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn drive_dash_backtrack_handles_hyphen_in_leaf() {
         // No disk → backtrack gives up and returns the fully-hyphenated leaf.
         // This confirms we at least do not crash and prefer the conservative
@@ -2088,6 +2089,7 @@ mod tests {
     /// Copilot session on disk. Exercises schema loading, discovery,
     /// title/summary/timestamp extraction, and state signal detection.
     #[test]
+    #[cfg(windows)]
     fn copilot_yaml_end_to_end() {
         use std::fs;
 
@@ -2372,6 +2374,7 @@ mod tests {
     /// response_item role), the `payload.content.0.text` title path, and the
     /// `cwd_basename` tab title.
     #[test]
+    #[cfg(windows)]
     fn codex_yaml_end_to_end() {
         use std::fs;
 
@@ -2466,6 +2469,7 @@ mod tests {
     /// `message.parts.0.text` array-indexed title path, last_event_map
     /// state inference after filtering, and `cwd_basename` tab title.
     #[test]
+    #[cfg(windows)]
     fn qwen_yaml_end_to_end() {
         use std::fs;
 
@@ -2555,6 +2559,7 @@ mod tests {
     /// record, the `content.0.text` title path, and last_event_map
     /// state inference with user/gemini event types.
     #[test]
+    #[cfg(windows)]
     fn gemini_yaml_end_to_end() {
         use std::fs;
 
