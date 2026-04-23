@@ -17,6 +17,17 @@ pub struct AppConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_log_lines")]
     pub log_max_lines: usize,
+    /// UI redraw/event-poll tick in milliseconds. Higher = lower idle CPU,
+    /// less responsive spinner animations. Default 1000 (low CPU, smooth-ish spinners).
+    /// Drop to 250 for snappy spinners at the cost of ~5% idle CPU.
+    /// Keypresses are always instant regardless of this value.
+    #[serde(default = "default_tick_rate_ms")]
+    pub tick_rate_ms: u64,
+    /// Minimum interval (ms) between semantic-indexer runs. Even if sessions
+    /// change, the indexer won't fire more often than this. Default 60000 (1 min).
+    /// Lower = fresher embeddings of in-progress sessions, higher CPU.
+    #[serde(default = "default_semantic_index_min_interval_ms")]
+    pub semantic_index_min_interval_ms: u64,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
 }
@@ -68,7 +79,15 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn default_poll_interval_ms() -> u64 {
-    2000
+    5000
+}
+
+fn default_tick_rate_ms() -> u64 {
+    1000
+}
+
+fn default_semantic_index_min_interval_ms() -> u64 {
+    10_000
 }
 
 fn default_log_lines() -> usize {
@@ -166,6 +185,8 @@ impl Default for AppConfig {
         Self {
             data_dir: default_data_dir(),
             poll_interval_ms: default_poll_interval_ms(),
+            tick_rate_ms: default_tick_rate_ms(),
+            semantic_index_min_interval_ms: default_semantic_index_min_interval_ms(),
             log_max_lines: default_log_lines(),
             providers,
         }

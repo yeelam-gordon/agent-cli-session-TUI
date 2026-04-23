@@ -1,0 +1,135 @@
+name: claude
+display_name: Claude Code
+
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+
+# Each JSONL file under ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl IS a session.
+# Skip the special `memory` project folder (Claude's own memory dir) and any
+# `subagents/*.jsonl` (hidden internal sessions we should not surface).
+discovery:
+  base_dir: ${HOME}/.claude/projects
+  strategy: file_per_session
+  glob: "*/*.jsonl"
+  tail_bytes: 524288
+  hide_paths_glob:
+    - "memory/*.jsonl"
+    - "*/subagents/*.jsonl"
+
+session_id:
+  source: filename_stem
+
+# The encoded CWD is the PARENT dir of each jsonl file (e.g. `C--Users-a2a-cli`).
+# `backtrack: true` probes the disk to disambiguate ambiguous hyphens.
+cwd:
+  source: dirname_decode
+  decoder: drive_dash
+  backtrack: true
+  from_parent: true
+
+events:
+  format: jsonl
+  filter_out:
+    - "isMeta == true"
+    - 'message.model == "<synthetic>"'
+
+fields:
+  discard_if_empty: true
+  title:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "message.content // message.text // content"
+    transforms:
+      - first_line
+      - truncate:60
+  summary:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "message.content // message.text // content"
+    transforms:
+      - truncate:4000
+  summary_parts:
+    - name: first_user
+      label: "── First message ──"
+      spec:
+        strategy: first_matching_event
+        where: 'type == "user"'
+        path: "message.content // message.text // content"
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_user
+      label: "── Last user message ──"
+      skip_if_same_as: first_user
+      spec:
+        strategy: last_matching_event
+        where: 'type == "user"'
+        path: "message.content // message.text // content"
+        transforms:
+          - trim
+          - truncate:2000
+    - name: prev_assistant
+      label: "── Previous response ──"
+      spec:
+        strategy: nth_from_end_matching_event
+        where: 'type == "assistant"'
+        nth: 2
+        path: "message.content // message.text // content"
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_assistant
+      label: "── Last Claude response ──"
+      spec:
+        strategy: last_matching_event
+        where: 'type == "assistant"'
+        path: "message.content // message.text // content"
+        transforms:
+          - trim
+          - truncate:2000
+  created_at:
+    strategy: first_event_field
+    path: "timestamp"
+    fallback:
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime
+
+# Claude emits top-level `type: "user"` / `type: "assistant"` lines in the JSONL.
+# The last role in the tail determines interaction state:
+#   last type == "assistant" → waiting_input (Claude produced output, awaiting user)
+#   last type == "user"      → busy          (user just sent, Claude is thinking/working)
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "assistant": { interaction: waiting_input }
+    "user":      { interaction: busy }
+
+# Claude processes appear as `claude` (direct) or `node <...>\claude.js` (npm install).
+# Multiple flags can carry the session ID; try each in priority order.
+# `not_contains: copilot` excludes GitHub Copilot CLI processes that might also
+# appear when searching for `claude` substring on node-hosted installs.
+liveness_detection:
+  executable: claude
+  not_contains: copilot
+  strategies:
+    - strategy: cmdline_flag_uuid
+      flag:
+        - "--session-id"
+        - "--continue"
+        - "--resume"
+    - strategy: recently_active
+      within_secs: 10
+
+# Claude Code writes its own terminal title as: "✳ <first words of first user msg>"
+# (e.g. "✳ Test Terminal tab title updates"). `fields.title` already extracts
+# that first user message (single line, truncated to 60). Reuse it here so focus
+# uniquely matches THIS session's tab by substring — not just any Claude tab.
+tab_title:
+  strategy: from_title

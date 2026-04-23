@@ -36,8 +36,11 @@ See [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.
 
 The optional semantic search plugin lives in `semantic-plugin/` (a separate Cargo crate that builds a cdylib DLL).
 
-1. **Build**: `cd semantic-plugin && cargo build --release` — produces `semantic_plugin.dll` (Windows) / `libsemantic_plugin.so` (Linux)
-2. **Install**: copy the DLL next to the TUI binary or into the `data_dir`; the TUI loads it at startup if found
+1. **Build**: `cd semantic-plugin && cargo build --release` — produces `semantic_search_plugin.dll` (Windows) / `libsemantic_search_plugin.so` (Linux) / `libsemantic_search_plugin.dylib` (macOS) in `semantic-plugin/target/release/`
+2. **Install**: copy the DLL next to the TUI binary (same directory as `agent-session-tui(.exe)`); the TUI loads it at startup if found. Example:
+   ```powershell
+   Copy-Item semantic-plugin\target\release\semantic_search_plugin.dll target\release\
+   ```
 3. **Test**: `cd semantic-plugin && cargo test` — runs the plugin's own unit tests
 4. **MSVC toolchain**: Windows builds require the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`); MinGW is not supported
 

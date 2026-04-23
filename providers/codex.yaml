@@ -1,0 +1,142 @@
+name: codex
+display_name: Codex CLI
+
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+
+# Codex writes one JSONL file per session under YYYY/MM/DD/ partition dirs.
+# File name is `rollout-<ISO>-<UUID>.jsonl`; each line has top-level
+# `timestamp`, `type`, `payload`. The very first line is always a
+# `session_meta` record containing the canonical UUID (payload.id) and cwd.
+discovery:
+  base_dir: ${HOME}/.codex/sessions
+  strategy: date_partitioned
+  pattern: "{YYYY}/{MM}/{DD}/*.jsonl"
+  tail_bytes: 524288
+
+# Prefer the canonical UUID from session_meta — the filename also embeds it
+# but may include ISO prefix junk that confuses `process_match`.
+session_id:
+  source: first_event_field
+  field: "payload.id"
+
+# cwd is a literal path string in the session_meta event's payload.
+cwd:
+  source: event_field
+  event_type: "session_meta"
+  field: "payload.cwd"
+
+# Drop noise that obscures state inference:
+#   token_count events fire constantly during streaming and would otherwise
+#   dominate last_event scans; they carry no interaction signal.
+events:
+  format: jsonl
+  filter_out:
+    - 'type == "event_msg" and payload.type == "token_count"'
+
+fields:
+  discard_if_empty: true
+  # Title: first `response_item` authored by the real USER (role=="user",
+  # not "developer" which carries bootstrapping instructions).
+  # Content is an array; pull the first text-bearing item.
+  title:
+    strategy: first_matching_event
+    where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+    path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+    transforms:
+      - first_line
+      - truncate:60
+  summary:
+    strategy: first_matching_event
+    where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+    path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+    transforms:
+      - truncate:4000
+  summary_parts:
+    - name: first_user
+      label: "── First message ──"
+      spec:
+        strategy: first_matching_event
+        where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_user
+      label: "── Last user message ──"
+      skip_if_same_as: first_user
+      spec:
+        strategy: last_matching_event
+        where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+    - name: prev_assistant
+      label: "── Previous response ──"
+      spec:
+        strategy: nth_from_end_matching_event
+        where: 'type == "response_item" and payload.role == "assistant" and payload.type == "message"'
+        nth: 2
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+    - name: last_assistant
+      label: "── Last Codex response ──"
+      spec:
+        strategy: last_matching_event
+        where: 'type == "response_item" and payload.role == "assistant" and payload.type == "message"'
+        path: 'payload.content.0.text // payload.content.0.input_text // payload.content.0.output_text'
+        transforms:
+          - trim
+          - truncate:2000
+  created_at:
+    strategy: first_event_field
+    path: "payload.timestamp"
+    fallback:
+      - strategy: first_event_field
+        path: "timestamp"
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime
+
+# Codex state is driven by two orthogonal signals:
+#   - event_msg.payload.type transitions (task_started / task_complete),
+#   - response_item.payload.role of the latest message (user vs assistant).
+# Neither fits last_event_map (which keys on outer `type`), so use the
+# ordered event_predicates scan: first matching (event, predicate) wins.
+state_signals:
+  idle_threshold_seconds: 1800
+  event_predicates:
+    - where: 'type == "event_msg" and payload.type == "task_started"'
+      interaction: busy
+    - where: 'type == "event_msg" and payload.type == "task_complete"'
+      interaction: waiting_input
+    - where: 'type == "event_msg" and payload.type == "user_message"'
+      interaction: busy
+    - where: 'type == "response_item" and payload.role == "assistant" and payload.type == "message"'
+      interaction: waiting_input
+    - where: 'type == "response_item" and payload.role == "user" and payload.type == "message"'
+      interaction: busy
+
+# Codex processes include the session UUID as a positional argument — no
+# flag prefix. The `positional_uuid` matcher splits the cmdline on
+# whitespace and equality-checks each token against the session id.
+liveness_detection:
+  executable: codex
+  strategies:
+    - strategy: cmdline_positional_uuid
+    - strategy: recently_active
+      within_secs: 15
+
+# Codex sets no in-band tab title signal; the terminal title is the cwd
+# folder basename, which our launcher also uses for Windows Terminal tabs.
+tab_title:
+  strategy: cwd_basename
