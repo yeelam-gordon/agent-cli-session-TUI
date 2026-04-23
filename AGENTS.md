@@ -59,7 +59,9 @@ agent-session-tui/
 │   ├── codex_lifecycle_test.rs
 │   ├── qwen_lifecycle_test.rs
 │   └── gemini_lifecycle_test.rs
-├── config.toml.example     # Template config (copy and rename to config.toml)
+├── config.toml.template    # Source template with placeholders; release build substitutes per-OS defaults into dist/config.toml.example
+├── scripts/
+│   └── generate_config.py  # Per-OS substitution (invoked by release workflow)
 ├── Cargo.toml              # Dependencies and build profile
 └── rust-toolchain.toml     # Pins stable MSVC toolchain
 ```

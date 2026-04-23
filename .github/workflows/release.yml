@@ -45,6 +45,10 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
     - name: Install MSVC toolchain (Windows x64)
       if: runner.os == 'Windows' && matrix.target == 'x86_64-pc-windows-msvc'
       run: rustup default stable-x86_64-pc-windows-msvc
@@ -69,7 +73,7 @@ jobs:
         mkdir dist
         cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
         cp -r providers dist/
-        cp config.toml.example dist/
+        python3 scripts/generate_config.py ${{ matrix.target }} config.toml.template dist/config.toml.example
         cp README.md dist/
         cp LICENSE dist/
         if [ "${{ runner.os }}" != "Windows" ]; then
@@ -126,6 +130,10 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
     - name: Install MSVC toolchain (Windows x64)
       if: matrix.target == 'x86_64-pc-windows-msvc'
       run: rustup default stable-x86_64-pc-windows-msvc
@@ -147,7 +155,7 @@ jobs:
         cp target/${{ matrix.target }}/release/${{ matrix.core_artifact }} dist/
         cp semantic-plugin/target/${{ matrix.target }}/release/${{ matrix.dll_artifact }} dist/
         cp -r providers dist/
-        cp config.toml.example dist/
+        python3 scripts/generate_config.py ${{ matrix.target }} config.toml.template dist/config.toml.example
         cp README.md dist/
         cp LICENSE dist/
         if [ "${{ runner.os }}" != "Windows" ]; then

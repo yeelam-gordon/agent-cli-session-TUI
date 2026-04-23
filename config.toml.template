@@ -1,0 +1,109 @@
+# ─── Agent Session TUI — Configuration ───
+# This file was generated from config.toml.template at release build time
+# with OS-specific launcher defaults substituted in.
+#
+# Copy this file next to the agent-session-tui binary and edit paths for your system.
+
+# App data directory (archived.json, embeddings_cache.json stored here)
+# data_dir = '~/.local/share/agent-session-tui'
+poll_interval_ms = 2000
+log_max_lines = 500
+
+# ─── Launch Configuration ───
+# Each provider can configure how sessions are launched in a terminal.
+#
+# Option 1 — shortcut (Windows only, currently):
+#   launch_method  = "wt" | "pwsh" | "cmd"
+#   launch_fallback = "cmd"
+#
+# Option 2 — custom command (works cross-platform, takes priority):
+#   launch_cmd  = "gnome-terminal"          # any program on PATH
+#   launch_args = ["--working-directory={cwd}", "--", "bash", "-c", "{command}; exec bash"]
+#     placeholders: {cwd} → working directory, {command} → the agent CLI command
+#   launch_fallback_cmd  = "xterm"           # tried if launch_cmd fails
+#   launch_fallback_args = ["-e", "sh -c 'cd {cwd} && {command}; exec sh'"]
+#
+# Per-OS defaults shipped in release zips:
+#   Windows → launch_method = "wt"
+#   Linux   → launch_cmd    = "gnome-terminal"
+#   macOS   → launch_cmd    = "osascript"  (spawns Terminal.app)
+
+# ─── Semantic Search ───
+# No configuration needed. Drop the semantic_search_plugin library next to
+# the TUI binary (already included in the "-semantic" release zip).
+
+# ─── Copilot CLI ───
+[providers.copilot]
+enabled = true
+default = true
+command = "copilot"
+default_args = []
+# default_args = ["--agent=memory-assistant"]
+# default_args = ["--model", "claude-sonnet-4"]
+state_dir = '~/.copilot/session-state'
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "{{LAUNCH_METHOD}}"
+launch_fallback = "{{LAUNCH_FALLBACK}}"
+{{LAUNCH_CMD_LINE}}
+{{LAUNCH_ARGS_LINE}}
+# wt_profile = "PowerShell"
+
+# ─── Claude Code ───
+[providers.claude]
+enabled = true
+command = "claude"
+default_args = []
+# default_args = ["--model", "claude-sonnet-4"]
+# default_args = ["--allow-dangerously-skip-permissions"]
+state_dir = '~/.claude/projects'
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "{{LAUNCH_METHOD}}"
+launch_fallback = "{{LAUNCH_FALLBACK}}"
+{{LAUNCH_CMD_LINE}}
+{{LAUNCH_ARGS_LINE}}
+# wt_profile = "PowerShell"
+
+# ─── Qwen CLI ───
+[providers.qwen]
+enabled = true
+command = "qwen"
+default_args = []
+# default_args = ["--model", "qwen-max"]
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "{{LAUNCH_METHOD}}"
+launch_fallback = "{{LAUNCH_FALLBACK}}"
+{{LAUNCH_CMD_LINE}}
+{{LAUNCH_ARGS_LINE}}
+# wt_profile = "PowerShell"
+
+# ─── Codex CLI ───
+[providers.codex]
+enabled = true
+command = "codex"
+default_args = []
+# default_args = ["--model", "o4-mini"]
+state_dir = '~/.codex/sessions'
+resume_flag = "resume"
+# startup_dir = 'D:\'
+launch_method = "{{LAUNCH_METHOD}}"
+launch_fallback = "{{LAUNCH_FALLBACK}}"
+{{LAUNCH_CMD_LINE}}
+{{LAUNCH_ARGS_LINE}}
+
+# ─── Gemini CLI ───
+[providers.gemini]
+enabled = true
+command = "gemini"
+default_args = []
+# default_args = ["--model", "gemini-2.5-pro"]
+state_dir = '~/.gemini'
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "{{LAUNCH_METHOD}}"
+launch_fallback = "{{LAUNCH_FALLBACK}}"
+{{LAUNCH_CMD_LINE}}
+{{LAUNCH_ARGS_LINE}}
+# wt_profile = "PowerShell"
