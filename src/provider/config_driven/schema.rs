@@ -8,13 +8,13 @@
 //! Status detection is split into orthogonal dimensions, each declarative:
 //!
 //!   * `state_signals`      — what the agent is doing now (busy/waiting/idle),
-//!                            inferred from the JSONL event stream.
+//!     inferred from the JSONL event stream.
 //!   * `liveness_detection` — is a live OS process attached? ordered strategy
-//!                            chain, first match wins (lockfile / cmdline uuid /
-//!                            tab-title / recently-active).
+//!     chain, first match wins (lockfile / cmdline uuid /
+//!     tab-title / recently-active).
 //!   * resumability         — implicit today: any session whose file exists and
-//!                            is not archived is resumable. Will be lifted into
-//!                            YAML when a provider needs different behavior.
+//!     is not archived is resumable. Will be lifted into
+//!     YAML when a provider needs different behavior.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

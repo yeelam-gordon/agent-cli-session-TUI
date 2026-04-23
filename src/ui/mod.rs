@@ -55,6 +55,48 @@ fn empty_provider_bootstrap(provider_count: usize) -> (bool, String) {
     }
 }
 
+/// Compute the new cursor index after the row under the cursor was removed
+/// from the visible list.
+///
+/// Returns `None` when the list is now empty (caller should clear selection),
+/// otherwise `Some(index)` clamped into the new valid range.
+///
+/// Semantics: the cursor stays at the same *visual* position so that the row
+/// which previously lived just below the removed row slides up under it. This
+/// is what enables rapid repeat-archive ('a' pressed repeatedly walks down
+/// the list, consuming one row per press, without the user having to
+/// re-navigate after each removal). If the last row was removed, the cursor
+/// clamps to the new last row.
+fn clamp_cursor_after_removal(prev_index: usize, new_len: usize) -> Option<usize> {
+    if new_len == 0 {
+        None
+    } else {
+        Some(prev_index.min(new_len - 1))
+    }
+}
+
+/// Tracks a locally-applied archive or unarchive that hasn't yet been
+/// fully reconciled with disk scans. An entry lives through three phases:
+///
+///   1. **Created** (`confirmed = false`): pushed from the 'a' handler.
+///      Filters matching scan entries on every `SessionsUpdated`.
+///   2. **Confirmed** (`confirmed = true`): `ArchiveConfirmed` /
+///      `UnarchiveConfirmed` arrived from the supervisor, meaning the
+///      archive record is now on disk. Filter is STILL applied — any
+///      scan that started before persist still reports the old state.
+///   3. **Drained**: a post-confirm `SessionsUpdated` independently
+///      reports the session on the correct side (hidden for archives,
+///      active for unarchives). Only then is the entry removed.
+///
+/// Both gates (confirmation + independent observation) are required to
+/// drain. Dropping either one reopens the bounce-back race where the
+/// count dips briefly then climbs back as stale scans land.
+#[derive(Clone, Debug)]
+struct PendingTransition {
+    key: String,
+    confirmed: bool,
+}
+
 /// The main TUI application state.
 pub struct App {
     sessions: Vec<Session>,
@@ -82,8 +124,17 @@ pub struct App {
     initial_load_complete: bool,
     /// True once user has manually pressed up/down. Prevents selection reset on refresh.
     user_navigated: bool,
-    /// Sessions archived locally this cycle — filtered out until supervisor confirms.
-    pending_archives: Vec<String>,
+    /// Sessions archived locally this cycle — filtered out until supervisor confirms
+    /// AND a post-persist scan independently reports them as hidden. The two-gate
+    /// drain is what prevents stale in-flight scans (that started before the
+    /// archive record was persisted) from bouncing the session back to active.
+    pending_archives: Vec<PendingTransition>,
+    /// Mirrors pending_archives for the reverse direction: keys of sessions
+    /// the user just unarchived (via 'a' in Hidden view). Used to locally
+    /// filter them out of `hidden_sessions` until `UnarchiveConfirmed`
+    /// arrives AND a post-persist scan independently reports them as active,
+    /// preventing the symmetric bounce-back race.
+    pending_unarchives: Vec<PendingTransition>,
     /// Which filtered indices had a semantic match boost (for ✨ indicator).
     semantic_matches: std::collections::HashSet<usize>,
     /// Semantic plugin (shared with background indexer). Always use try_lock() — never block UI.
@@ -112,6 +163,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider_keys: Vec<String>,
         default_provider: String,
@@ -176,6 +228,7 @@ impl App {
             initial_load_complete: no_providers,
             user_navigated: false,
             pending_archives: Vec::new(),
+            pending_unarchives: Vec::new(),
             semantic_matches: std::collections::HashSet::new(),
             semantic,
             semantic_status_handle,
@@ -312,12 +365,29 @@ impl App {
             while let Ok(ev) = event_rx.try_recv() {
                 match ev {
                     SupervisorEvent::SessionsUpdated { provider_key, mut active, mut hidden } => {
+                        // Snapshot the scan's ORIGINAL placement before any
+                        // local filter runs. These snapshots tell us what the
+                        // scan itself saw on disk — essential for the drain
+                        // logic below. A stale in-flight scan reports an
+                        // archived session in `active`; a post-persist scan
+                        // reports it in `hidden`. We only drain pending
+                        // entries when the scan's OWN view confirms the new
+                        // state, never based on moves we performed.
+                        let scan_hidden_keys: std::collections::HashSet<String> = hidden
+                            .iter()
+                            .map(|s| format!("{}:{}", s.provider_name, s.provider_session_id))
+                            .collect();
+                        let scan_active_keys: std::collections::HashSet<String> = active
+                            .iter()
+                            .map(|s| format!("{}:{}", s.provider_name, s.provider_session_id))
+                            .collect();
+
                         // Filter out sessions that were just archived locally
                         if !self.pending_archives.is_empty() {
                             let mut moved = Vec::new();
                             active.retain(|s| {
                                 let key = format!("{}:{}", s.provider_name, s.provider_session_id);
-                                if self.pending_archives.contains(&key) {
+                                if self.pending_archives.iter().any(|p| p.key == key) {
                                     moved.push(s.clone());
                                     false
                                 } else {
@@ -325,10 +395,44 @@ impl App {
                                 }
                             });
                             hidden.extend(moved);
-                            self.pending_archives.retain(|k| {
-                                !hidden.iter().any(|s| format!("{}:{}", s.provider_name, s.provider_session_id) == *k)
-                            });
                         }
+
+                        // Symmetric case: sessions just unarchived locally
+                        // must not bounce back into `hidden` before the
+                        // unarchive is persisted. Same race guard.
+                        if !self.pending_unarchives.is_empty() {
+                            let mut moved = Vec::new();
+                            hidden.retain(|s| {
+                                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                                if self.pending_unarchives.iter().any(|p| p.key == key) {
+                                    moved.push(s.clone());
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
+                            active.extend(moved);
+                        }
+
+                        // Drain pending entries now that the filter has run.
+                        // Two gates: (1) the supervisor has confirmed the
+                        // persist; (2) the scan's ORIGINAL view (captured
+                        // before our filter moved anything) reports the
+                        // session on the expected side. Both gates must
+                        // pass — otherwise a stale scan that started before
+                        // persist would prematurely drain the entry, the
+                        // pending filter would disappear, and a later stale
+                        // scan would repopulate the session on the wrong
+                        // side. That exact sequence is what produced the
+                        // "count drops to 2xx, bounces to 4xx" regression
+                        // and the "unarchived session vanishes entirely"
+                        // regression.
+                        self.pending_archives.retain(|p| {
+                            !(p.confirmed && scan_hidden_keys.contains(&p.key))
+                        });
+                        self.pending_unarchives.retain(|p| {
+                            !(p.confirmed && scan_active_keys.contains(&p.key))
+                        });
 
                         let active_count = active.len();
                         let hidden_count = hidden.len();
@@ -644,6 +748,28 @@ impl App {
                         // This one fired on every SupervisorEvent and burned
                         // ~1% idle CPU spawning redundant threads.)
                     }
+                    SupervisorEvent::ArchiveConfirmed { provider_key, provider_session_id } => {
+                        // Persist is done, but DO NOT drain the pending entry
+                        // here. Scans that were already in flight when 'a'
+                        // was pressed can still arrive and report the
+                        // session as active. Just mark the entry confirmed
+                        // so the SessionsUpdated handler can drain it once
+                        // the scan's own view agrees.
+                        let key = format!("{}:{}", provider_key, provider_session_id);
+                        for p in self.pending_archives.iter_mut() {
+                            if p.key == key {
+                                p.confirmed = true;
+                            }
+                        }
+                    }
+                    SupervisorEvent::UnarchiveConfirmed { provider_key, provider_session_id } => {
+                        let key = format!("{}:{}", provider_key, provider_session_id);
+                        for p in self.pending_unarchives.iter_mut() {
+                            if p.key == key {
+                                p.confirmed = true;
+                            }
+                        }
+                    }
                     SupervisorEvent::Error(e) => {
                         self.status_message = format!("Error: {}", e);
                         self.log_lines.push(format!("ERROR: {}", e));
@@ -841,24 +967,79 @@ impl App {
                         let psid = session.provider_session_id.clone();
                         let pname = session.provider_name.clone();
                         let key = format!("{}:{}", pname, psid);
-                        let _ = cmd_tx.send(SupervisorCommand::ArchiveSession {
-                            provider_session_id: psid.clone(),
-                            provider_key: pname.clone(),
-                        });
-                        // Track locally so incoming refreshes don't put it back
-                        self.pending_archives.push(key);
-                        // Instantly move from active to hidden
-                        if self.view_mode == ViewMode::Active {
-                            if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
-                                if idx < self.sessions.len() {
-                                    let removed = self.sessions.remove(idx);
-                                    self.hidden_sessions.insert(0, removed);
-                                    self.apply_filter();
+                        match self.view_mode {
+                            ViewMode::Active => {
+                                let _ = cmd_tx.send(SupervisorCommand::ArchiveSession {
+                                    provider_session_id: psid.clone(),
+                                    provider_key: pname.clone(),
+                                });
+                                // Track locally so incoming refreshes don't put it back
+                                self.pending_archives.push(PendingTransition { key, confirmed: false });
+                                // Instantly move from active to hidden
+                                if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
+                                    if idx < self.sessions.len() {
+                                        let removed = self.sessions.remove(idx);
+                                        self.hidden_sessions.insert(0, removed);
+                                        // Preserve cursor at the same visual position
+                                        // so the next row slides up under it — this
+                                        // enables rapid repeat-archive. apply_filter()
+                                        // zeroes the selection, so capture and
+                                        // restore here via `clamp_cursor_after_removal`.
+                                        let prev = self.selected_index;
+                                        self.apply_filter();
+                                        match clamp_cursor_after_removal(
+                                            prev,
+                                            self.filtered_indices.len(),
+                                        ) {
+                                            Some(idx) => {
+                                                self.selected_index = idx;
+                                                self.list_state.select(Some(idx));
+                                            }
+                                            None => {
+                                                self.selected_index = 0;
+                                                self.list_state.select(None);
+                                            }
+                                        }
+                                    }
                                 }
+                                self.log_lines
+                                    .push(format!("Archived: {}", crate::util::short_id(&psid, 8)));
+                            }
+                            ViewMode::Hidden => {
+                                // 'a' in the archived view restores the
+                                // session — symmetric to archive. Mirror
+                                // the same local-update + pending-key
+                                // tracking pattern so rapid repeat works.
+                                let _ = cmd_tx.send(SupervisorCommand::UnarchiveSession {
+                                    provider_session_id: psid.clone(),
+                                    provider_key: pname.clone(),
+                                });
+                                self.pending_unarchives.push(PendingTransition { key, confirmed: false });
+                                if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
+                                    if idx < self.hidden_sessions.len() {
+                                        let removed = self.hidden_sessions.remove(idx);
+                                        self.sessions.insert(0, removed);
+                                        let prev = self.selected_index;
+                                        self.apply_filter();
+                                        match clamp_cursor_after_removal(
+                                            prev,
+                                            self.filtered_indices.len(),
+                                        ) {
+                                            Some(idx) => {
+                                                self.selected_index = idx;
+                                                self.list_state.select(Some(idx));
+                                            }
+                                            None => {
+                                                self.selected_index = 0;
+                                                self.list_state.select(None);
+                                            }
+                                        }
+                                    }
+                                }
+                                self.log_lines
+                                    .push(format!("Unarchived: {}", crate::util::short_id(&psid, 8)));
                             }
                         }
-                        self.log_lines
-                            .push(format!("Archived: {}", crate::util::short_id(&psid, 8)));
                     }
                 }
                 KeyCode::BackTab => {
@@ -1321,14 +1502,21 @@ impl App {
 
     fn draw_status_bar(&self, f: &mut Frame, area: Rect) {
         let view_hint = match self.view_mode {
-            ViewMode::Active => "Shift+Tab: show archived",
-            ViewMode::Hidden => "Shift+Tab: show active",
+            ViewMode::Active => "Shift+Tab: show archived  a: archive",
+            ViewMode::Hidden => "Shift+Tab: show active  a: unarchive",
         };
         let sem_indicator = match &self.semantic_status_cache {
-            crate::search::SemanticStatus::Ready { count } => Span::styled(
-                format!("🧠 {} ", count),
-                Style::default().fg(Color::Green),
-            ),
+            crate::search::SemanticStatus::Ready { count } => {
+                // Cap by current view size so archiving/unarchiving is reflected
+                // immediately. The raw cache_count includes embeddings for
+                // archived sessions (embeddings are retained on archive and only
+                // evicted when the session is deleted from disk).
+                let display = (*count).min(self.current_view_sessions().len());
+                Span::styled(
+                    format!("🧠 {} ", display),
+                    Style::default().fg(Color::Green),
+                )
+            }
             crate::search::SemanticStatus::Indexing { done, total } => Span::styled(
                 format!("⏳ {}/{} ", done, total),
                 Style::default().fg(Color::Yellow),
@@ -2001,7 +2189,7 @@ mod ui_logic_tests {
 #[cfg(test)]
 mod ui_invariant_tests {
     use std::fs;
-    use super::empty_provider_bootstrap;
+    use super::{clamp_cursor_after_removal, empty_provider_bootstrap};
 
     fn ui_source() -> String {
         fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/mod.rs"))
@@ -2129,6 +2317,351 @@ mod ui_invariant_tests {
         assert!(
             leave_count >= 2,
             "LeaveAlternateScreen in quit + panic (found {leave_count})"
+        );
+    }
+
+    // ── Archive cursor preservation (pure-fn + structural checks) ───────
+    //
+    // Regression guard: when the user presses 'a' to archive the row under
+    // the cursor, the cursor must stay at the same visual index so the next
+    // row slides up into it. This supports rapid repeat-archive (press 'a'
+    // over and over to clear a run of rows). `apply_filter()` zeroes the
+    // selection after archive, so the handler must capture the previous
+    // index and restore it via `clamp_cursor_after_removal`.
+
+    #[test]
+    fn clamp_cursor_empty_list_returns_none() {
+        assert_eq!(clamp_cursor_after_removal(0, 0), None);
+        assert_eq!(clamp_cursor_after_removal(5, 0), None);
+    }
+
+    #[test]
+    fn clamp_cursor_preserves_middle_position() {
+        // Was at row 1 of 4; after removing row 1, list is length 3 and
+        // cursor should STAY at index 1 so the row that was #2 slides up.
+        assert_eq!(clamp_cursor_after_removal(1, 3), Some(1));
+    }
+
+    #[test]
+    fn clamp_cursor_clamps_to_last_row_when_out_of_range() {
+        // Was at row 3 of 4 (last); after removing it, list is length 3
+        // and cursor must clamp down to new last row (index 2).
+        assert_eq!(clamp_cursor_after_removal(3, 3), Some(2));
+        // Cursor way past the end still clamps to last row.
+        assert_eq!(clamp_cursor_after_removal(99, 3), Some(2));
+    }
+
+    #[test]
+    fn clamp_cursor_preserves_zero() {
+        // Archiving the first row of a multi-row list keeps cursor at 0.
+        assert_eq!(clamp_cursor_after_removal(0, 3), Some(0));
+    }
+
+    #[test]
+    fn archive_handler_calls_clamp_cursor_after_removal() {
+        // Structural invariant: the 'a' key handler MUST go through
+        // `clamp_cursor_after_removal` after `apply_filter()` so the cursor
+        // doesn't jump back to row 0. If someone refactors this to call
+        // `apply_filter` without restoring the cursor, this test fails.
+        let code = code_section();
+        assert!(
+            code.contains("KeyCode::Char('a')"),
+            "archive handler ('a' key) must exist in ui::mod"
+        );
+        assert!(
+            code.contains("clamp_cursor_after_removal"),
+            "archive handler must call clamp_cursor_after_removal after \
+             apply_filter() to preserve cursor position for rapid-repeat \
+             archive. Otherwise the cursor jumps back to row 0 every press."
+        );
+    }
+
+    // ── Archive bounce-back race (pending_archives drain must wait for
+    //    `ArchiveConfirmed`, never scan `hidden`) ────────────────────────
+    // Regression: rapid 'a' spam caused count to briefly drop (e.g. 500 →
+    // 480) and then bounce back up (480 → 505) several seconds later. The
+    // cause was `pending_archives.retain(|k| !hidden.contains(k))` running
+    // on every SessionsUpdated. The UI's own filter had just pushed keys
+    // into `hidden` *locally* (before the archive was persisted on disk),
+    // so those keys were dropped from pending_archives. Subsequent scans —
+    // still reflecting pre-archive disk state — placed the sessions back
+    // in `active` with nothing to filter them out.
+    //
+    // The fix: drain `pending_archives` ONLY on `SupervisorEvent::
+    // ArchiveConfirmed`, which is fired by `handle_archive` *after* the
+    // archive record has been written. This test enforces the contract
+    // so the regression can't silently return.
+
+    #[test]
+    fn archive_confirmed_event_exists_and_ui_handles_it() {
+        let full = ui_source();
+        assert!(
+            full.contains("SupervisorEvent::ArchiveConfirmed"),
+            "UI must handle SupervisorEvent::ArchiveConfirmed — that is \
+             the only safe signal that an archive has been persisted and \
+             its pending_archives entry can be dropped."
+        );
+    }
+
+    #[test]
+    fn pending_archives_not_drained_from_hidden_scan() {
+        // Enforces that the eager drain is gone. If anyone re-introduces
+        // `pending_archives.retain(...hidden...)` the rapid-archive
+        // bounce-back returns.
+        let code = code_section();
+        let bad_patterns = [
+            "pending_archives.retain(|k| {\n                                !hidden",
+            "pending_archives.retain(|k| !hidden",
+        ];
+        for pat in bad_patterns {
+            assert!(
+                !code.contains(pat),
+                "pending_archives must NOT be drained based on scan \
+                 `hidden` list. That is the race that caused the archive \
+                 bounce-back (count drops then reappears). Drain only on \
+                 SupervisorEvent::ArchiveConfirmed."
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_emits_archive_confirmed_after_persist() {
+        // Cross-module invariant: the UI's correctness depends on the
+        // supervisor actually firing the event. Re-read supervisor/mod.rs
+        // and make sure ArchiveConfirmed is both declared and sent from
+        // handle_archive.
+        let sup = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/supervisor/mod.rs"
+        ))
+        .expect("should read supervisor/mod.rs");
+        assert!(
+            sup.contains("ArchiveConfirmed"),
+            "supervisor must declare SupervisorEvent::ArchiveConfirmed"
+        );
+        // Verify it's also used (sent), not just declared.
+        let occurrences = sup.matches("ArchiveConfirmed").count();
+        assert!(
+            occurrences >= 2,
+            "ArchiveConfirmed must be declared AND sent from handle_archive \
+             (found {} occurrence(s))",
+            occurrences
+        );
+        assert!(
+            sup.contains("handle_archive"),
+            "handle_archive must exist in supervisor/mod.rs"
+        );
+    }
+
+    // ── Unarchive feature (symmetric to archive) ──────────────────────
+    //
+    // 'a' in the Hidden view must restore the session. The implementation
+    // mirrors the archive path exactly — including the bounce-back race
+    // guard via `pending_unarchives` + `SupervisorEvent::UnarchiveConfirmed`.
+
+    #[test]
+    fn unarchive_confirmed_event_exists_and_ui_handles_it() {
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        assert!(
+            full.contains("SupervisorEvent::UnarchiveConfirmed"),
+            "UI must handle SupervisorEvent::UnarchiveConfirmed — mirrors \
+             ArchiveConfirmed so pending_unarchives drains only after the \
+             supervisor has persisted the unarchive."
+        );
+        assert!(
+            full.contains("pending_unarchives"),
+            "App must track pending_unarchives to prevent bounce-back of \
+             just-unarchived sessions back into hidden view."
+        );
+    }
+
+    #[test]
+    fn pending_unarchives_not_drained_from_active_scan() {
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        // Build the anti-patterns at runtime so this test's own source
+        // doesn't trip its own match (as the archive sibling test avoids
+        // via a line-break).
+        let retain_head = format!("{}{}", "pending_unarch", "ives.retain(|k| ");
+        let bad_patterns = [
+            format!("{}!active", retain_head),
+            format!("{}{{\n                                !active", retain_head),
+        ];
+        for pattern in &bad_patterns {
+            assert!(
+                !full.contains(pattern),
+                "pending_unarchives must NOT be drained based on scan \
+                 results containing the session in active — that reintroduces \
+                 the bounce-back race. Drain only on \
+                 SupervisorEvent::UnarchiveConfirmed."
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_emits_unarchive_confirmed_after_persist() {
+        let sup = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/supervisor/mod.rs"
+        ))
+        .expect("should read supervisor/mod.rs");
+        assert!(
+            sup.contains("UnarchiveConfirmed"),
+            "supervisor must declare SupervisorEvent::UnarchiveConfirmed"
+        );
+        let occurrences = sup.matches("UnarchiveConfirmed").count();
+        assert!(
+            occurrences >= 2,
+            "UnarchiveConfirmed must be declared AND sent from \
+             handle_unarchive (found {} occurrence(s))",
+            occurrences
+        );
+        assert!(
+            sup.contains("handle_unarchive"),
+            "handle_unarchive must exist in supervisor/mod.rs"
+        );
+        assert!(
+            sup.contains("UnarchiveSession"),
+            "SupervisorCommand::UnarchiveSession must exist so the UI can \
+             request an unarchive."
+        );
+    }
+
+    #[test]
+    fn a_key_handler_branches_on_view_mode_for_unarchive() {
+        // The 'a' handler must dispatch to UnarchiveSession when in
+        // ViewMode::Hidden, otherwise unarchive is unreachable from the UI.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        assert!(
+            full.contains("SupervisorCommand::UnarchiveSession"),
+            "UI must send SupervisorCommand::UnarchiveSession from the 'a' \
+             key handler in the Hidden view."
+        );
+    }
+
+    // ── Post-confirm bounce-back race (two-gate drain) ───────────────────
+    // Regression: even after the first fix (drain only on ArchiveConfirmed),
+    // the user still saw counts drop to ~2xx then climb to ~4xx after
+    // rapid 'a' spam. Root cause: scans that were in flight BEFORE persist
+    // can arrive AFTER ArchiveConfirmed. If the pending entry was drained
+    // the instant ArchiveConfirmed fired, those stale scans saw an empty
+    // pending filter and repopulated the freshly-archived sessions in
+    // active. Symmetric failure for unarchive: stale scan repopulated the
+    // session back in hidden, so the unarchived session vanished from
+    // every view.
+    //
+    // The fix: drain requires TWO gates. (1) Supervisor confirms persist.
+    // (2) A subsequent scan's ORIGINAL view (captured before our filter
+    // moved anything) independently reports the session on the expected
+    // side. Stale scans fail gate (2), so the filter persists through
+    // them. The tests below enforce both halves of that contract in
+    // source.
+    #[test]
+    fn pending_transitions_have_confirmed_gate() {
+        // The PendingTransition struct must carry a `confirmed` flag; the
+        // two-gate drain depends on it.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        assert!(
+            full.contains("struct PendingTransition"),
+            "PendingTransition struct must exist — it is what allows the \
+             two-gate drain (confirmed + independent scan observation)."
+        );
+        assert!(
+            full.contains("confirmed: bool"),
+            "PendingTransition must expose a `confirmed` flag. Without it \
+             the drain logic collapses back to single-gate and the \
+             bounce-back race returns."
+        );
+    }
+
+    #[test]
+    fn archive_confirmed_marks_only_does_not_drain() {
+        // ArchiveConfirmed must NOT drain the pending entry — it only
+        // flips `confirmed = true`. Draining is the SessionsUpdated
+        // handler's job, after it has observed the scan's OWN placement
+        // of the session.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        // Locate the ArchiveConfirmed handler block and check it does
+        // NOT contain a retain on pending_archives. Build the forbidden
+        // needle at runtime so this test's own source doesn't self-match.
+        let forbidden = format!("{}{}", "pending_arch", "ives.retain");
+        // Extract the ArchiveConfirmed handler block (approximate):
+        let handler_start = full
+            .find("SupervisorEvent::ArchiveConfirmed {")
+            .expect("ArchiveConfirmed handler must exist");
+        let handler_end = full[handler_start..]
+            .find("SupervisorEvent::UnarchiveConfirmed")
+            .map(|i| handler_start + i)
+            .expect("UnarchiveConfirmed must follow ArchiveConfirmed in the match");
+        let handler_body = &full[handler_start..handler_end];
+        assert!(
+            !handler_body.contains(&forbidden),
+            "ArchiveConfirmed handler must NOT drain pending_archives \
+             directly (found `{}` in the handler body). Drain belongs \
+             in the SessionsUpdated handler, gated by both confirmation \
+             AND an independent scan observation of the session in \
+             `hidden`. Single-gate drain on ArchiveConfirmed alone \
+             reopens the bounce-back race.",
+            forbidden
+        );
+    }
+
+    #[test]
+    fn unarchive_confirmed_marks_only_does_not_drain() {
+        // Symmetric to the archive version.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        let forbidden = format!("{}{}", "pending_unarch", "ives.retain");
+        let handler_start = full
+            .find("SupervisorEvent::UnarchiveConfirmed {")
+            .expect("UnarchiveConfirmed handler must exist");
+        // Find next top-level match arm — Error is the next sibling arm.
+        let handler_end = full[handler_start..]
+            .find("SupervisorEvent::Error")
+            .map(|i| handler_start + i)
+            .expect("Error arm must follow UnarchiveConfirmed in the match");
+        let handler_body = &full[handler_start..handler_end];
+        assert!(
+            !handler_body.contains(&forbidden),
+            "UnarchiveConfirmed handler must NOT drain pending_unarchives \
+             directly. Drain belongs in the SessionsUpdated handler, \
+             gated by both confirmation AND an independent scan \
+             observation of the session in `active`."
+        );
+    }
+
+    #[test]
+    fn sessions_updated_snapshots_scan_views_before_filtering() {
+        // The two-gate drain requires knowing the scan's ORIGINAL placement
+        // of each session — captured BEFORE our pending filter moves
+        // anything. If someone re-orders the code to build these sets
+        // after the filter runs, the drain degenerates: our own moves
+        // would satisfy gate (2), stale scans would drain the entry, and
+        // the bounce-back regression returns.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        let sessions_updated_start = full
+            .find("SupervisorEvent::SessionsUpdated {")
+            .expect("SessionsUpdated handler must exist");
+        let snap_hidden = full[sessions_updated_start..]
+            .find("scan_hidden_keys");
+        let snap_active = full[sessions_updated_start..]
+            .find("scan_active_keys");
+        let filter_apply = full[sessions_updated_start..]
+            .find("if !self.pending_archives.is_empty()");
+        assert!(
+            snap_hidden.is_some() && snap_active.is_some(),
+            "SessionsUpdated must snapshot both scan_hidden_keys and \
+             scan_active_keys for the two-gate drain."
+        );
+        assert!(
+            filter_apply.is_some(),
+            "SessionsUpdated must still apply the pending_archives filter."
+        );
+        assert!(
+            snap_hidden.unwrap() < filter_apply.unwrap()
+                && snap_active.unwrap() < filter_apply.unwrap(),
+            "scan_hidden_keys and scan_active_keys must be built BEFORE \
+             the pending filter runs. Building them after would let the \
+             filter's own moves satisfy the drain gate, defeating the \
+             purpose."
         );
     }
 }

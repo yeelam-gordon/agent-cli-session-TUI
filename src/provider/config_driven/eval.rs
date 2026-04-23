@@ -46,7 +46,7 @@ impl Expr {
     /// Evaluate against a JSON value. Returns the resulting Value.
     ///
     /// Missing paths return `Value::Null`. No panics.
-    pub fn eval<'a>(&self, input: &'a Value) -> Value {
+    pub fn eval(&self, input: &Value) -> Value {
         eval(&self.node, input)
     }
 
@@ -444,9 +444,9 @@ fn value_eq(a: &Value, b: &Value) -> bool {
             }
         }
         // cross-type: coerce numbers from strings for convenience
-        (Value::Number(_), Value::String(s)) | (Value::String(s), Value::Number(_)) => {
-            // numeric text may appear in logs — compare as string only
-            s.is_empty() && false
+        (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) => {
+            // numeric text may appear in logs — treat cross-type as non-equal for now
+            false
         }
         _ => false,
     }

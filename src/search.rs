@@ -217,8 +217,36 @@ impl EmbeddingCache {
     }
 
     fn save(&self, path: &std::path::Path) {
-        if let Ok(json) = serde_json::to_string(self) {
-            let _ = std::fs::write(path, json);
+        let json = match serde_json::to_string(self) {
+            Ok(j) => j,
+            Err(e) => {
+                crate::log::warn(&format!("EmbeddingCache::save serialize failed: {e}"));
+                return;
+            }
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                crate::log::warn(&format!(
+                    "EmbeddingCache::save mkdir {parent:?} failed: {e}"
+                ));
+                return;
+            }
+        }
+        // Atomic write: tmp + rename. Without this, a crash or
+        // AV/OneDrive interference mid-write leaves a truncated JSON
+        // file, and next startup silently discards every cached
+        // embedding and recomputes them all.
+        let tmp = path.with_extension("json.tmp");
+        if let Err(e) = std::fs::write(&tmp, json) {
+            crate::log::warn(&format!(
+                "EmbeddingCache::save write {tmp:?} failed: {e}"
+            ));
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            crate::log::warn(&format!(
+                "EmbeddingCache::save rename {tmp:?} -> {path:?} failed: {e}"
+            ));
         }
     }
 }
@@ -357,7 +385,7 @@ impl SemanticPlugin {
     where
         F: Fn(&Session) -> String,
     {
-        if !self.lib.is_some() || self.dim <= 0 {
+        if self.lib.is_none() || self.dim <= 0 {
             return 0;
         }
         sessions
@@ -535,6 +563,7 @@ impl SemanticPlugin {
     ///
     /// Only embeds sessions whose text hash changed. Saves cache to disk.
     /// Returns (newly_embedded, total_cached).
+    #[allow(dead_code)]
     pub fn index_sessions<F>(&mut self, sessions: &[Session], text_fn: F) -> (usize, usize)
     where
         F: Fn(&Session) -> String,

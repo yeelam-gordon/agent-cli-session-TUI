@@ -287,7 +287,11 @@ impl LogSearcher {
                     version: 1,
                     fingerprints: fps.clone(),
                 };
-                let _ = snapshot.save(&self.fingerprint_path);
+                if let Err(e) = snapshot.save(&self.fingerprint_path) {
+                    crate::log::warn(&format!(
+                        "log_search: fingerprint chunk save failed: {e}"
+                    ));
+                }
                 pending_in_chunk = 0;
                 // Yield so a cold-start reindex doesn't saturate the machine.
                 std::thread::sleep(CHUNK_SLEEP);
@@ -301,7 +305,11 @@ impl LogSearcher {
                 fingerprints: fps.clone(),
             };
             drop(fps);
-            let _ = snapshot.save(&self.fingerprint_path);
+            if let Err(e) = snapshot.save(&self.fingerprint_path) {
+                crate::log::warn(&format!(
+                    "log_search: fingerprint final save failed: {e}"
+                ));
+            }
         }
         Ok(())
     }

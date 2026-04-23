@@ -102,6 +102,12 @@ async fn main() -> Result<()> {
     log::info(&format!("Archive path: {:?}", archive_path));
     let archive = ArchiveStore::open(&archive_path)?;
     let archive = Arc::new(Mutex::new(archive));
+    // Spawn the persist worker so archive/unarchive mutations become
+    // write-back buffered (coalesces bursts of 'a' presses into one
+    // atomic disk write). The supervisor's Shutdown handler is
+    // responsible for calling `flush_blocking()` so no buffered state
+    // is lost on quit.
+    ArchiveStore::spawn_persist_worker(&archive);
 
     // Build provider registry
     let mut registry = ProviderRegistry::new();
@@ -170,7 +176,7 @@ async fn main() -> Result<()> {
         config.poll_interval_ms,
         config.providers.clone(),
     );
-    tokio::spawn(async move {
+    let supervisor_handle = tokio::spawn(async move {
         supervisor.run(event_tx, cmd_rx).await;
     });
 
@@ -222,5 +228,31 @@ async fn main() -> Result<()> {
     );
     app.run(event_rx, cmd_tx).await?;
 
-    Ok(())
+    // The UI loop just sent `SupervisorCommand::Shutdown` before returning.
+    // That command sits in the mpsc channel BEHIND any still-unprocessed
+    // `ArchiveSession` / `UnarchiveSession` commands that the user queued
+    // via rapid 'a' presses before quitting. If we exited the process
+    // right here, those pending archive writes would be lost — archives
+    // persisted on disk only once `handle_archive` (synchronous
+    // `fs::write`) runs, and that only happens when the supervisor task
+    // dequeues the command.
+    //
+    // Awaiting `supervisor_handle` drains the channel in FIFO order,
+    // persists every queued archive, and finally exits on `Shutdown`.
+    // A 5-second cap guards against a pathologically stuck supervisor
+    // (e.g. a provider taking forever) so the user never loses more than
+    // a moment after pressing 'q'.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        supervisor_handle,
+    )
+    .await;
+
+    // After the supervisor has drained, the only things still keeping
+    // the process alive are detached std::thread workers (scan threads
+    // and the semantic indexer holding the 550MB embedding model).
+    // They hold no unflushed state — the embed cache re-warms next
+    // launch, scans are read-only — so force-exit instead of waiting
+    // the multiple seconds they might take to unwind naturally.
+    std::process::exit(0);
 }

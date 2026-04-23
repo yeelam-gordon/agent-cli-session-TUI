@@ -12,6 +12,7 @@ use std::collections::HashMap;
 /// A discovered OS process with its full command line.
 #[derive(Debug, Clone)]
 pub struct ProcessEntry {
+    #[allow(dead_code)]
     pub name: String,
     pub command_line: String,
 }

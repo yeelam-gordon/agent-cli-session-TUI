@@ -15,12 +15,13 @@ static DIM: Mutex<i32> = Mutex::new(0);
 /// `cache_dir` is the directory to download/cache the model files.
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn semantic_init(cache_dir: *const c_char) -> c_int {
     let cache = if cache_dir.is_null() {
         None
     } else {
         let s = unsafe { CStr::from_ptr(cache_dir) };
-        s.to_str().ok().map(|s| std::path::PathBuf::from(s))
+        s.to_str().ok().map(std::path::PathBuf::from)
     };
 
     let mut opts = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
@@ -69,6 +70,7 @@ pub extern "C" fn semantic_unload() -> c_int {
 /// `out_vec` is a pre-allocated float buffer of at least `max_dim` elements.
 /// Returns the actual dimension written, or -1 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn semantic_embed(
     text: *const c_char,
     out_vec: *mut c_float,
@@ -103,6 +105,7 @@ pub extern "C" fn semantic_embed(
 /// Compute cosine similarity between two vectors.
 /// Returns the similarity score (-1.0 to 1.0), or -2.0 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn semantic_cosine(
     vec_a: *const c_float,
     vec_b: *const c_float,
@@ -132,6 +135,7 @@ pub extern "C" fn semantic_cosine(
 /// `max_count` is the max number of texts to embed.
 /// Returns the number of texts embedded, or -1 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn semantic_embed_batch(
     texts_json: *const c_char,
     out_vecs: *mut c_float,

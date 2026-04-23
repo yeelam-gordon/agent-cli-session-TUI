@@ -192,11 +192,15 @@ pub(crate) fn default_state_inference(s: &StateSignals) -> SessionState {
     let persistence = match process {
         ProcessState::Running => PersistenceState::Resumable,
         _ => {
-            if s.lock_file_exists == Some(true) || s.process_alive == Some(false) {
-                PersistenceState::Resumable
-            } else {
-                PersistenceState::Ephemeral
-            }
+            // If the session is in the list at all, it was enumerated from a
+            // state_dir — which means a session file exists on disk and the
+            // provider can `--resume` it. Default to Resumable (💤) instead of
+            // Ephemeral (⚪) to match user expectation: "if I can see it, I
+            // should be able to resume it." Ephemeral is still exposed as a
+            // state variant for providers that may legitimately need it in the
+            // future, but signal-driven classification no longer produces it.
+            let _ = (s.lock_file_exists, s.process_alive); // formerly used as tiebreakers
+            PersistenceState::Resumable
         }
     };
 

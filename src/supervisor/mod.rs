@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +22,24 @@ pub enum SupervisorEvent {
         active: Vec<Session>,
         hidden: Vec<Session>,
     },
+    /// Fired synchronously after `handle_archive` persists the archive record
+    /// to disk. The UI uses this as the authoritative signal to drain its
+    /// `pending_archives` list. Clearing pending_archives based on scan
+    /// results is UNSAFE: a scan that started before a later archive was
+    /// persisted will still place that session in `active`, and without a
+    /// pending_archives entry to filter it, the row silently "un-archives"
+    /// on screen.
+    ArchiveConfirmed {
+        provider_key: String,
+        provider_session_id: String,
+    },
+    /// Fired synchronously after `handle_unarchive` removes an archive record.
+    /// The UI uses this as the authoritative signal to drain its
+    /// `pending_unarchives` list (same race guard as archive).
+    UnarchiveConfirmed {
+        provider_key: String,
+        provider_session_id: String,
+    },
     Error(String),
 }
 
@@ -39,6 +57,10 @@ pub enum SupervisorCommand {
         provider_key: String,
     },
     ArchiveSession {
+        provider_session_id: String,
+        provider_key: String,
+    },
+    UnarchiveSession {
         provider_session_id: String,
         provider_key: String,
     },
@@ -118,17 +140,22 @@ impl SessionViewModel {
     }
 
     /// Produce sorted active/hidden lists from current state.
+    ///
+    /// Takes a cheap `HashSet<String>` snapshot of the archived keys rather
+    /// than a `MutexGuard`, so scans don't hold the archive mutex for the
+    /// duration of discovery. Previously, holding the mutex during scans
+    /// caused rapid 'a' presses to serialise behind the scan (each command
+    /// waited 5–12s for the lock), and queued archives could be lost on
+    /// quit before they drained.
     fn snapshot(
         &self,
-        archive: &Option<std::sync::MutexGuard<'_, ArchiveStore>>,
+        archived_keys: &HashSet<String>,
     ) -> (Vec<Session>, Vec<Session>) {
         let mut active = Vec::new();
         let mut hidden = Vec::new();
         for s in self.sessions.values() {
-            let is_archived = archive
-                .as_ref()
-                .map(|a| a.is_archived(&s.provider_name, &s.provider_session_id))
-                .unwrap_or(false);
+            let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+            let is_archived = archived_keys.contains(&key);
             if is_archived {
                 hidden.push(s.clone());
             } else {
@@ -231,7 +258,34 @@ impl Supervisor {
                 Some(cmd) = cmd_rx.recv() => {
                     let cmd_start = std::time::Instant::now();
                     match cmd {
-                        SupervisorCommand::Shutdown => break,
+                        SupervisorCommand::Shutdown => {
+                            // Final sync write of any buffered archive
+                            // mutations before the process exits. The
+                            // persist worker runs on a 150 ms coalesce
+                            // window, so without this an 'a' pressed
+                            // immediately before quit would be lost.
+                            match self.archive.lock() {
+                                Ok(a) => {
+                                    if let Err(e) = a.flush_blocking() {
+                                        crate::log::warn(&format!(
+                                            "Shutdown archive flush FAILED: {}",
+                                            e
+                                        ));
+                                    }
+                                }
+                                Err(poisoned) => {
+                                    // Best-effort: still attempt to flush.
+                                    let a = poisoned.into_inner();
+                                    if let Err(e) = a.flush_blocking() {
+                                        crate::log::warn(&format!(
+                                            "Shutdown archive flush (poisoned) FAILED: {}",
+                                            e
+                                        ));
+                                    }
+                                }
+                            }
+                            break;
+                        }
                         SupervisorCommand::NewSession { provider_key, cwd } => {
                             self.handle_new_session(&provider_key, &cwd, &event_tx);
                         }
@@ -242,15 +296,19 @@ impl Supervisor {
                             self.handle_kill(&provider_key, &provider_session_id, &event_tx);
                         }
                         SupervisorCommand::ArchiveSession { provider_session_id, provider_key } => {
+                            // Persist only. The UI already moves the session to
+                            // hidden instantly via `pending_archives`, and the
+                            // next periodic scan reconciles. Previously this
+                            // spawned a full re-scan per keypress — rapid 'a'
+                            // presses stampeded with N parallel scans across
+                            // 500+ sessions and pegged CPU at 100%.
                             self.handle_archive(&provider_key, &provider_session_id, &event_tx);
-                            // Trigger an immediate background scan
-                            let registry = self.registry.clone();
-                            let archive_c = self.archive.clone();
-                            let vm_clone = vm.clone();
-                            let tx = event_tx.clone();
-                            std::thread::spawn(move || {
-                                let _ = Self::scan_providers(&registry, &archive_c, &vm_clone, &tx);
-                            });
+                        }
+                        SupervisorCommand::UnarchiveSession { provider_session_id, provider_key } => {
+                            // Persist only. Same reasoning as ArchiveSession:
+                            // the UI handles the visual via `pending_unarchives`
+                            // and the next periodic scan reconciles.
+                            self.handle_unarchive(&provider_key, &provider_session_id, &event_tx);
                         }
                         SupervisorCommand::FocusSession { tab_title, title, provider_session_id } => {
                             crate::log::info(&format!("FocusSession cmd received after {:?}", cmd_start.elapsed()));
@@ -328,7 +386,10 @@ impl Supervisor {
             }
             drop(tx);
 
-            let archive_guard = archive.lock().ok();
+            let archive_guard = archive
+                .lock()
+                .map(|a| a.snapshot_keys())
+                .unwrap_or_default();
             for (provider_key, sessions) in rx {
                 if let Ok(mut vm_lock) = vm.lock() {
                     vm_lock.merge_provider(&provider_key, sessions);
@@ -367,7 +428,10 @@ impl Supervisor {
             }
             drop(tx);
 
-            let archive_guard = archive.lock().ok();
+            let archive_guard = archive
+                .lock()
+                .map(|a| a.snapshot_keys())
+                .unwrap_or_default();
             for (provider_key, sessions) in rx {
                 if let Ok(mut vm_lock) = vm.lock() {
                     vm_lock.merge_provider(&provider_key, sessions);
@@ -397,7 +461,10 @@ impl Supervisor {
             .filter(|p| p.capabilities().supports_discovery)
             .collect();
 
-        let archive_guard = archive.lock().ok();
+        let archive_guard = archive
+            .lock()
+            .map(|a| a.snapshot_keys())
+            .unwrap_or_default();
 
         // Scan providers in parallel; merge each provider's results as they arrive
         std::thread::scope(|s| {
@@ -582,11 +649,61 @@ impl Supervisor {
         &self,
         provider_key: &str,
         provider_session_id: &str,
-        _event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) {
-        if let Ok(mut archive) = self.archive.lock() {
-            let _ = archive.archive(provider_key, provider_session_id);
+        let t0 = std::time::Instant::now();
+        match self.archive.lock() {
+            Ok(mut archive) => {
+                if let Err(e) = archive.archive(provider_key, provider_session_id) {
+                    crate::log::warn(&format!(
+                        "handle_archive: save FAILED for {}:{}: {} (held lock {:?})",
+                        provider_key, provider_session_id, e, t0.elapsed()
+                    ));
+                }
+            }
+            Err(e) => {
+                crate::log::warn(&format!(
+                    "handle_archive: archive mutex poisoned for {}:{}: {}",
+                    provider_key, provider_session_id, e
+                ));
+            }
         }
+        // Tell the UI that persistence is done so it can safely drop the
+        // key from `pending_archives`. Without this confirmation, the UI
+        // would have to guess from scan results, and it can guess wrong
+        // when many scans are in flight after rapid 'a' presses.
+        let _ = event_tx.send(SupervisorEvent::ArchiveConfirmed {
+            provider_key: provider_key.to_string(),
+            provider_session_id: provider_session_id.to_string(),
+        });
+    }
+
+    fn handle_unarchive(
+        &self,
+        provider_key: &str,
+        provider_session_id: &str,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+    ) {
+        match self.archive.lock() {
+            Ok(mut archive) => {
+                if let Err(e) = archive.unarchive(provider_key, provider_session_id) {
+                    crate::log::warn(&format!(
+                        "handle_unarchive: save FAILED for {}:{}: {}",
+                        provider_key, provider_session_id, e
+                    ));
+                }
+            }
+            Err(e) => {
+                crate::log::warn(&format!(
+                    "handle_unarchive: archive mutex poisoned for {}:{}: {}",
+                    provider_key, provider_session_id, e
+                ));
+            }
+        }
+        let _ = event_tx.send(SupervisorEvent::UnarchiveConfirmed {
+            provider_key: provider_key.to_string(),
+            provider_session_id: provider_session_id.to_string(),
+        });
     }
 }
 

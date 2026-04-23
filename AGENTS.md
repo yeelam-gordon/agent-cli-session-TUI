@@ -83,6 +83,22 @@ Output: `target/release/agent-session-tui.exe`
 
 Config search order: next to exe → `%APPDATA%\agent-session-tui\config.toml` → built-in defaults.
 
+## Pre-Push Check — MANDATORY
+
+CI (`.github/workflows/rust.yml`) runs `cargo clippy -- -D warnings` on **BOTH** crates and treats any warning as an error. `cargo build` alone does NOT run clippy, so a local green build can still break CI. Rust toolchain updates (e.g. 1.95 added `not_unsafe_ptr_arg_deref`, `redundant_closure` tightening) routinely surface new lints.
+
+**Before every `git push`, run BOTH commands and fix any findings:**
+
+```bash
+# Core crate
+cargo clippy --release -- -D warnings
+
+# Semantic plugin crate (separate workspace member)
+cargo clippy --release --manifest-path semantic-plugin/Cargo.toml -- -D warnings
+```
+
+Both must exit 0. If clippy complains about a lint that is intentionally allowed for the situation (e.g. FFI raw-pointer args on `pub extern "C" fn`), scope an `#[allow(clippy::<lint>)]` to that function — do not globally silence it.
+
 ## How to Run Tests
 
 ```bash
@@ -151,6 +167,8 @@ Quick summary:
 6. **Regressions without tests** — Every bug fix MUST include a regression test. See [`testing.instructions.md`](.github/instructions/testing.instructions.md) § Regression Test Policy. No exceptions.
 
 7. **Fixing one plugin in isolation** — A bug in one provider likely exists in others. See [`plugin.instructions.md`](.github/instructions/plugin.instructions.md) § Cross-Plugin Consistency Rule. Always audit all providers before closing a fix.
+
+8. **Pushing without running clippy** — `cargo build` does not run clippy, but CI does, with `-D warnings`, on BOTH the core crate and `semantic-plugin/`. Always run both clippy commands (see § Pre-Push Check) before `git push`. Toolchain bumps (e.g. 1.95) frequently add new lints that were clean the day before.
 
 ## Self-Correction Rule
 

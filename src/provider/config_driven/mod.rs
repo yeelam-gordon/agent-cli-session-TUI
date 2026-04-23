@@ -126,8 +126,15 @@ fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedSc
         .collect();
     let pc = PersistedCache { version: SCAN_CACHE_VERSION, entries };
     let Ok(text) = serde_json::to_string(&pc) else { return; };
-    if std::fs::write(&tmp, text).is_err() { return; }
-    let _ = std::fs::rename(&tmp, &path);
+    if let Err(e) = std::fs::write(&tmp, text) {
+        crate::log::warn(&format!("scan_cache write {tmp:?} failed: {e}"));
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        crate::log::warn(&format!(
+            "scan_cache rename {tmp:?} -> {path:?} failed: {e}"
+        ));
+    }
 }
 
 pub struct ConfigDrivenProvider {
@@ -184,6 +191,10 @@ impl ConfigDrivenProvider {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl Provider for ConfigDrivenProvider {
+    // `name()` intentionally returns the human-readable display name (legacy trait
+    // contract); `key()` returns the provider key. Clippy's misnamed_getters is
+    // a false positive here.
+    #[allow(clippy::misnamed_getters)]
     fn name(&self) -> &str {
         &self.cfg.display_name
     }
@@ -291,10 +302,7 @@ impl Provider for ConfigDrivenProvider {
 
         let mut parsed: Vec<Session> = Vec::with_capacity(candidates.len());
         for cand in candidates {
-            match parse_session(self, &cand) {
-                Ok(Some(s)) => parsed.push(s),
-                _ => {}
-            }
+            if let Ok(Some(s)) = parse_session(self, &cand) { parsed.push(s) }
         }
         parsed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
@@ -569,11 +577,10 @@ fn count_candidates(disc: &DiscoveryConfig, base_dir: &Path) -> Result<usize> {
         DiscoveryStrategy::DirPerSession { .. } => {
             let mut n = 0;
             for entry in std::fs::read_dir(base_dir)?.flatten() {
-                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                    if entry.file_name().to_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                    && entry.file_name().to_str().map(|s| !s.is_empty()).unwrap_or(false) {
                         n += 1;
                     }
-                }
             }
             Ok(n)
         }
@@ -655,7 +662,7 @@ fn list_dir_per_session(
 
     // Phase B: sort by mtime desc and truncate if limit requested.
     if limit.is_some() {
-        stubs.sort_by(|a, b| b.mtime_raw.cmp(&a.mtime_raw));
+        stubs.sort_by_key(|b| std::cmp::Reverse(b.mtime_raw));
         if let Some(n) = limit { stubs.truncate(n); }
     }
 
@@ -696,7 +703,7 @@ fn list_file_per_session(
 
     // Phase B: sort by mtime desc and truncate if limit requested.
     if limit.is_some() {
-        stubs.sort_by(|a, b| b.mtime_raw.cmp(&a.mtime_raw));
+        stubs.sort_by_key(|b| std::cmp::Reverse(b.mtime_raw));
         if let Some(n) = limit { stubs.truncate(n); }
     }
 
@@ -790,7 +797,7 @@ fn list_date_partitioned(
 
     // Phase B: sort + truncate if limit.
     if limit.is_some() {
-        stubs.sort_by(|a, b| b.mtime_raw.cmp(&a.mtime_raw));
+        stubs.sort_by_key(|b| std::cmp::Reverse(b.mtime_raw));
         if let Some(n) = limit { stubs.truncate(n); }
     }
 
@@ -1359,10 +1366,7 @@ fn match_processes_dispatch(
     // Enumerate WT tab titles once if any strategy needs them.
     let needs_tabs = cfg.strategies.iter().any(|s| matches!(s, LivenessStrategy::TabTitleMatch { .. }));
     let tab_titles: Vec<String> = if needs_tabs {
-        match crate::wt_tabs::list_tab_titles() {
-            Ok(v) => v,
-            Err(_) => vec![],
-        }
+        crate::wt_tabs::list_tab_titles().unwrap_or_default()
     } else {
         vec![]
     };
@@ -1421,8 +1425,6 @@ fn run_strategy(
             strat_recently_active(s, procs, claimed, *within_secs, cfg)
         }
     }
-    .then(|| true)
-    .unwrap_or(false)
 }
 
 // ── Strategy implementations ────────────────────────────────────────────────
@@ -1645,9 +1647,11 @@ fn build_state_signals(
     session: &Session,
 ) -> StateSignals {
     let cfg = &prov.cfg.state_signals;
-    let mut signals = StateSignals::default();
-    signals.pid = session.pid;
-    signals.process_alive = session.pid.map(process_is_alive);
+    let mut signals = StateSignals {
+        pid: session.pid,
+        process_alive: session.pid.map(process_is_alive),
+        ..Default::default()
+    };
 
     // last_event_age
     if let Some(last) = events.last() {
@@ -2136,14 +2140,58 @@ mod tests {
         let s = &sessions[0];
         assert_eq!(s.provider_session_id, sid);
         assert_eq!(s.provider_name, "copilot");
-        assert_eq!(s.title, "hello world first line second");
-        assert_eq!(s.summary, "Build the TUI");
+        // `title` rule in providers/copilot.yaml prefers workspace.yaml.summary
+        // and falls back to the first user.message only when summary is empty.
+        // With summary present, title must equal the summary.
+        assert_eq!(s.title, "Build the TUI");
+        // `summary` is the metadata summary + concatenated `summary_parts`
+        // sections (see providers/copilot.yaml). The metadata must appear
+        // first, followed by the "First message" part.
+        assert!(
+            s.summary.starts_with("Build the TUI"),
+            "summary must start with the metadata summary; got: {:?}",
+            s.summary
+        );
+        assert!(
+            s.summary.contains("First message") && s.summary.contains("hello world first line"),
+            "summary must include the First message summary_part with user's \
+             first message; got: {:?}",
+            s.summary
+        );
         assert!(s.cwd.ends_with("agent-session-tui"));
         assert!(!s.updated_at.is_empty(), "updated_at missing");
 
         // Tab title from `report_intent` tool call.
         let tab = prov.tab_title(s);
         assert_eq!(tab.as_deref(), Some("Exploring codebase"));
+
+        // ── Fallback path: title = first user message when summary missing ──
+        // Reuse a second synthetic session with no summary field.
+        let sid2 = "22222222-3333-4444-5555-666666666666";
+        let sess2 = tmp.path().join(sid2);
+        fs::create_dir_all(&sess2).unwrap();
+        fs::write(
+            sess2.join("workspace.yaml"),
+            "cwd: D:\\Demo\\agent-session-tui\n",
+        )
+        .unwrap();
+        fs::write(
+            sess2.join("events.jsonl"),
+            r#"{"type":"user.message","timestamp":"2024-01-01T00:00:00Z","data":{"content":"hello world first line\nsecond"}}
+{"type":"assistant.turn_end","timestamp":"2024-01-01T00:00:02Z"}
+"#,
+        )
+        .unwrap();
+        let sessions2 = prov.discover_sessions().expect("discover_sessions 2");
+        let s2 = sessions2
+            .iter()
+            .find(|s| s.provider_session_id == sid2)
+            .expect("second session discovered");
+        assert_eq!(
+            s2.title, "hello world first line second",
+            "when workspace.yaml has no summary, title must fall back to the \
+             first user.message (with newlines stripped)"
+        );
     }
 
     /// Regression: long-running Copilot sessions can push the most recent
