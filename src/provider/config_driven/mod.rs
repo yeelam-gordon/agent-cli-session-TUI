@@ -487,7 +487,8 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     let title = truncate_str_safe(&title, 120);
 
     // summary
-    let mut summary = extract_field(prov, &cand.metadata, &kept, &cfg.fields.summary)
+    let mut summary = cfg.fields.summary.as_ref()
+        .and_then(|spec| extract_field(prov, &cand.metadata, &kept, spec))
         .unwrap_or_default();
 
     // summary_parts — labeled multi-section composition (the richer detail
@@ -530,7 +531,8 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     }
 
     // timestamps
-    let created_at = extract_timestamp(prov, &cand.metadata, &kept, &cfg.fields.created_at, cand.file_mtime.as_deref())
+    let created_at = cfg.fields.created_at.as_ref()
+        .and_then(|spec| extract_timestamp(prov, &cand.metadata, &kept, spec, cand.file_mtime.as_deref()))
         .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
     let updated_at = extract_timestamp(prov, &cand.metadata, &kept, &cfg.fields.updated_at, cand.file_mtime.as_deref())
         .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
@@ -1559,8 +1561,10 @@ mod tests {
         let s = &sessions[0];
         assert_eq!(s.provider_session_id, sid);
         assert_eq!(s.provider_name, "copilot");
-        assert_eq!(s.title, "hello world first line second");
-        assert_eq!(s.summary, "Build the TUI");
+        // Minimal YAML: title comes from metadata_field (workspace.yaml summary).
+        assert_eq!(s.title, "Build the TUI");
+        // No summary spec in minimal YAML — summary is empty.
+        assert!(s.summary.is_empty(), "summary should be empty: {:?}", s.summary);
         assert!(s.cwd.ends_with("agent-session-tui"));
         assert!(!s.updated_at.is_empty(), "updated_at missing");
 
@@ -1729,7 +1733,8 @@ mod tests {
         assert_eq!(s.provider_session_id, sid);
         assert_eq!(s.provider_name, "claude");
         assert_eq!(s.title, "first user question");
-        assert!(s.summary.starts_with("first user question"), "summary: {:?}", s.summary);
+        // No summary spec in minimal YAML — summary is empty.
+        assert!(s.summary.is_empty(), "summary should be empty: {:?}", s.summary);
         // Backtracking with a non-existent drive falls back to literal leaf.
         assert!(s.cwd.ends_with("synth-proj"), "cwd: {:?}", s.cwd);
         assert!(!s.updated_at.is_empty(), "updated_at missing");
@@ -1806,11 +1811,8 @@ mod tests {
         // Title skips the `developer` bootstrap message and picks the first
         // real user response_item, first line, truncated.
         assert_eq!(s.title, "refactor the config loader");
-        assert!(
-            s.summary.starts_with("refactor the config loader"),
-            "summary: {:?}",
-            s.summary
-        );
+        // No summary spec in minimal YAML — summary is empty.
+        assert!(s.summary.is_empty(), "summary should be empty: {:?}", s.summary);
 
         // cwd from session_meta.payload.cwd — ends with the last folder.
         assert!(s.cwd.ends_with("yaml-demo"), "cwd: {:?}", s.cwd);
@@ -1890,11 +1892,8 @@ mod tests {
         assert_eq!(s.provider_name, "qwen");
         // Title: first_line of message.parts[0].text, truncated.
         assert_eq!(s.title, "testing qwen yaml");
-        assert!(
-            s.summary.starts_with("testing qwen yaml"),
-            "summary: {:?}",
-            s.summary
-        );
+        // No summary spec in minimal YAML — summary is empty.
+        assert!(s.summary.is_empty(), "summary should be empty: {:?}", s.summary);
         // cwd from event_field (user-type line).
         assert!(s.cwd.ends_with("qwen-demo"), "cwd: {:?}", s.cwd);
         assert!(!s.updated_at.is_empty(), "updated_at missing");

@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
         .or_else(|| enabled_keys.first().cloned())
         .unwrap_or_default();
 
-    let app = App::new(enabled_keys, default_provider, config.log_max_lines);
+    let app = App::new(enabled_keys, default_provider);
     app.run(event_rx, cmd_tx).await?;
 
     Ok(())

@@ -9,18 +9,15 @@ use crossterm::{
 };
 use ratatui::{prelude::*, widgets::*};
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 
 use crate::models::{InteractionState, PersistenceState, ProcessState, Session};
 use crate::supervisor::{SupervisorCommand, SupervisorEvent};
 use crate::util::truncate_str_safe;
 
-/// Which panel has focus.
+/// Which panel has focus (list-only layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     SessionList,
-    Detail,
-    Logs,
 }
 
 /// Which view is displayed.
@@ -43,16 +40,12 @@ pub struct App {
     list_state: ListState,
     focus: Focus,
     view_mode: ViewMode,
-    log_lines: Vec<String>,
-    log_scroll: usize,
     status_message: String,
     should_quit: bool,
     provider_keys: Vec<String>,
     default_provider: String,
-    detail_scroll: u16,
     search_active: bool,
     search_query: String,
-    log_max_lines: usize,
     /// Providers that have reported in at least once. Once all are in, initial load is complete.
     seen_providers: std::collections::HashSet<String>,
     /// True once all providers have reported their first results.
@@ -70,7 +63,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(provider_keys: Vec<String>, default_provider: String, log_max_lines: usize) -> Self {
+    pub fn new(provider_keys: Vec<String>, default_provider: String) -> Self {
         let mut list_state = ListState::default();
         // No selection until all providers report in
         list_state.select(None);
@@ -100,16 +93,12 @@ impl App {
             list_state,
             focus: Focus::SessionList,
             view_mode: ViewMode::Active,
-            log_lines: vec!["Session manager started. Scanning for sessions...".into()],
-            log_scroll: 0,
             status_message: format!("Loading {} providers...", provider_count),
             should_quit: false,
             default_provider,
             provider_keys,
-            detail_scroll: 0,
             search_active: false,
             search_query: String::new(),
-            log_max_lines,
             seen_providers: std::collections::HashSet::new(),
             initial_load_complete: false,
             user_navigated: false,
@@ -268,10 +257,6 @@ impl App {
                         }
 
                         if data_changed {
-                            // If user is reading the detail pane (focused + scrolled), 
-                            // silently update data but DON'T touch filter/selection/scroll
-                            let user_reading_detail = self.focus == Focus::Detail && self.detail_scroll > 0;
-
                             let prev_selected_id = if self.user_navigated {
                                 self.selected_session()
                                     .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
@@ -285,14 +270,12 @@ impl App {
                             self.sessions = active;
                             self.hidden_sessions = hidden;
 
-                            if !user_reading_detail && (set_changed || !self.search_active) {
+                            if set_changed || !self.search_active {
                                 self.apply_filter();
 
                                 if self.initial_load_complete && !self.user_navigated {
-                                    // Initial load done, user hasn't navigated → select row 0
                                     self.selected_index = 0;
                                     self.list_state.select(Some(0));
-                                    self.detail_scroll = 0;
                                 } else if let Some((prev_provider, prev_id)) = &prev_selected_id {
                                     // User navigated → restore their position
                                     let view = self.current_view_sessions();
@@ -324,7 +307,6 @@ impl App {
                             if all_providers_in && self.list_state.selected().is_none() {
                                 self.selected_index = 0;
                                 self.list_state.select(Some(0));
-                                self.detail_scroll = 0;
                             }
                         }
 
@@ -356,15 +338,8 @@ impl App {
                     }
                     SupervisorEvent::Error(e) => {
                         self.status_message = format!("Error: {}", e);
-                        self.log_lines.push(format!("ERROR: {}", e));
                     }
                 }
-            }
-
-            // Trim log lines to configured maximum
-            if self.log_max_lines > 0 && self.log_lines.len() > self.log_max_lines {
-                let excess = self.log_lines.len() - self.log_max_lines;
-                self.log_lines.drain(..excess);
             }
 
             if self.should_quit {
@@ -410,10 +385,6 @@ impl App {
                         "🔍 Focusing: {} ({})",
                         tt, crate::util::short_id(&psid, 8)
                     );
-                    self.log_lines.push(format!(
-                        "Focusing tab: {} ({})",
-                        tt, crate::util::short_id(&psid, 8)
-                    ));
                 } else {
                     self.status_message = format!(
                         "⚠ Tab focus not available for {} sessions",
@@ -430,10 +401,6 @@ impl App {
                     "▶ Resuming: {} ({})",
                     title, crate::util::short_id(&psid, 8)
                 );
-                self.log_lines.push(format!(
-                    "Resuming: {} ({})",
-                    title, crate::util::short_id(&psid, 8)
-                ));
             }
         }
     }
@@ -469,22 +436,16 @@ impl App {
                     // Reuse the same Enter logic as normal mode
                     self.handle_enter(cmd_tx);
                 }
-                KeyCode::Tab => {
-                    // Switch to detail pane while keeping search results
-                    self.focus = Focus::Detail;
-                }
                 KeyCode::Up
                     if self.selected_index > 0 => {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
                         self.user_navigated = true;
                 }
                 KeyCode::Down
                     if self.selected_index + 1 < self.filtered_indices.len() => {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
                         self.user_navigated = true;
                 }
                 KeyCode::Backspace => {
@@ -511,18 +472,13 @@ impl App {
                     if self.selected_index > 0 => {
                         self.selected_index -= 1;
                         self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
                         self.user_navigated = true;
                 }
                 KeyCode::Down | KeyCode::Char('j')
                     if self.selected_index + 1 < self.filtered_indices.len() => {
                         self.selected_index += 1;
                         self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
                         self.user_navigated = true;
-                }
-                KeyCode::Tab => {
-                    self.focus = Focus::Detail;
                 }
                 KeyCode::Char('/') => {
                     self.search_active = true;
@@ -539,8 +495,7 @@ impl App {
                             provider_key: key.clone(),
                             cwd,
                         });
-                        self.log_lines
-                            .push(format!("Launching new {} session...", key));
+                        self.status_message = format!("Launching new {} session...", key);
                     }
                 }
                 KeyCode::Enter => {
@@ -567,8 +522,7 @@ impl App {
                                 }
                             }
                         }
-                        self.log_lines
-                            .push(format!("Archived: {}", crate::util::short_id(&psid, 8)));
+                        self.status_message = format!("Archived: {}", crate::util::short_id(&psid, 8));
                     }
                 }
                 KeyCode::BackTab => {
@@ -581,53 +535,7 @@ impl App {
                     self.list_state.select(Some(0));
                     self.search_query.clear();
                     self.apply_filter();
-                    self.log_lines.push(format!(
-                        "View: {}",
-                        match self.view_mode {
-                            ViewMode::Active => "Active sessions",
-                            ViewMode::Hidden => "Archived & hidden sessions",
-                        }
-                    ));
-                }
-                _ => {}
-            },
-            Focus::Detail => match key.code {
-                KeyCode::Tab => {
-                    self.focus = Focus::Logs;
-                }
-                KeyCode::BackTab => {
-                    self.focus = Focus::SessionList;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.detail_scroll = self.detail_scroll.saturating_add(1);
-                }
-                KeyCode::PageUp => {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(20);
-                }
-                KeyCode::PageDown => {
-                    self.detail_scroll = self.detail_scroll.saturating_add(20);
-                }
-                KeyCode::Home => {
-                    self.detail_scroll = 0;
-                }
-                KeyCode::End => {
-                    self.detail_scroll = u16::MAX; // capped during render
-                }
-                _ => {}
-            },
-            Focus::Logs => match key.code {
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.focus = Focus::SessionList;
-                }
-                KeyCode::Up => {
-                    self.log_scroll = self.log_scroll.saturating_sub(1);
-                }
-                KeyCode::Down
-                    if self.log_scroll + 1 < self.log_lines.len() => {
-                        self.log_scroll += 1;
+                    self.apply_filter();
                 }
                 _ => {}
             },
@@ -639,29 +547,14 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // Title bar
-                Constraint::Min(10),   // Main area
-                Constraint::Length(8), // Log viewer
+                Constraint::Min(10),   // Session list
                 Constraint::Length(1), // Status bar
             ])
             .split(f.area());
 
-        // Title bar
         self.draw_title_bar(f, chunks[0]);
-
-        // Main area: session list | detail
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-            .split(chunks[1]);
-
-        self.draw_session_list(f, main_chunks[0]);
-        self.draw_session_detail(f, main_chunks[1]);
-
-        // Log viewer
-        self.draw_log_viewer(f, chunks[2]);
-
-        // Status bar
-        self.draw_status_bar(f, chunks[3]);
+        self.draw_session_list(f, chunks[1]);
+        self.draw_status_bar(f, chunks[2]);
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
@@ -673,8 +566,6 @@ impl App {
                 Span::raw("  "),
                 Span::styled("⏎", hl),
                 Span::raw(" open  "),
-                Span::styled("Tab", hl),
-                Span::raw(" detail  "),
                 Span::styled("↑↓", hl),
                 Span::raw(" nav  "),
                 Span::styled("Esc", hl),
@@ -759,11 +650,7 @@ impl App {
             })
             .collect();
 
-        let border_style = if self.focus == Focus::SessionList || self.search_active {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
+        let border_style = Style::default().fg(Color::Cyan);
 
         let view_label = match self.view_mode {
             ViewMode::Active => "Sessions",
@@ -802,233 +689,6 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn draw_session_detail(&self, f: &mut Frame, area: Rect) {
-        let border_style = if self.focus == Focus::Detail {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        if let Some(session) = self.selected_session() {
-            let mut lines = vec![];
-
-            // Header
-            lines.push(Line::from(vec![
-                Span::styled("ID: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    &session.provider_session_id,
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Provider: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(&session.provider_name, Style::default().fg(Color::Cyan)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("CWD: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    session.cwd.to_string_lossy().to_string(),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("State: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!(
-                        "{} {} ({})",
-                        session.state.badge(),
-                        session.state.label(),
-                        format!("{:?}", session.state.confidence).to_lowercase()
-                    ),
-                    state_color(&session.state),
-                ),
-            ]));
-
-            if let Some(pid) = session.pid {
-                lines.push(Line::from(vec![
-                    Span::styled("PID: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}", pid), Style::default().fg(Color::White)),
-                ]));
-            }
-
-            lines.push(Line::from(vec![
-                Span::styled("Created: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(&session.created_at, Style::default().fg(Color::DarkGray)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Updated: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!(
-                        "{} ({})",
-                        &session.updated_at,
-                        format_age(&session.updated_at)
-                    ),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-
-            // Summary
-            if !session.summary.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "── Summary ──",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                for summary_line in session.summary.lines() {
-                    lines.push(Line::from(Span::raw(summary_line)));
-                }
-            }
-
-            // State reason (debug info)
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "── State Signals ──",
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines.push(Line::from(Span::styled(
-                &session.state.reason,
-                Style::default().fg(Color::DarkGray),
-            )));
-
-            // Manual word-wrap: split long lines at panel width.
-            // We can't use ratatui's Wrap because it interferes with our padding.
-            let inner_width = area.width.saturating_sub(2) as usize;
-            let inner_height = area.height.saturating_sub(2) as usize;
-
-            let mut wrapped_lines: Vec<Line<'_>> = Vec::new();
-            for line in lines {
-                // Flatten all spans into a single string for wrapping
-                let mut full_text = String::new();
-                let mut style = Style::default();
-                for span in &line.spans {
-                    full_text.push_str(&span.content);
-                    if full_text.len() == span.content.len() {
-                        style = span.style; // use first span's style
-                    }
-                }
-                full_text = full_text.replace('\t', "    ");
-
-                // Wrap the text at inner_width using unicode-width
-                if UnicodeWidthStr::width(full_text.as_str()) <= inner_width {
-                    wrapped_lines.push(Line::from(Span::styled(full_text, style)));
-                } else {
-                    // Word-wrap: split at word boundaries near inner_width
-                    let mut remaining = full_text.as_str();
-                    while !remaining.is_empty() {
-                        let mut cut = 0;
-                        let mut last_space = 0;
-                        for (i, ch) in remaining.char_indices() {
-                            let w = UnicodeWidthStr::width(&remaining[..i + ch.len_utf8()]);
-                            if w > inner_width {
-                                break;
-                            }
-                            cut = i + ch.len_utf8();
-                            if ch == ' ' || ch == '-' {
-                                last_space = cut;
-                            }
-                        }
-                        if cut == 0 {
-                            // Single char wider than panel — force 1 char
-                            cut = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                        }
-                        // Prefer breaking at word boundary
-                        let break_at = if last_space > 0 && last_space > cut / 2 {
-                            last_space
-                        } else {
-                            cut
-                        };
-                        wrapped_lines.push(Line::from(Span::styled(
-                            remaining[..break_at].to_string(),
-                            style,
-                        )));
-                        remaining = &remaining[break_at..];
-                        // Skip leading space on continuation line
-                        remaining = remaining.strip_prefix(' ').unwrap_or(remaining);
-                    }
-                }
-            }
-
-            // Pad every line with trailing spaces to fill panel width
-            for line in &mut wrapped_lines {
-                let display_width: usize = line
-                    .spans
-                    .iter()
-                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                    .sum();
-                if display_width < inner_width {
-                    line.spans
-                        .push(Span::raw(" ".repeat(inner_width - display_width)));
-                }
-            }
-            // Pad to fill visible area after scroll
-            let total_needed = inner_height + self.detail_scroll as usize;
-            while wrapped_lines.len() < total_needed {
-                wrapped_lines.push(Line::from(" ".repeat(inner_width)));
-            }
-
-            let detail = Paragraph::new(wrapped_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(border_style)
-                        .title(" Detail "),
-                )
-                .scroll((self.detail_scroll, 0));
-
-            f.render_widget(detail, area);
-        } else {
-            let empty = Paragraph::new("No session selected")
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(border_style)
-                        .title(" Detail "),
-                )
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(empty, area);
-        }
-    }
-
-    fn draw_log_viewer(&self, f: &mut Frame, area: Rect) {
-        let border_style = if self.focus == Focus::Logs {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let visible_height = area.height.saturating_sub(2) as usize;
-        let start = if self.log_lines.len() > visible_height {
-            self.log_lines.len() - visible_height
-        } else {
-            0
-        };
-
-        let log_text: Vec<Line> = self.log_lines[start..]
-            .iter()
-            .map(|l| {
-                if l.starts_with("ERROR:") {
-                    Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Red)))
-                } else {
-                    Line::from(Span::styled(
-                        l.as_str(),
-                        Style::default().fg(Color::DarkGray),
-                    ))
-                }
-            })
-            .collect();
-
-        let logs = Paragraph::new(log_text).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(" Activity Log "),
-        );
-
-        f.render_widget(logs, area);
-    }
-
     fn draw_status_bar(&self, f: &mut Frame, area: Rect) {
         let view_hint = match self.view_mode {
             ViewMode::Active => "Shift+Tab: show archived",
@@ -1048,8 +708,6 @@ impl App {
         };
         let status = Paragraph::new(Line::from(vec![
             sem_indicator,
-            Span::styled(" Tab", Style::default().fg(Color::Yellow)),
-            Span::raw(": panel  "),
             Span::styled("↑↓", Style::default().fg(Color::Yellow)),
             Span::raw(": nav  "),
             Span::styled(view_hint, Style::default().fg(Color::Gray)),
@@ -1066,6 +724,7 @@ impl App {
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn state_color(state: &crate::models::SessionState) -> Style {
     match (state.process, state.interaction) {
         (ProcessState::Running, InteractionState::WaitingInput) => Style::default()
@@ -1167,7 +826,7 @@ mod ui_logic_tests {
     }
 
     fn make_app(sessions: Vec<Session>) -> App {
-        let mut app = App::new(vec!["copilot".into()], "copilot".into(), 100);
+        let mut app = App::new(vec!["copilot".into()], "copilot".into());
         app.sessions = sessions;
         app.initial_load_complete = true;
         app.apply_filter();
@@ -1268,7 +927,7 @@ mod ui_logic_tests {
 
     #[test]
     fn app_new_starts_empty() {
-        let app = App::new(vec!["copilot".into()], "copilot".into(), 100);
+        let app = App::new(vec!["copilot".into()], "copilot".into());
         assert!(app.sessions.is_empty());
         assert!(!app.search_active);
         assert_eq!(app.selected_index, 0);
@@ -1426,30 +1085,6 @@ mod ui_logic_tests {
         assert!(app.search_query.is_empty());
     }
 
-    // ── Focus cycling ────────────────────────────────────────────────
-
-    #[test]
-    fn tab_cycles_focus_forward() {
-        let mut app = make_app(vec![mock_running("1", "A")]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        assert_eq!(app.focus, Focus::SessionList);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
-        assert_eq!(app.focus, Focus::Detail);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
-        assert_eq!(app.focus, Focus::Logs);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tx);
-        assert_eq!(app.focus, Focus::SessionList);
-    }
-
-    #[test]
-    fn backtab_in_detail_goes_to_session_list() {
-        let mut app = make_app(vec![mock_running("1", "A")]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        app.focus = Focus::Detail;
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &tx);
-        assert_eq!(app.focus, Focus::SessionList);
-    }
-
     // ── View mode toggle ─────────────────────────────────────────────
 
     #[test]
@@ -1541,72 +1176,6 @@ mod ui_logic_tests {
         assert!(app.should_quit);
     }
 
-    // ── Detail scroll ────────────────────────────────────────────────
-
-    #[test]
-    fn detail_scroll_up_down() {
-        let mut app = make_app(vec![mock_running("1", "A")]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        app.focus = Focus::Detail;
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 1);
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 2);
-        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 1);
-    }
-
-    #[test]
-    fn detail_scroll_home_resets() {
-        let mut app = make_app(vec![mock_running("1", "A")]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        app.focus = Focus::Detail;
-        app.detail_scroll = 50;
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 0);
-    }
-
-    #[test]
-    fn detail_scroll_end_sets_max() {
-        let mut app = make_app(vec![mock_running("1", "A")]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        app.focus = Focus::Detail;
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, u16::MAX);
-    }
-
-    #[test]
-    fn detail_page_up_down() {
-        let mut app = make_app(vec![mock_running("1", "A")]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        app.focus = Focus::Detail;
-        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 20);
-        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 0);
-    }
-
-    // ── Log scroll ───────────────────────────────────────────────────
-
-    #[test]
-    fn log_scroll_respects_bounds() {
-        let mut app = make_app(vec![]);
-        app.focus = Focus::Logs;
-        app.log_lines = vec!["line1".into(), "line2".into(), "line3".into()];
-        let (tx, _rx) = mpsc::unbounded_channel();
-        // Can scroll down
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.log_scroll, 1);
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.log_scroll, 2);
-        // Can't scroll past end
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.log_scroll, 2, "should not scroll past last line");
-        // Can scroll back up
-        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
-        assert_eq!(app.log_scroll, 1);
-    }
-
     // ── selected_session ─────────────────────────────────────────────
 
     #[test]
@@ -1630,20 +1199,6 @@ mod ui_logic_tests {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         let s = app.selected_session().expect("should have selection");
         assert_eq!(s.title, "Second");
-    }
-
-    // ── Navigation resets detail scroll ──────────────────────────────
-
-    #[test]
-    fn navigate_resets_detail_scroll() {
-        let mut app = make_app(vec![
-            mock_running("1", "A"),
-            mock_waiting("2", "B"),
-        ]);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        app.detail_scroll = 10;
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 0, "navigating should reset detail scroll");
     }
 
     // ── New session command ──────────────────────────────────────────
@@ -1703,20 +1258,7 @@ mod ui_invariant_tests {
     }
 
     #[test]
-    fn detail_panel_pads_lines_to_fill() {
-        let code = code_section();
-        assert!(
-            code.contains("inner_width"),
-            "draw_session_detail must pad lines to fill panel width (prevents ghost characters)"
-        );
-        assert!(
-            code.contains("inner_height"),
-            "draw_session_detail must pad rows to fill panel height"
-        );
-    }
-
-    #[test]
-    fn no_clear_widget_in_detail() {
+    fn no_clear_widget() {
         let code = code_section();
         assert!(
             !code.contains("render_widget(Clear"),

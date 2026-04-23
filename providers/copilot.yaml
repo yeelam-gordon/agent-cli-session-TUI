@@ -1,32 +1,22 @@
-# Copilot CLI provider — declarative config.
-#
-# Fresh re-investigation of on-disk layout (~/.copilot/session-state/<UUID>/):
-#   - workspace.yaml         — session metadata (cwd, summary)
-#   - events.jsonl           — append-only event stream
-#   - inuse.<PID>.lock       — per-process live-lock file(s)
-#
-# Dead code INTENTIONALLY dropped:
-#   - human.message fallback (never observed in real sessions)
-#   - plan.md parsing (rare; not worth special-casing)
-
+# Copilot CLI — minimal provider (list-only TUI, no detail pane).
 name: copilot
 display_name: Copilot
 
 capabilities:
   supports_resume: true
   supports_discovery: true
-  supports_logs: true
+  supports_logs: false
   supports_wait_detection: true
   supports_kill: true
   supports_archive: true
-  supports_summary_extraction: true
+  supports_summary_extraction: false
 
 discovery:
   base_dir: ${HOME}/.copilot/session-state
   strategy: dir_per_session
   metadata_file: workspace.yaml
   events_file: events.jsonl
-  tail_bytes: 2097152          # 512 KB; enough for tab-title + last messages
+  tail_bytes: 2097152
   lockfile_pattern: "inuse.*.lock"
 
 session_id:
@@ -38,83 +28,23 @@ cwd:
 
 events:
   format: jsonl
-  filter_out: []              # no noise events in Copilot's stream
+  filter_out: []
 
 fields:
   discard_if_empty: true
   title:
-    # Prefer the workspace.yaml summary (Copilot writes a human-readable
-    # summary there). Fall back to the first user.message event if no
-    # summary has been written yet.
     strategy: metadata_field
     path: summary
-    transforms:
-      - strip_newlines
-      - trim
-      - truncate:60
+    transforms: [strip_newlines, trim, "truncate:60"]
     fallback:
       - strategy: first_matching_event
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
-        transforms:
-          - strip_newlines
-          - trim
-          - truncate:60
-  summary:
-    strategy: metadata_field
-    path: summary
-    transforms:
-      - trim
-      - truncate:500
-  summary_parts:
-    - name: first_user
-      label: "── First message ──"
-      spec:
-        strategy: first_matching_event
-        where: 'type == "user.message"'
-        path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
-    - name: last_user
-      label: "── Last user message ──"
-      skip_if_same_as: first_user
-      spec:
-        strategy: last_matching_event
-        where: 'type == "user.message"'
-        path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
-    - name: prev_assistant
-      label: "── Previous response ──"
-      spec:
-        strategy: nth_from_end_matching_event
-        where: 'type == "assistant.message" and data.content != null and data.content != "" and (not data.toolRequests or len(data.content) > 100)'
-        nth: 2
-        path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
-    - name: last_assistant
-      label: "── Last Copilot response ──"
-      spec:
-        strategy: last_matching_event
-        where: 'type == "assistant.message" and data.content != null and data.content != "" and (not data.toolRequests or len(data.content) > 100)'
-        path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
-  created_at:
-    strategy: first_event_field
-    path: timestamp
-    fallback:
-      - strategy: file_mtime
+        transforms: [strip_newlines, trim, "truncate:60"]
   updated_at:
-    strategy: file_mtime       # events.jsonl mtime = real-time activity
+    strategy: file_mtime
 
 state_signals:
-  # Scanned most-recent-first; the first event type that matches wins.
   last_event_map:
     "assistant.turn_start":     { interaction: busy }
     "assistant.turn_end":       { interaction: waiting_input }
@@ -128,7 +58,6 @@ state_signals:
 process_match:
   strategy: lockfile
   lockfile_pattern: "inuse.*.lock"
-  # Capture the PID from filename: `inuse.12345.lock` → `12345`.
   pid_extract_regex: 'inuse\.(\d+)\.lock'
 
 tab_title:

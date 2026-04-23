@@ -196,8 +196,13 @@ pub enum EventFormat {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FieldsConfig {
     pub title: FieldSpec,
-    pub summary: FieldSpec,
-    pub created_at: TimestampSpec,
+    /// Summary extraction spec. Optional — when absent, Session.summary is
+    /// left empty (suitable for list-only TUI with no detail pane).
+    #[serde(default)]
+    pub summary: Option<FieldSpec>,
+    /// Created-at timestamp. Optional — when absent, falls back to empty string.
+    #[serde(default)]
+    pub created_at: Option<TimestampSpec>,
     pub updated_at: TimestampSpec,
     /// Optional labeled parts appended to the primary `summary` value.
     /// When present, the final Session.summary is composed by appending each
