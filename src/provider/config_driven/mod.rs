@@ -1088,7 +1088,7 @@ fn build_state_signals(
     let cfg = &prov.cfg.state_signals;
     let mut signals = StateSignals::default();
     signals.pid = session.pid;
-    signals.process_alive = session.pid.map(process_is_alive);
+    signals.process_alive = Some(session.pid.map(process_is_alive).unwrap_or(false));
 
     // last_event_age
     if let Some(last) = events.last() {
