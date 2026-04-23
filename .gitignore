@@ -13,3 +13,5 @@ sessions.json
 
 semantic-plugin/target/
 semantic-plugin/Cargo.lock
+
+out/

@@ -11,6 +11,30 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  validate-config-template:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Generate per-OS configs
+      run: |
+        set -euo pipefail
+        mkdir -p out
+        for target in \
+          x86_64-pc-windows-msvc \
+          aarch64-pc-windows-msvc \
+          x86_64-unknown-linux-gnu \
+          aarch64-unknown-linux-gnu \
+          x86_64-apple-darwin \
+          aarch64-apple-darwin
+        do
+          python scripts/generate_config.py "$target" config.toml.template "out/$target.toml"
+        done
+    - name: Validate configs
+      run: python scripts/validate_configs.py out
+
   build-and-test:
     strategy:
       matrix:
