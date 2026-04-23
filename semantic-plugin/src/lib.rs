@@ -52,6 +52,18 @@ pub extern "C" fn semantic_dim() -> c_int {
     *DIM.lock().unwrap()
 }
 
+/// Unload the embedding model, freeing all weights and ONNX runtime state.
+/// Safe to call even if never initialized. After unload, `semantic_init`
+/// can be called again to reload (useful for reducing idle memory).
+/// Returns 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn semantic_unload() -> c_int {
+    // Dropping the model releases its ~90MB of weights + ONNX session
+    // back to the OS allocator.
+    *MODEL.lock().unwrap() = None;
+    0
+}
+
 /// Embed a single text string.
 /// `text` is a null-terminated UTF-8 C string.
 /// `out_vec` is a pre-allocated float buffer of at least `max_dim` elements.
