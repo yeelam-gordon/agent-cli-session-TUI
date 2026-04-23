@@ -120,11 +120,30 @@ state_signals:
 # where the UUID is a positional argument (no `--flag` prefix). The
 # cmdline substring "qwen" matches either the executable name or the
 # qwen.js script path, which is how WMI-based discovery finds it.
-process_match:
-  strategy: cmdline
+# NOTE on `recently_active_secs`: Fresh `qwen` runs (no `--resume`) do NOT
+# include the session UUID in their cmdline — qwen generates the UUID
+# internally after launch. So `positional_uuid` only matches *resumed*
+# sessions. For fresh sessions we depend entirely on the recency fallback
+# that pairs any unclaimed qwen process with the most-recently-updated
+# unmatched session. 15s was far too tight (any idle session where the
+# user is reading/thinking would fall outside the window and display as
+# ⚪ Stopped even while its qwen process is alive). 1800s matches
+# `state_signals.idle_threshold_seconds` — if a session is still within
+# the "waiting_input" window it's eligible for a process claim.
+liveness_detection:
   executable: qwen
-  id_match_kind: positional_uuid
-  recently_active_secs: 15
+  strategies:
+    # 1. Resumed sessions carry the UUID as a positional arg.
+    - strategy: cmdline_positional_uuid
+    # 2. Fresh sessions do NOT carry the UUID anywhere on disk or cmdline, so
+    #    match by the WT tab title that qwen sets via OSC 2 (its "subject" —
+    #    derived from the first user message, same value as our fields.title).
+    - strategy: tab_title_match
+      fuzzy: contains
+    # 3. Last-resort: recently-active within 30m. Low specificity; only fires
+    #    when the tab title has been cleared/overwritten externally.
+    - strategy: recently_active
+      within_secs: 1800
 
 # Qwen sets the terminal tab title to the cwd folder basename; we do
 # the same when launching new tabs, so reuse the shared cwd_basename

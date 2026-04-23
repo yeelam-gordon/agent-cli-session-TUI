@@ -14,8 +14,10 @@ pub mod schema;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::ProviderConfig as AppProviderConfig;
@@ -23,22 +25,119 @@ use crate::models::{
     ActivitySource, Confidence, HealthState, InteractionState, PersistenceState,
     ProcessState, ProviderCapabilities, Session, SessionState, StateSignals,
 };
-use crate::process_info::{discover_processes, extract_flag_value};
-use crate::provider::{Provider, SessionDetail};
+use crate::process_info::{discover_processes, extract_flag_value, ProcessEntry};
+use crate::provider::{PagedSessions, Provider, SessionDetail};
 use crate::util::truncate_str_safe;
 
 use eval::{Expr, ExprCache};
 use schema::*;
+use std::collections::{HashMap, HashSet};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ConfigDrivenProvider
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Cached discovery result for a single session. If the events file's mtime
+/// hasn't changed since we last parsed it, we skip the tail-read + parse
+/// entirely and reuse the stored `Session`.
+struct CachedScan {
+    mtime_raw: Option<SystemTime>,
+    session: Session,
+}
+
+/// On-disk form of `CachedScan`. SystemTime isn't serde-native, so we persist
+/// as u64 millis since UNIX_EPOCH.
+#[derive(Serialize, Deserialize)]
+struct PersistedScan {
+    mtime_ms: Option<u64>,
+    session: Session,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedCache {
+    /// Bump this if `Session` layout changes incompatibly.
+    version: u32,
+    entries: HashMap<String, PersistedScan>,
+}
+
+const SCAN_CACHE_VERSION: u32 = 1;
+
+fn systime_to_ms(t: SystemTime) -> Option<u64> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
+}
+
+fn ms_to_systime(ms: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(ms)
+}
+
+fn scan_cache_path(provider_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("agent-session-tui-scan-{}.json", provider_name))
+}
+
+fn load_scan_cache_from_disk(provider_name: &str) -> HashMap<String, CachedScan> {
+    let path = scan_cache_path(provider_name);
+    let Ok(text) = std::fs::read_to_string(&path) else { return HashMap::new(); };
+    let Ok(pc) = serde_json::from_str::<PersistedCache>(&text) else {
+        crate::log::info(&format!(
+            "scan_cache: discarded unreadable cache at {:?}",
+            path
+        ));
+        return HashMap::new();
+    };
+    if pc.version != SCAN_CACHE_VERSION {
+        crate::log::info(&format!(
+            "scan_cache: version mismatch (got {}, want {}) — discarding",
+            pc.version, SCAN_CACHE_VERSION
+        ));
+        return HashMap::new();
+    }
+    let mut out = HashMap::with_capacity(pc.entries.len());
+    for (k, v) in pc.entries {
+        out.insert(
+            k,
+            CachedScan {
+                mtime_raw: v.mtime_ms.map(ms_to_systime),
+                session: v.session,
+            },
+        );
+    }
+    crate::log::info(&format!(
+        "scan_cache: loaded {} entries from {:?}",
+        out.len(),
+        path
+    ));
+    out
+}
+
+fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedScan>) {
+    let path = scan_cache_path(provider_name);
+    let tmp = path.with_extension("json.tmp");
+    let entries: HashMap<String, PersistedScan> = cache
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                PersistedScan {
+                    mtime_ms: v.mtime_raw.and_then(systime_to_ms),
+                    session: v.session.clone(),
+                },
+            )
+        })
+        .collect();
+    let pc = PersistedCache { version: SCAN_CACHE_VERSION, entries };
+    let Ok(text) = serde_json::to_string(&pc) else { return; };
+    if std::fs::write(&tmp, text).is_err() { return; }
+    let _ = std::fs::rename(&tmp, &path);
+}
 
 pub struct ConfigDrivenProvider {
     cfg: ProviderConfigFile,
     app_cfg: AppProviderConfig,
     base_dir: PathBuf,
     cache: Mutex<ExprCache>,
+    /// mtime-keyed cache of parsed `Session`s keyed by provider_session_id.
+    /// Used by `discover_sessions` to skip heavy re-parse of unchanged sessions.
+    scan_cache: Mutex<HashMap<String, CachedScan>>,
 }
 
 impl ConfigDrivenProvider {
@@ -57,11 +156,13 @@ impl ConfigDrivenProvider {
             .as_ref()
             .map(|p| expand_path(&p.to_string_lossy()))
             .unwrap_or_else(|| expand_path(&cfg.discovery.base_dir));
+        let scan_cache = load_scan_cache_from_disk(&cfg.name);
         Ok(Self {
             cfg,
             app_cfg: app_cfg.clone(),
             base_dir,
             cache: Mutex::new(ExprCache::new()),
+            scan_cache: Mutex::new(scan_cache),
         })
     }
 
@@ -103,18 +204,103 @@ impl Provider for ConfigDrivenProvider {
     }
 
     fn discover_sessions(&self) -> Result<Vec<Session>> {
-        let candidates = list_candidates(&self.cfg.discovery, &self.base_dir)?;
-        let mut out = Vec::with_capacity(candidates.len());
-        for cand in candidates {
+        // Cheap stat-only enumeration (no tail reads, no YAML parses).
+        let stubs = list_stubs(&self.cfg.discovery, &self.base_dir)?;
+
+        let mut cache = self.scan_cache.lock().unwrap();
+        let mut seen: HashSet<String> = HashSet::with_capacity(stubs.len());
+        let mut out: Vec<Session> = Vec::with_capacity(stubs.len());
+        let (mut hits, mut misses, mut dropped) = (0usize, 0usize, 0usize);
+
+        for stub in &stubs {
+            seen.insert(stub.session_id.clone());
+
+            // Cache hit: same session_id AND same mtime → reuse parsed Session.
+            if let Some(entry) = cache.get(&stub.session_id) {
+                if entry.mtime_raw == stub.mtime_raw {
+                    out.push(entry.session.clone());
+                    hits += 1;
+                    continue;
+                }
+            }
+
+            // Cache miss or mtime changed: do the heavy read + parse.
+            misses += 1;
+            let cand = finalize_stub(stub);
             match parse_session(self, &cand) {
-                Ok(Some(s)) => out.push(s),
-                Ok(None) => {} // filtered
-                Err(_e) => { /* ignore one bad session */ }
+                Ok(Some(s)) => {
+                    cache.insert(
+                        stub.session_id.clone(),
+                        CachedScan { mtime_raw: stub.mtime_raw, session: s.clone() },
+                    );
+                    out.push(s);
+                }
+                Ok(None) => {
+                    // Filtered out (e.g. empty session) — ensure no stale cache entry.
+                    cache.remove(&stub.session_id);
+                    dropped += 1;
+                }
+                Err(_) => {
+                    cache.remove(&stub.session_id);
+                    dropped += 1;
+                }
             }
         }
-        // most recent first
+
+        // Evict cache entries for sessions that no longer exist on disk.
+        cache.retain(|k, _| seen.contains(k));
+
+        crate::log::info(&format!(
+            "Provider '{}' scan cache: total={} hits={} misses={} dropped={}",
+            self.cfg.name,
+            stubs.len(),
+            hits,
+            misses,
+            dropped
+        ));
+
+        // Persist if anything changed this scan (misses, drops, or size shrank
+        // via retain()). Hits-only scans skip disk I/O.
+        let mutated = misses > 0 || dropped > 0 || cache.len() != hits + misses;
+        if mutated {
+            save_scan_cache_to_disk(&self.cfg.name, &cache);
+        }
+        drop(cache);
+
         out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(out)
+    }
+
+    /// Fast-path paged discovery.
+    ///
+    /// Does a cheap stat-only enumeration of all candidates (no tail reads, no
+    /// YAML parses), sorts by file mtime descending, then only tail-reads and
+    /// parses the requested page. This avoids the 2MB×N tail read that makes
+    /// full discovery expensive.
+    ///
+    /// Note: `total` is the candidate count (pre-parse). Some candidates may
+    /// filter out after parse (e.g., no user interaction), so the actual
+    /// returned `sessions.len()` may be smaller than `limit`.
+    fn discover_sessions_paged(&self, offset: usize, limit: usize) -> Result<PagedSessions> {
+        // Stat-only enumeration to get total candidate count for `has_more`.
+        let total_candidates = count_candidates(&self.cfg.discovery, &self.base_dir)?;
+
+        // Load only (offset+limit) candidates by mtime-desc.
+        let take = offset.saturating_add(limit);
+        let candidates = list_candidates(&self.cfg.discovery, &self.base_dir, Some(take))?;
+
+        let mut parsed: Vec<Session> = Vec::with_capacity(candidates.len());
+        for cand in candidates {
+            match parse_session(self, &cand) {
+                Ok(Some(s)) => parsed.push(s),
+                _ => {}
+            }
+        }
+        parsed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        let sessions: Vec<Session> = parsed.into_iter().skip(offset).take(limit).collect();
+        let has_more = total_candidates > offset + sessions.len();
+        Ok(PagedSessions { sessions, total: total_candidates, has_more })
     }
 
     fn match_processes(&self, sessions: &mut [Session]) -> Result<()> {
@@ -149,6 +335,10 @@ impl Provider for ConfigDrivenProvider {
                 .cwd
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string());
+        }
+        if let TabTitleConfig::FromTitle = tab {
+            let t = session.title.trim();
+            return if t.is_empty() { None } else { Some(t.to_string()) };
         }
         let state_dir = session.state_dir.as_deref()?;
         // Try configured tail first (fast path). If the required event (e.g. a
@@ -212,9 +402,144 @@ struct Candidate {
 // Discovery dispatch
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Self-describing stub: everything needed to finalize into a Candidate
+/// without doing heavy I/O upfront. Produced by `list_stubs`; consumed by
+/// `finalize_stub` on cache miss.
+struct SessionStub {
+    session_id: String,
+    /// Returned as `Candidate.path` — the session's dir (DirPerSession) or
+    /// the session's file (FilePerSession/DatePartitioned).
+    path: PathBuf,
+    /// The JSONL/log file whose mtime is authoritative and whose tail we read.
+    events_path: PathBuf,
+    /// Optional YAML metadata file alongside the events file (DirPerSession).
+    metadata_path: Option<PathBuf>,
+    /// Tail window for the events read.
+    tail_bytes: usize,
+    /// Raw mtime used for cache key comparison. `None` if stat failed.
+    mtime_raw: Option<SystemTime>,
+    /// Formatted mtime string (for `file_mtime` field strategy).
+    mtime_str: Option<String>,
+}
+
+/// Cheap enumeration of session stubs. Stats filesystem only — no tail reads,
+/// no YAML parses, no JSONL parses. Used by `discover_sessions` to drive the
+/// mtime-keyed scan cache.
+fn list_stubs(disc: &DiscoveryConfig, base_dir: &Path) -> Result<Vec<SessionStub>> {
+    if !base_dir.exists() {
+        return Ok(vec![]);
+    }
+    match &disc.strategy {
+        DiscoveryStrategy::DirPerSession {
+            metadata_file,
+            events_file,
+            tail_bytes,
+            lockfile_pattern: _,
+        } => {
+            let mut out = Vec::new();
+            for entry in std::fs::read_dir(base_dir)?.flatten() {
+                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { continue; }
+                let dir = entry.path();
+                let session_id = dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if session_id.is_empty() { continue; }
+                let events_path = dir.join(events_file);
+                let (mtime_raw, mtime_str) = stat_mtime_pair(&events_path);
+                let metadata_path = metadata_file.as_deref().map(|name| dir.join(name));
+                out.push(SessionStub {
+                    session_id,
+                    path: dir,
+                    events_path,
+                    metadata_path,
+                    tail_bytes: *tail_bytes,
+                    mtime_raw,
+                    mtime_str,
+                });
+            }
+            Ok(out)
+        }
+        DiscoveryStrategy::FilePerSession {
+            glob,
+            tail_bytes,
+            hide_paths_glob,
+        } => {
+            let mut stubs: Vec<FileStub> = Vec::new();
+            stat_files_recursive(base_dir, base_dir, glob, hide_paths_glob, &mut stubs);
+            Ok(stubs
+                .into_iter()
+                .map(|s| SessionStub {
+                    session_id: s.session_id,
+                    events_path: s.path.clone(),
+                    path: s.path,
+                    metadata_path: None,
+                    tail_bytes: *tail_bytes,
+                    mtime_raw: s.mtime_raw,
+                    mtime_str: s.mtime_str,
+                })
+                .collect())
+        }
+        DiscoveryStrategy::DatePartitioned { pattern: _, tail_bytes } => {
+            let mut out = Vec::new();
+            for yr in std::fs::read_dir(base_dir)?.flatten() {
+                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
+                for mo in std::fs::read_dir(yr.path()).ok().into_iter().flatten().flatten() {
+                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
+                    for day in std::fs::read_dir(mo.path()).ok().into_iter().flatten().flatten() {
+                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
+                        for file in std::fs::read_dir(day.path()).ok().into_iter().flatten().flatten() {
+                            let p = file.path();
+                            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+                            let session_id = p
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(|s| {
+                                    s.rsplit('-').take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("-")
+                                })
+                                .unwrap_or_default();
+                            if session_id.is_empty() { continue; }
+                            let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
+                            out.push(SessionStub {
+                                session_id,
+                                events_path: p.clone(),
+                                path: p,
+                                metadata_path: None,
+                                tail_bytes: *tail_bytes,
+                                mtime_raw,
+                                mtime_str,
+                            });
+                        }
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Heavy finalize of one stub: reads YAML metadata (if any) + tail of events
+/// file, returns a Candidate ready for `parse_session`.
+fn finalize_stub(stub: &SessionStub) -> Candidate {
+    let metadata = stub.metadata_path.as_ref().and_then(|p| {
+        let text = std::fs::read_to_string(p).ok()?;
+        serde_yaml::from_str::<Value>(&text).ok()
+    });
+    let events = read_jsonl_tail(&stub.events_path, stub.tail_bytes).unwrap_or_default();
+    Candidate {
+        session_id: stub.session_id.clone(),
+        path: stub.path.clone(),
+        metadata,
+        events,
+        file_mtime: stub.mtime_str.clone(),
+    }
+}
+
 fn list_candidates(
     disc: &DiscoveryConfig,
     base_dir: &Path,
+    limit: Option<usize>,
 ) -> Result<Vec<Candidate>> {
     match &disc.strategy {
         DiscoveryStrategy::DirPerSession {
@@ -222,16 +547,78 @@ fn list_candidates(
             events_file,
             tail_bytes,
             lockfile_pattern: _,
-        } => list_dir_per_session(base_dir, metadata_file.as_deref(), events_file, *tail_bytes),
+        } => list_dir_per_session(base_dir, metadata_file.as_deref(), events_file, *tail_bytes, limit),
         DiscoveryStrategy::FilePerSession {
             glob,
             tail_bytes,
             hide_paths_glob,
-        } => list_file_per_session(base_dir, glob, *tail_bytes, hide_paths_glob),
+        } => list_file_per_session(base_dir, glob, *tail_bytes, hide_paths_glob, limit),
         DiscoveryStrategy::DatePartitioned { pattern, tail_bytes } => {
-            list_date_partitioned(base_dir, pattern, *tail_bytes)
+            list_date_partitioned(base_dir, pattern, *tail_bytes, limit)
         }
     }
+}
+
+/// Cheap count of candidate dirs/files without tail reads or YAML parses.
+/// Used by paged discovery to compute `total` / `has_more`.
+fn count_candidates(disc: &DiscoveryConfig, base_dir: &Path) -> Result<usize> {
+    if !base_dir.exists() {
+        return Ok(0);
+    }
+    match &disc.strategy {
+        DiscoveryStrategy::DirPerSession { .. } => {
+            let mut n = 0;
+            for entry in std::fs::read_dir(base_dir)?.flatten() {
+                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    if entry.file_name().to_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                        n += 1;
+                    }
+                }
+            }
+            Ok(n)
+        }
+        DiscoveryStrategy::FilePerSession { glob, hide_paths_glob, .. } => {
+            let mut stubs: Vec<FileStub> = Vec::new();
+            stat_files_recursive(base_dir, base_dir, glob, hide_paths_glob, &mut stubs);
+            Ok(stubs.len())
+        }
+        DiscoveryStrategy::DatePartitioned { .. } => {
+            let mut n = 0;
+            for yr in std::fs::read_dir(base_dir)?.flatten() {
+                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
+                for mo in std::fs::read_dir(yr.path()).ok().into_iter().flatten().flatten() {
+                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
+                    for day in std::fs::read_dir(mo.path()).ok().into_iter().flatten().flatten() {
+                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
+                        for file in std::fs::read_dir(day.path()).ok().into_iter().flatten().flatten() {
+                            let p = file.path();
+                            if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(n)
+        }
+    }
+}
+
+/// Cheap stat returning both the SystemTime (for sort) and RFC3339 string
+/// (for the Candidate). One syscall.
+fn stat_mtime_pair(p: &Path) -> (Option<std::time::SystemTime>, Option<String>) {
+    let Ok(md) = std::fs::metadata(p) else { return (None, None); };
+    let Ok(t) = md.modified() else { return (None, None); };
+    let dt: chrono::DateTime<chrono::Local> = t.into();
+    (Some(t), Some(dt.to_rfc3339()))
+}
+
+/// Stub for a FilePerSession candidate — lightweight result of the stat pass.
+struct FileStub {
+    path: PathBuf,
+    session_id: String,
+    mtime_raw: Option<std::time::SystemTime>,
+    mtime_str: Option<String>,
 }
 
 fn list_dir_per_session(
@@ -239,11 +626,21 @@ fn list_dir_per_session(
     metadata_file: Option<&str>,
     events_file: &str,
     tail_bytes: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<Candidate>> {
     if !base.exists() {
         return Ok(vec![]);
     }
-    let mut out = Vec::new();
+
+    // Phase A: cheap stat-only pass (no tail reads, no YAML parses).
+    struct DirStub {
+        dir: PathBuf,
+        session_id: String,
+        events_path: PathBuf,
+        mtime_raw: Option<std::time::SystemTime>,
+        mtime_str: Option<String>,
+    }
+    let mut stubs: Vec<DirStub> = Vec::new();
     for entry in std::fs::read_dir(base)?.flatten() {
         if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
             continue;
@@ -251,25 +648,32 @@ fn list_dir_per_session(
         let dir = entry.path();
         let session_id = dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
         if session_id.is_empty() { continue; }
+        let events_path = dir.join(events_file);
+        let (mtime_raw, mtime_str) = stat_mtime_pair(&events_path);
+        stubs.push(DirStub { dir, session_id, events_path, mtime_raw, mtime_str });
+    }
 
-        // metadata
+    // Phase B: sort by mtime desc and truncate if limit requested.
+    if limit.is_some() {
+        stubs.sort_by(|a, b| b.mtime_raw.cmp(&a.mtime_raw));
+        if let Some(n) = limit { stubs.truncate(n); }
+    }
+
+    // Phase C: heavy reads — tail events + metadata YAML — only for surviving stubs.
+    let mut out = Vec::with_capacity(stubs.len());
+    for s in stubs {
         let metadata = metadata_file.and_then(|name| {
-            let p = dir.join(name);
+            let p = s.dir.join(name);
             let text = std::fs::read_to_string(&p).ok()?;
             serde_yaml::from_str::<Value>(&text).ok()
         });
-
-        // events — tail read
-        let events_path = dir.join(events_file);
-        let events = read_jsonl_tail(&events_path, tail_bytes).unwrap_or_default();
-        let file_mtime = file_mtime_rfc3339(&events_path);
-
+        let events = read_jsonl_tail(&s.events_path, tail_bytes).unwrap_or_default();
         out.push(Candidate {
-            session_id,
-            path: dir,
+            session_id: s.session_id,
+            path: s.dir,
             metadata,
             events,
-            file_mtime,
+            file_mtime: s.mtime_str,
         });
     }
     Ok(out)
@@ -280,22 +684,43 @@ fn list_file_per_session(
     glob_pat: &str,
     tail_bytes: usize,
     hide_globs: &[String],
+    limit: Option<usize>,
 ) -> Result<Vec<Candidate>> {
     if !base.exists() {
         return Ok(vec![]);
     }
-    let mut out = Vec::new();
-    collect_files_recursive(base, base, glob_pat, hide_globs, &mut out, tail_bytes);
+
+    // Phase A: stat-only enumeration.
+    let mut stubs: Vec<FileStub> = Vec::new();
+    stat_files_recursive(base, base, glob_pat, hide_globs, &mut stubs);
+
+    // Phase B: sort by mtime desc and truncate if limit requested.
+    if limit.is_some() {
+        stubs.sort_by(|a, b| b.mtime_raw.cmp(&a.mtime_raw));
+        if let Some(n) = limit { stubs.truncate(n); }
+    }
+
+    // Phase C: heavy tail reads only for survivors.
+    let mut out = Vec::with_capacity(stubs.len());
+    for s in stubs {
+        let events = read_jsonl_tail(&s.path, tail_bytes).unwrap_or_default();
+        out.push(Candidate {
+            session_id: s.session_id,
+            path: s.path,
+            metadata: None,
+            events,
+            file_mtime: s.mtime_str,
+        });
+    }
     Ok(out)
 }
 
-fn collect_files_recursive(
+fn stat_files_recursive(
     root: &Path,
     dir: &Path,
     glob_pat: &str,
     hide_globs: &[String],
-    out: &mut Vec<Candidate>,
-    tail_bytes: usize,
+    out: &mut Vec<FileStub>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -305,7 +730,7 @@ fn collect_files_recursive(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            collect_files_recursive(root, &p, glob_pat, hide_globs, out, tail_bytes);
+            stat_files_recursive(root, &p, glob_pat, hide_globs, out);
             continue;
         }
         if !matches_simple_glob(&p, root, glob_pat) {
@@ -320,15 +745,8 @@ fn collect_files_recursive(
             .unwrap_or("")
             .to_string();
         if session_id.is_empty() { continue; }
-        let events = read_jsonl_tail(&p, tail_bytes).unwrap_or_default();
-        let file_mtime = file_mtime_rfc3339(&p);
-        out.push(Candidate {
-            session_id,
-            path: p,
-            metadata: None,
-            events,
-            file_mtime,
-        });
+        let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
+        out.push(FileStub { path: p, session_id, mtime_raw, mtime_str });
     }
 }
 
@@ -336,12 +754,15 @@ fn list_date_partitioned(
     base: &Path,
     _pattern: &str,
     tail_bytes: usize,
+    limit: Option<usize>,
 ) -> Result<Vec<Candidate>> {
     // For Codex: YYYY/MM/DD/*.jsonl. We just walk 3 levels deep.
     if !base.exists() {
         return Ok(vec![]);
     }
-    let mut out = Vec::new();
+
+    // Phase A: stat-only enumeration across YYYY/MM/DD.
+    let mut stubs: Vec<FileStub> = Vec::new();
     for yr in std::fs::read_dir(base)?.flatten() {
         if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
         for mo in std::fs::read_dir(yr.path()).ok().into_iter().flatten().flatten() {
@@ -360,18 +781,30 @@ fn list_date_partitioned(
                         })
                         .unwrap_or_default();
                     if session_id.is_empty() { continue; }
-                    let events = read_jsonl_tail(&p, tail_bytes).unwrap_or_default();
-                    let file_mtime = file_mtime_rfc3339(&p);
-                    out.push(Candidate {
-                        session_id,
-                        path: p,
-                        metadata: None,
-                        events,
-                        file_mtime,
-                    });
+                    let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
+                    stubs.push(FileStub { path: p, session_id, mtime_raw, mtime_str });
                 }
             }
         }
+    }
+
+    // Phase B: sort + truncate if limit.
+    if limit.is_some() {
+        stubs.sort_by(|a, b| b.mtime_raw.cmp(&a.mtime_raw));
+        if let Some(n) = limit { stubs.truncate(n); }
+    }
+
+    // Phase C: heavy tail reads only for survivors.
+    let mut out = Vec::with_capacity(stubs.len());
+    for s in stubs {
+        let events = read_jsonl_tail(&s.path, tail_bytes).unwrap_or_default();
+        out.push(Candidate {
+            session_id: s.session_id,
+            path: s.path,
+            metadata: None,
+            events,
+            file_mtime: s.mtime_str,
+        });
     }
     Ok(out)
 }
@@ -897,19 +1330,52 @@ fn extract_timestamp(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Process matching
+// Liveness detection — strategy chain dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn match_processes_dispatch(
     prov: &ConfigDrivenProvider,
     sessions: &mut [Session],
 ) -> Result<()> {
-    match &prov.cfg.process_match {
-        ProcessMatchConfig::Lockfile { lockfile_pattern, pid_extract_regex } => {
-            match_lockfile(sessions, lockfile_pattern, pid_extract_regex);
+    let cfg = &prov.cfg.liveness_detection;
+
+    // Enumerate processes once if any strategy needs them.
+    let needs_procs = cfg.strategies.iter().any(|s| matches!(
+        s,
+        LivenessStrategy::CmdlineFlagUuid { .. }
+            | LivenessStrategy::CmdlinePositionalUuid
+            | LivenessStrategy::CmdlineContains
+            | LivenessStrategy::RecentlyActive { .. }
+    ));
+    let procs: HashMap<u32, ProcessEntry> = if needs_procs {
+        match cfg.executable.as_deref() {
+            Some(exe) => discover_processes(exe),
+            None => HashMap::new(),
         }
-        ProcessMatchConfig::Cmdline { executable, script_contains, not_contains, id_match, recently_active_secs } => {
-            match_cmdline(sessions, executable, script_contains.as_deref(), not_contains.as_deref(), id_match, *recently_active_secs);
+    } else {
+        HashMap::new()
+    };
+
+    // Enumerate WT tab titles once if any strategy needs them.
+    let needs_tabs = cfg.strategies.iter().any(|s| matches!(s, LivenessStrategy::TabTitleMatch { .. }));
+    let tab_titles: Vec<String> = if needs_tabs {
+        match crate::wt_tabs::list_tab_titles() {
+            Ok(v) => v,
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    let mut claimed: HashSet<u32> = HashSet::new();
+
+    // Walk each session through the strategy chain. First match wins.
+    for s in sessions.iter_mut() {
+        for strategy in &cfg.strategies {
+            let matched = run_strategy(prov, strategy, cfg, s, &procs, &tab_titles, &mut claimed);
+            if matched {
+                break;
+            }
         }
     }
 
@@ -923,105 +1389,200 @@ fn match_processes_dispatch(
     Ok(())
 }
 
-fn match_lockfile(sessions: &mut [Session], pattern: &str, pid_regex: &str) {
-    for s in sessions.iter_mut() {
-        let Some(dir) = s.state_dir.as_deref() else { continue };
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
-        let mut best_pid: Option<u32> = None;
-        let mut best_mtime: Option<std::time::SystemTime> = None;
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !matches_simple_glob(&e.path(), dir, pattern) {
-                continue;
-            }
-            let Some(pid) = regex_capture1(pid_regex, &name).and_then(|s| s.parse::<u32>().ok()) else { continue };
-            let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
-            if best_mtime.is_none() || mtime > best_mtime {
-                best_mtime = mtime;
-                best_pid = Some(pid);
-            }
+/// Attempts one liveness strategy against one session. Returns `true` if the
+/// session was claimed (s.state.process updated — and for most strategies,
+/// s.pid set and the PID reserved).
+fn run_strategy(
+    _prov: &ConfigDrivenProvider,
+    strategy: &LivenessStrategy,
+    cfg: &LivenessDetectionConfig,
+    s: &mut Session,
+    procs: &HashMap<u32, ProcessEntry>,
+    tab_titles: &[String],
+    claimed: &mut HashSet<u32>,
+) -> bool {
+    match strategy {
+        LivenessStrategy::Lockfile { lockfile_pattern, pid_extract_regex } => {
+            strat_lockfile(s, lockfile_pattern, pid_extract_regex)
         }
-        if let Some(pid) = best_pid {
-            let alive = process_is_alive(pid);
-            s.pid = Some(pid);
-            // Store state signals via side-channel below in build_state_signals.
-            if alive {
-                s.state.process = ProcessState::Running;
-            }
+        LivenessStrategy::CmdlineFlagUuid { flag } => {
+            strat_cmdline_flag_uuid(s, procs, claimed, flag, cfg)
+        }
+        LivenessStrategy::CmdlinePositionalUuid => {
+            strat_cmdline_positional_uuid(s, procs, claimed, cfg)
+        }
+        LivenessStrategy::CmdlineContains => {
+            strat_cmdline_contains(s, procs, claimed, cfg)
+        }
+        LivenessStrategy::TabTitleMatch { fuzzy, min_title_len } => {
+            strat_tab_title_match(s, tab_titles, *fuzzy, *min_title_len)
+        }
+        LivenessStrategy::RecentlyActive { within_secs } => {
+            strat_recently_active(s, procs, claimed, *within_secs, cfg)
         }
     }
+    .then(|| true)
+    .unwrap_or(false)
 }
 
-fn match_cmdline(
-    sessions: &mut [Session],
-    executable: &str,
-    script_contains: Option<&str>,
-    not_contains: Option<&str>,
-    id_match: &CmdlineIdMatch,
-    recently_active_secs: Option<u64>,
-) {
-    let procs = discover_processes(executable);
-    use std::collections::HashSet;
-    let mut claimed: HashSet<u32> = HashSet::new();
+// ── Strategy implementations ────────────────────────────────────────────────
 
-    let cmd_passes_filters = |cmd: &str| -> bool {
-        if let Some(req) = script_contains {
-            if !cmd.contains(req) { return false; }
+fn strat_lockfile(s: &mut Session, pattern: &str, pid_regex: &str) -> bool {
+    let Some(dir) = s.state_dir.as_deref() else { return false };
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let mut best_pid: Option<u32> = None;
+    let mut best_mtime: Option<std::time::SystemTime> = None;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !matches_simple_glob(&e.path(), dir, pattern) {
+            continue;
         }
-        if let Some(forbidden) = not_contains {
-            if cmd.contains(forbidden) { return false; }
+        let Some(pid) = regex_capture1(pid_regex, &name).and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
+        if best_mtime.is_none() || mtime > best_mtime {
+            best_mtime = mtime;
+            best_pid = Some(pid);
         }
-        true
-    };
-
-    // Direct ID match pass
-    for s in sessions.iter_mut() {
-        let mut found: Option<u32> = None;
-        for (pid, p) in &procs {
-            if claimed.contains(pid) { continue; }
-            let cmd = &p.command_line;
-            if !cmd_passes_filters(cmd) { continue; }
-            let matched = match id_match {
-                CmdlineIdMatch::Flag { flag } => {
-                    flag.as_slice().iter().any(|f|
-                        extract_flag_value(cmd, f).as_deref() == Some(s.provider_session_id.as_str())
-                    )
-                }
-                CmdlineIdMatch::PositionalUuid => {
-                    cmd.split_whitespace().any(|a| a == s.provider_session_id)
-                }
-                CmdlineIdMatch::Contains => cmd.contains(&s.provider_session_id),
-            };
-            if matched {
-                found = Some(*pid);
-                break;
-            }
-        }
-        if let Some(pid) = found {
-            claimed.insert(pid);
-            s.pid = Some(pid);
+    }
+    if let Some(pid) = best_pid {
+        s.pid = Some(pid);
+        if process_is_alive(pid) {
             s.state.process = ProcessState::Running;
         }
+        return true;
     }
+    false
+}
 
-    // Recently-active fallback — for sessions still unmatched whose events are fresh
-    if let Some(window) = recently_active_secs {
-        for s in sessions.iter_mut() {
-            if s.pid.is_some() { continue; }
-            let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { continue };
-            let delta = chrono::Utc::now().signed_duration_since(parsed.to_utc());
-            if delta.num_seconds() > window as i64 { continue; }
-            for (pid, p) in &procs {
-                if claimed.contains(pid) { continue; }
-                let cmd = &p.command_line;
-                if !cmd_passes_filters(cmd) { continue; }
-                claimed.insert(*pid);
-                s.pid = Some(*pid);
-                s.state.process = ProcessState::Running;
-                break;
-            }
+fn cmdline_passes_filters(cmd: &str, cfg: &LivenessDetectionConfig) -> bool {
+    if let Some(req) = &cfg.script_contains {
+        if !cmd.contains(req) {
+            return false;
         }
     }
+    if let Some(forbidden) = &cfg.not_contains {
+        if cmd.contains(forbidden) {
+            return false;
+        }
+    }
+    true
+}
+
+fn strat_cmdline_flag_uuid(
+    s: &mut Session,
+    procs: &HashMap<u32, ProcessEntry>,
+    claimed: &mut HashSet<u32>,
+    flag: &FlagSpec,
+    cfg: &LivenessDetectionConfig,
+) -> bool {
+    for (pid, p) in procs {
+        if claimed.contains(pid) { continue; }
+        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
+        let matched = flag
+            .as_slice()
+            .iter()
+            .any(|f| extract_flag_value(&p.command_line, f).as_deref() == Some(s.provider_session_id.as_str()));
+        if matched {
+            claimed.insert(*pid);
+            s.pid = Some(*pid);
+            s.state.process = ProcessState::Running;
+            return true;
+        }
+    }
+    false
+}
+
+fn strat_cmdline_positional_uuid(
+    s: &mut Session,
+    procs: &HashMap<u32, ProcessEntry>,
+    claimed: &mut HashSet<u32>,
+    cfg: &LivenessDetectionConfig,
+) -> bool {
+    for (pid, p) in procs {
+        if claimed.contains(pid) { continue; }
+        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
+        if p.command_line.split_whitespace().any(|a| a == s.provider_session_id) {
+            claimed.insert(*pid);
+            s.pid = Some(*pid);
+            s.state.process = ProcessState::Running;
+            return true;
+        }
+    }
+    false
+}
+
+fn strat_cmdline_contains(
+    s: &mut Session,
+    procs: &HashMap<u32, ProcessEntry>,
+    claimed: &mut HashSet<u32>,
+    cfg: &LivenessDetectionConfig,
+) -> bool {
+    for (pid, p) in procs {
+        if claimed.contains(pid) { continue; }
+        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
+        if p.command_line.contains(&s.provider_session_id) {
+            claimed.insert(*pid);
+            s.pid = Some(*pid);
+            s.state.process = ProcessState::Running;
+            return true;
+        }
+    }
+    false
+}
+
+fn strat_tab_title_match(
+    s: &mut Session,
+    tab_titles: &[String],
+    fuzzy: FuzzyMatch,
+    min_len: usize,
+) -> bool {
+    let wanted = s.title.trim();
+    if wanted.len() < min_len || tab_titles.is_empty() {
+        return false;
+    }
+    let wanted_lower = wanted.to_lowercase();
+    for tab in tab_titles {
+        let tab_lower = tab.to_lowercase();
+        let hit = match fuzzy {
+            FuzzyMatch::Exact => tab_lower == wanted_lower,
+            // Prefix: tab title starts with our session title (possibly with
+            // a leading whitespace/indicator already stripped by the normalizer).
+            // We use `contains` here intentionally — agents prepend streaming
+            // indicators like `✳ ` or trailing ellipses, so a strict prefix
+            // check is too brittle. The `min_title_len` guard plus substring
+            // matching gives us the right precision/recall for real titles.
+            FuzzyMatch::Prefix | FuzzyMatch::Contains => tab_lower.contains(&wanted_lower),
+        };
+        if hit {
+            // Claimed via UI — no PID association possible.
+            s.state.process = ProcessState::Running;
+            return true;
+        }
+    }
+    false
+}
+
+fn strat_recently_active(
+    s: &mut Session,
+    procs: &HashMap<u32, ProcessEntry>,
+    claimed: &mut HashSet<u32>,
+    within_secs: u64,
+    cfg: &LivenessDetectionConfig,
+) -> bool {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { return false };
+    let delta = chrono::Utc::now().signed_duration_since(parsed.to_utc());
+    if delta.num_seconds() > within_secs as i64 {
+        return false;
+    }
+    for (pid, p) in procs {
+        if claimed.contains(pid) { continue; }
+        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
+        claimed.insert(*pid);
+        s.pid = Some(*pid);
+        s.state.process = ProcessState::Running;
+        return true;
+    }
+    false
 }
 
 fn process_is_alive(pid: u32) -> bool {
@@ -1144,8 +1705,21 @@ fn build_state_signals(
         signals.recent_tool_activity = Some(events.iter().rev().take(20).any(|ev| e.eval_bool(ev)));
     }
 
-    // lockfile-strategy sets lock_file_* via scan
-    if let ProcessMatchConfig::Lockfile { lockfile_pattern, pid_extract_regex } = &prov.cfg.process_match {
+    // Lockfile strategy side-effect: populate lock_file_* signals for the
+    // inference engine. Pick the FIRST Lockfile strategy in the chain (there
+    // should be at most one in practice).
+    let lockfile_cfg = prov
+        .cfg
+        .liveness_detection
+        .strategies
+        .iter()
+        .find_map(|s| match s {
+            LivenessStrategy::Lockfile { lockfile_pattern, pid_extract_regex } => {
+                Some((lockfile_pattern.as_str(), pid_extract_regex.as_str()))
+            }
+            _ => None,
+        });
+    if let Some((lockfile_pattern, pid_extract_regex)) = lockfile_cfg {
         if let Some(dir) = &session.state_dir {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for e in entries.flatten() {
@@ -1197,6 +1771,9 @@ fn extract_tab_title(
         // Handled in the provider's `tab_title()` method where `session.cwd`
         // is available; reaching here means no events will help.
         TabTitleConfig::CwdBasename => None,
+        // Handled in the provider's `tab_title()` method using session.title;
+        // events aren't needed.
+        TabTitleConfig::FromTitle => None,
         TabTitleConfig::FromField { r#where, path } => {
             let w = prov.expr(r#where);
             let p = prov.expr(path);
@@ -1734,10 +2311,10 @@ mod tests {
         assert!(s.cwd.ends_with("synth-proj"), "cwd: {:?}", s.cwd);
         assert!(!s.updated_at.is_empty(), "updated_at missing");
 
-        // Literal tab title — any terminal tab containing "✳" matches.
-        // `tab_title(&Session)` returns the sentinel value for matching.
+        // FromTitle tab_title — the session title is reused so focus finds
+        // THIS session's tab uniquely (Claude sets tab to "✳ <first user msg>").
         let tab = prov.tab_title(s);
-        assert_eq!(tab.as_deref(), Some("✳"));
+        assert_eq!(tab.as_deref(), Some("first user question"));
     }
 
     /// End-to-end smoke test: parse `providers/codex.yaml` against a synthetic
@@ -2032,12 +2609,13 @@ state_signals:
   last_event_map:
     "user":   {{ interaction: busy }}
     "gemini": {{ interaction: waiting_input }}
-process_match:
-  strategy: cmdline
+liveness_detection:
   executable: gemini
   script_contains: "gemini.js"
-  id_match_kind: contains
-  recently_active_secs: 15
+  strategies:
+    - strategy: cmdline_contains
+    - strategy: recently_active
+      within_secs: 15
 tab_title:
   strategy: cwd_basename
 "#,

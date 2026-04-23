@@ -125,11 +125,12 @@ state_signals:
     "tool.execution_complete":  { interaction: busy }
   idle_threshold_seconds: 1800
 
-process_match:
-  strategy: lockfile
-  lockfile_pattern: "inuse.*.lock"
-  # Capture the PID from filename: `inuse.12345.lock` → `12345`.
-  pid_extract_regex: 'inuse\.(\d+)\.lock'
+liveness_detection:
+  strategies:
+    - strategy: lockfile
+      lockfile_pattern: "inuse.*.lock"
+      # Capture the PID from filename: `inuse.12345.lock` → `12345`.
+      pid_extract_regex: 'inuse\.(\d+)\.lock'
 
 tab_title:
   strategy: from_tool_call

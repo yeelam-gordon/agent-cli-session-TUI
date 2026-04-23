@@ -137,12 +137,23 @@ state_signals:
 # passed on the cmdline, so id_match is Contains (cheap fallback to
 # false) and we rely on recently_active_secs to associate a running
 # node process with the most recent session event.
-process_match:
-  strategy: cmdline
+# NOTE on `recently_active_secs`: Gemini does not carry its session UUID
+# on the cmdline (the UUID is picked at launch time and persisted only
+# in the jsonl header), so `contains` never matches and the recency
+# fallback is what actually identifies the running process. 15s was far
+# too tight — a session where the user is reading or thinking would fall
+# out of the window and display as ⚪ Stopped even while its node
+# process is alive. 1800s matches `state_signals.idle_threshold_seconds`.
+liveness_detection:
   executable: gemini
   script_contains: "gemini.js"
-  id_match_kind: contains
-  recently_active_secs: 15
+  strategies:
+    # Gemini embeds neither a stable session UUID on cmdline nor a lockfile on
+    # disk, and its WT tab title is generic ("Gemini"). Use a loose cmdline
+    # substring match, then fall back to recently-active within 30m.
+    - strategy: cmdline_contains
+    - strategy: recently_active
+      within_secs: 1800
 
 # Gemini's tab title in Windows Terminal is `✦ Working… (<cwd-basename>)`
 # while busy and `✦ Waiting (<cwd-basename>)` while idle. We key off

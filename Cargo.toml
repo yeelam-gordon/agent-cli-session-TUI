@@ -27,6 +27,9 @@ anyhow = "1"
 unicode-width = "0.2"
 libloading = "0.9.0"
 
+# Full-text search over session logs (Lucene-like, MIT-licensed)
+tantivy = { version = "0.22", default-features = false, features = ["mmap", "stopwords"] }
+
 # Process info — disable disk/network/component/user, keep only process lookup
 [target.'cfg(windows)'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system", "windows"] }

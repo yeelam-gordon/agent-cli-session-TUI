@@ -16,6 +16,9 @@ use crate::provider::ProviderRegistry;
 #[derive(Debug)]
 pub enum SupervisorEvent {
     SessionsUpdated {
+        /// Provider whose scan just completed. `None` if the event is not tied
+        /// to a single provider (reserved for future broadcast-style updates).
+        provider_key: Option<String>,
         active: Vec<Session>,
         hidden: Vec<Session>,
     },
@@ -170,14 +173,21 @@ impl Supervisor {
         // Shared viewmodel — persists across scan cycles for incremental diffing
         let vm = Arc::new(Mutex::new(SessionViewModel::new()));
 
-        // Initial scan (blocking — UI shows progressive results via try_recv)
-        if let Err(e) = self.scan_and_notify(&vm, &event_tx) {
+        // Initial scan (two-phase: paged first for fast first paint, then full)
+        if let Err(e) = self.scan_and_notify_initial(&vm, &event_tx) {
             crate::log::error(&format!("Initial scan failed: {}", e));
             let _ = event_tx.send(SupervisorEvent::Error(e.to_string()));
         }
 
-        let mut interval = tokio::time::interval(self.poll_interval);
+        // Tick frequently so we can react to commands quickly, but gate actual scans
+        // on a `next_scan_at` Instant that is updated AFTER a scan completes.
+        // This ensures `poll_interval` is the minimum gap between the END of one
+        // scan and the START of the next — preventing back-to-back scans when the
+        // scan itself takes longer than poll_interval.
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
         let scanning = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let next_scan_at = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let poll_interval = self.poll_interval;
 
         loop {
             tokio::select! {
@@ -186,12 +196,19 @@ impl Supervisor {
                     if scanning.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
+                    // Skip if we haven't reached the next scheduled scan time
+                    if let Ok(next) = next_scan_at.lock() {
+                        if std::time::Instant::now() < *next {
+                            continue;
+                        }
+                    }
                     // Run scan in background thread so commands aren't blocked
                     let registry = self.registry.clone();
                     let archive = self.archive.clone();
                     let vm_clone = vm.clone();
                     let tx = event_tx.clone();
                     let scan_flag = scanning.clone();
+                    let next_at = next_scan_at.clone();
                     scan_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::spawn(move || {
                         let scan_start = std::time::Instant::now();
@@ -199,7 +216,15 @@ impl Supervisor {
                             crate::log::warn(&format!("Scan error: {}", e));
                             let _ = tx.send(SupervisorEvent::Error(e.to_string()));
                         }
-                        crate::log::info(&format!("Scan cycle: {:?}", scan_start.elapsed()));
+                        let elapsed = scan_start.elapsed();
+                        // Schedule next scan poll_interval AFTER this one finishes
+                        if let Ok(mut next) = next_at.lock() {
+                            *next = std::time::Instant::now() + poll_interval;
+                        }
+                        crate::log::info(&format!(
+                            "Scan cycle: {:?}, next scan in {:?}",
+                            elapsed, poll_interval
+                        ));
                         scan_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                     });
                 }
@@ -240,6 +265,123 @@ impl Supervisor {
 
     fn scan_and_notify(&self, vm: &Arc<Mutex<SessionViewModel>>, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
         Self::scan_providers(&self.registry, &self.archive, vm, event_tx)
+    }
+
+    /// Two-phase initial scan:
+    ///   Phase 1 — each provider returns only the top-N most recent sessions via
+    ///             `discover_sessions_paged`. Cheap (stat-only + parse N only).
+    ///             All providers run in parallel; each emits a SessionsUpdated
+    ///             event as it completes. The UI gate opens once all have
+    ///             reported in.
+    ///   Phase 2 — each provider runs full `discover_sessions()` in parallel.
+    ///             Results replace the phase-1 slice per-provider as they arrive.
+    ///
+    /// This gives the user a first visible list in ~1-2s (instead of waiting
+    /// 10-30s for every provider's full tail-read pass to complete) while
+    /// still delivering the full dataset soon after.
+    fn scan_and_notify_initial(&self, vm: &Arc<Mutex<SessionViewModel>>, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
+        Self::scan_providers_two_phase(&self.registry, &self.archive, vm, event_tx)
+    }
+
+    fn scan_providers_two_phase(
+        registry: &Arc<ProviderRegistry>,
+        archive: &Arc<Mutex<ArchiveStore>>,
+        vm: &Arc<Mutex<SessionViewModel>>,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+    ) -> Result<()> {
+        /// Number of most-recent sessions to fetch per provider in phase 1.
+        /// Sized to fill one viewport comfortably; full dataset follows in phase 2.
+        const FIRST_PAGE: usize = 20;
+
+        let providers: Vec<_> = registry.providers().iter()
+            .filter(|p| p.capabilities().supports_discovery)
+            .collect();
+
+        // ── Phase 1: paged, blocking — fast first paint ─────────────────────
+        let phase1_start = std::time::Instant::now();
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<Session>)>();
+            for provider in &providers {
+                let tx = tx.clone();
+                s.spawn(move || {
+                    let pstart = std::time::Instant::now();
+                    let paged = match provider.discover_sessions_paged(0, FIRST_PAGE) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            crate::log::warn(&format!("Phase 1 '{}' error: {}", provider.key(), e));
+                            crate::provider::PagedSessions { sessions: vec![], total: 0, has_more: false }
+                        }
+                    };
+                    let mut sessions = paged.sessions;
+                    let _ = provider.match_processes(&mut sessions);
+                    for session in &mut sessions {
+                        if session.state.process == crate::models::ProcessState::Running {
+                            session.tab_title = provider.tab_title(session);
+                        }
+                    }
+                    crate::log::info(&format!(
+                        "Phase 1 '{}': {} of {} sessions in {:?}",
+                        provider.key(), sessions.len(), paged.total, pstart.elapsed()
+                    ));
+                    let _ = tx.send((provider.key().to_string(), sessions));
+                });
+            }
+            drop(tx);
+
+            let archive_guard = archive.lock().ok();
+            for (provider_key, sessions) in rx {
+                if let Ok(mut vm_lock) = vm.lock() {
+                    vm_lock.merge_provider(&provider_key, sessions);
+                    let (active, hidden) = vm_lock.snapshot(&archive_guard);
+                    let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
+                        provider_key: Some(provider_key),
+                        active,
+                        hidden,
+                    });
+                }
+            }
+        });
+        crate::log::info(&format!("Phase 1 complete in {:?}", phase1_start.elapsed()));
+
+        // ── Phase 2: full discovery, background — complete dataset ──────────
+        let phase2_start = std::time::Instant::now();
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<Session>)>();
+            for provider in &providers {
+                let tx = tx.clone();
+                s.spawn(move || {
+                    let pstart = std::time::Instant::now();
+                    let mut sessions = provider.discover_sessions().unwrap_or_default();
+                    let _ = provider.match_processes(&mut sessions);
+                    for session in &mut sessions {
+                        if session.state.process == crate::models::ProcessState::Running {
+                            session.tab_title = provider.tab_title(session);
+                        }
+                    }
+                    crate::log::info(&format!(
+                        "Phase 2 '{}': {} sessions in {:?}",
+                        provider.key(), sessions.len(), pstart.elapsed()
+                    ));
+                    let _ = tx.send((provider.key().to_string(), sessions));
+                });
+            }
+            drop(tx);
+
+            let archive_guard = archive.lock().ok();
+            for (provider_key, sessions) in rx {
+                if let Ok(mut vm_lock) = vm.lock() {
+                    vm_lock.merge_provider(&provider_key, sessions);
+                    let (active, hidden) = vm_lock.snapshot(&archive_guard);
+                    let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
+                        provider_key: Some(provider_key),
+                        active,
+                        hidden,
+                    });
+                }
+            }
+        });
+        crate::log::info(&format!("Phase 2 complete in {:?}", phase2_start.elapsed()));
+        Ok(())
     }
 
     /// Static scan function — can run on any thread without borrowing &self.
@@ -290,17 +432,18 @@ impl Supervisor {
             }
             drop(tx);
 
-            // Merge each provider's results into the viewmodel as they arrive
+            // Merge each provider's results into the viewmodel as they arrive.
+            // We always emit an event per provider — even if nothing changed —
+            // so the UI can reliably detect "all providers have reported in".
             for (provider_key, sessions) in rx {
                 if let Ok(mut vm_lock) = vm.lock() {
-                    let changed = vm_lock.merge_provider(&provider_key, sessions);
-                    if changed {
-                        let (active, hidden) = vm_lock.snapshot(&archive_guard);
-                        let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
-                            active,
-                            hidden,
-                        });
-                    }
+                    vm_lock.merge_provider(&provider_key, sessions);
+                    let (active, hidden) = vm_lock.snapshot(&archive_guard);
+                    let _ = event_tx.send(SupervisorEvent::SessionsUpdated {
+                        provider_key: Some(provider_key),
+                        active,
+                        hidden,
+                    });
                 }
             }
         });

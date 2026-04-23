@@ -92,12 +92,24 @@ cargo test --lib
 # All tests including provider integration tests (needs real session data)
 cargo test -- --nocapture
 
-# Specific provider
+# Specific lifecycle integration test file
 cargo test --test copilot_lifecycle_test -- --nocapture
 cargo test --test claude_lifecycle_test -- --nocapture
 cargo test --test codex_lifecycle_test -- --nocapture
 cargo test --test qwen_lifecycle_test -- --nocapture
 cargo test --test gemini_lifecycle_test -- --nocapture
+
+# Single unit test by fully-qualified path (fastest iteration when fixing one test)
+cargo test --lib provider::config_driven::tests::claude_yaml_end_to_end
+cargo test --lib ui::ui_invariant_tests::empty_providers_marks_initial_load_complete
+
+# All tests in a module (substring match on test path)
+cargo test --lib provider::config_driven::tests       # every config_driven unit test
+cargo test --lib ui_invariant_tests                   # every UI invariant test
+cargo test --lib claude                               # anything with "claude" in its path
+
+# Show test output (stdout) — helpful when debugging assertion failures
+cargo test --lib <filter> -- --nocapture
 ```
 
 Tests use the shared framework in `src/testing/`. Each test file is a thin wrapper that creates its provider and calls shared scenarios. Provider scanner tests (state detection with fixture JSONL) are in each provider's `mod.rs` under `#[cfg(test)]`.
@@ -153,7 +165,7 @@ This project has multiple agents and humans working on it. Stale docs cause real
 | `src/models.rs` (state enums, Session struct) | `plugin.instructions.md` state model table, `AGENTS.md` design decisions |
 | `src/config.rs` (ProviderConfig fields) | `plugin.instructions.md` config structure, `config.toml` example |
 | `src/process_info.rs` | `rust.instructions.md` process detection section, `plugin.instructions.md` code example |
-| `src/search.rs` or `semantic-plugin/` | `README.md` semantic search section |
+| `src/search.rs` or `semantic-plugin/` | `README.md` semantic search section, `CONTRIBUTING.md` § Semantic Search Plugin (build + install steps) |
 | `src/focus/` | `README.md` tab focus section |
 | `src/testing/` (test framework) | `plugin.instructions.md` testing section, `AGENTS.md` how to test |
 | `Cargo.toml` (deps, bin entries) | `AGENTS.md` how to build |

@@ -2,6 +2,7 @@ mod archive;
 mod config;
 mod focus;
 mod log;
+mod log_search;
 mod models;
 mod process_info;
 mod provider;
@@ -9,6 +10,14 @@ mod search;
 mod supervisor;
 mod ui;
 mod util;
+#[cfg(target_os = "windows")]
+mod wt_tabs;
+#[cfg(not(target_os = "windows"))]
+mod wt_tabs {
+    pub fn list_tab_titles() -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
 
 use std::sync::{Arc, Mutex};
 
@@ -174,7 +183,43 @@ async fn main() -> Result<()> {
         .or_else(|| enabled_keys.first().cloned())
         .unwrap_or_default();
 
-    let app = App::new(enabled_keys, default_provider, config.log_max_lines);
+    // Preload the semantic plugin BEFORE entering the TUI so fastembed's first-run
+    // model download progress bar renders on the normal shell (not corrupting the
+    // TUI's alternate screen). On subsequent runs the model is cached and this
+    // returns in milliseconds.
+    let semantic = std::sync::Arc::new(std::sync::Mutex::new(
+        search::SemanticPlugin::new(),
+    ));
+    {
+        let cache_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("agent-session-tui")
+            .join("models");
+        std::fs::create_dir_all(&cache_dir).ok();
+        let needs_download = !cache_dir
+            .join("models--nomic-ai--nomic-embed-text-v1.5")
+            .exists();
+        if needs_download {
+            eprintln!("Preparing semantic search model (first-run download, ~550 MB)...");
+        }
+        if let Ok(mut plugin) = semantic.lock() {
+            plugin.try_load(&cache_dir.to_string_lossy());
+        }
+        if needs_download {
+            eprintln!("Semantic model ready. Starting TUI...");
+        }
+    }
+
+    let app = App::new(
+        enabled_keys,
+        default_provider,
+        config.log_max_lines,
+        Arc::clone(&registry),
+        config.data_dir.clone(),
+        semantic,
+        config.tick_rate_ms,
+        config.semantic_index_min_interval_ms,
+    );
     app.run(event_rx, cmd_tx).await?;
 
     Ok(())

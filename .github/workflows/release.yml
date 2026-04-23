@@ -65,8 +65,10 @@ jobs:
       run: |
         mkdir dist
         cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
+        cp -r providers dist/
         cp config.toml.example dist/
         cp README.md dist/
+        cp LICENSE dist/
         if [ "${{ runner.os }}" != "Windows" ]; then
           chmod +x dist/${{ matrix.artifact }}
         fi
@@ -141,8 +143,10 @@ jobs:
         mkdir dist
         cp target/${{ matrix.target }}/release/${{ matrix.core_artifact }} dist/
         cp semantic-plugin/target/${{ matrix.target }}/release/${{ matrix.dll_artifact }} dist/
+        cp -r providers dist/
         cp config.toml.example dist/
         cp README.md dist/
+        cp LICENSE dist/
         if [ "${{ runner.os }}" != "Windows" ]; then
           chmod +x dist/${{ matrix.core_artifact }}
         fi

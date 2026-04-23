@@ -127,7 +127,7 @@ Search uses a three-tier ranking system: **exact substring** → **fuzzy word** 
 - Status bar shows 🧠 when the semantic plugin is loaded and ready
 - If the DLL is missing, search falls back gracefully to exact + fuzzy only
 
-The plugin lives in `semantic-plugin/` and is built separately (see [Release Packages](#release-packages)).
+The plugin lives in `semantic-plugin/` and is built separately. See [`CONTRIBUTING.md` § Semantic Search Plugin](CONTRIBUTING.md#semantic-search-plugin) for the exact `cargo build` and copy-DLL-next-to-exe steps.
 
 ## Release Packages
 

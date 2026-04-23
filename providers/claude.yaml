@@ -115,19 +115,21 @@ state_signals:
 # Multiple flags can carry the session ID; try each in priority order.
 # `not_contains: copilot` excludes GitHub Copilot CLI processes that might also
 # appear when searching for `claude` substring on node-hosted installs.
-process_match:
-  strategy: cmdline
+liveness_detection:
   executable: claude
   not_contains: copilot
-  id_match_kind: flag
-  flag:
-    - "--session-id"
-    - "--continue"
-    - "--resume"
-  recently_active_secs: 10
+  strategies:
+    - strategy: cmdline_flag_uuid
+      flag:
+        - "--session-id"
+        - "--continue"
+        - "--resume"
+    - strategy: recently_active
+      within_secs: 10
 
-# Claude Code writes its own terminal title (e.g. "✳ Summary of thread").
-# We cannot predict the text, so match any tab whose title contains the sentinel.
+# Claude Code writes its own terminal title as: "✳ <first words of first user msg>"
+# (e.g. "✳ Test Terminal tab title updates"). `fields.title` already extracts
+# that first user message (single line, truncated to 60). Reuse it here so focus
+# uniquely matches THIS session's tab by substring — not just any Claude tab.
 tab_title:
-  strategy: literal
-  value: "✳"
+  strategy: from_title

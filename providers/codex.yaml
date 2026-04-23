@@ -129,11 +129,12 @@ state_signals:
 # Codex processes include the session UUID as a positional argument — no
 # flag prefix. The `positional_uuid` matcher splits the cmdline on
 # whitespace and equality-checks each token against the session id.
-process_match:
-  strategy: cmdline
+liveness_detection:
   executable: codex
-  id_match_kind: positional_uuid
-  recently_active_secs: 15
+  strategies:
+    - strategy: cmdline_positional_uuid
+    - strategy: recently_active
+      within_secs: 15
 
 # Codex sets no in-band tab title signal; the terminal title is the cwd
 # folder basename, which our launcher also uses for Windows Terminal tabs.

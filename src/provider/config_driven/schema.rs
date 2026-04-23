@@ -2,8 +2,19 @@
 //!
 //! Every provider is a `ProviderConfig` parsed from `providers/<name>.yaml`.
 //! The shape is intentionally unified across all 5 agent CLIs — strategy
-//! discriminators (`DiscoveryStrategy`, `CwdStrategy`, `ProcessMatchStrategy`)
+//! discriminators (`DiscoveryStrategy`, `CwdStrategy`, `LivenessStrategy`)
 //! pick the right behavior while keeping the surface identical.
+//!
+//! Status detection is split into orthogonal dimensions, each declarative:
+//!
+//!   * `state_signals`      — what the agent is doing now (busy/waiting/idle),
+//!                            inferred from the JSONL event stream.
+//!   * `liveness_detection` — is a live OS process attached? ordered strategy
+//!                            chain, first match wins (lockfile / cmdline uuid /
+//!                            tab-title / recently-active).
+//!   * resumability         — implicit today: any session whose file exists and
+//!                            is not archived is resumable. Will be lifted into
+//!                            YAML when a provider needs different behavior.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,7 +32,7 @@ pub struct ProviderConfigFile {
     pub events: EventsConfig,
     pub fields: FieldsConfig,
     pub state_signals: StateSignalsConfig,
-    pub process_match: ProcessMatchConfig,
+    pub liveness_detection: LivenessDetectionConfig,
     #[serde(default)]
     pub tab_title: Option<TabTitleConfig>,
     #[serde(default)]
@@ -320,51 +331,87 @@ pub struct StateSignalDelta {
     pub process: Option<String>,
 }
 
-// ── Process match ────────────────────────────────────────────────────────────
+// ── Liveness detection ───────────────────────────────────────────────────────
+
+/// How to link a session to a live OS process. Strategies are tried in order;
+/// FIRST MATCH wins. If none match, the session has no live process.
+///
+/// Typical per-provider chains:
+///   * copilot → [ lockfile ]
+///   * claude  → [ cmdline_flag_uuid, recently_active ]
+///   * codex   → [ cmdline_positional_uuid, recently_active ]
+///   * qwen    → [ cmdline_positional_uuid, tab_title_match, recently_active ]
+///   * gemini  → [ recently_active ]   (no UUID on cmdline; tab title is generic)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LivenessDetectionConfig {
+    /// WMI-level executable basename filter (applied to cmdline-* strategies).
+    /// Omit when no cmdline strategy is used (copilot).
+    #[serde(default)]
+    pub executable: Option<String>,
+    /// Substring that must appear in the cmdline (e.g. `qwen.js`, `gemini.js`).
+    #[serde(default)]
+    pub script_contains: Option<String>,
+    /// Substring that must NOT appear in the cmdline. Used to disambiguate
+    /// co-tenant agents (e.g. `not_contains: copilot` for Claude).
+    #[serde(default)]
+    pub not_contains: Option<String>,
+    /// Ordered strategy chain. First matching strategy claims the session.
+    pub strategies: Vec<LivenessStrategy>,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
-pub enum ProcessMatchConfig {
-    /// Lock-file based (Copilot).
+pub enum LivenessStrategy {
+    /// Session directory contains a process-specific lock file (copilot).
     Lockfile {
         /// Glob inside the session directory (e.g. `inuse.*.lock`).
         lockfile_pattern: String,
         /// Regex with one capture group extracting the PID from filename.
         pid_extract_regex: String,
     },
-    /// Command-line arg based (Claude, Codex, Qwen).
-    Cmdline {
-        /// Process executable (basename, e.g. `claude`, `codex`, `node`).
-        executable: String,
-        /// Optional substring that must appear in the cmdline (e.g. `qwen.js`).
+    /// A matching process has the session UUID as the value of a `--flag`.
+    /// Accepts a single flag or an ordered list tried in priority order.
+    CmdlineFlagUuid { flag: FlagSpec },
+    /// A matching process has the session UUID as a positional (non-flag) arg.
+    CmdlinePositionalUuid,
+    /// A matching process's cmdline contains the session UUID as a substring.
+    CmdlineContains,
+    /// A Windows Terminal tab is currently displaying this session's computed
+    /// title (from `fields.title`). Used when the agent doesn't expose session
+    /// id on cmdline AND has no lock file (qwen without `--resume`).
+    ///
+    /// Does NOT set a PID — only sets `process = Running`. Kill actions won't
+    /// work for sessions claimed via this strategy.
+    TabTitleMatch {
         #[serde(default)]
-        script_contains: Option<String>,
-        /// Optional substring that must NOT appear in the cmdline. Used to
-        /// disambiguate co-tenant agents (e.g. Claude's cmdline can mention
-        /// `claude` when another tool like `copilot` is also running under
-        /// `node.exe`; set `not_contains: "copilot"` to skip those).
-        #[serde(default)]
-        not_contains: Option<String>,
-        /// How to match session ID against cmdline: a flag, or a positional UUID.
-        #[serde(flatten)]
-        id_match: CmdlineIdMatch,
-        /// When no process matches by session ID, fall back to "recently-active"
-        /// heuristic within this many seconds of the last event.
-        #[serde(default)]
-        recently_active_secs: Option<u64>,
+        fuzzy: FuzzyMatch,
+        /// Minimum title length required to attempt a match. Titles shorter
+        /// than this are skipped (to avoid generic matches like "test"
+        /// colliding with unrelated tabs). Defaults to 4.
+        #[serde(default = "default_min_title_len")]
+        min_title_len: usize,
     },
+    /// Last-resort fallback: pair any unclaimed matching process with this
+    /// session if its events were updated within the window. Low specificity —
+    /// use only as the final strategy in the chain.
+    RecentlyActive { within_secs: u64 },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "id_match_kind", rename_all = "snake_case")]
-pub enum CmdlineIdMatch {
-    /// Look for `--flag <session_id>` in cmdline. Accepts either a single
-    /// flag (`flag: "--session-id"`) or a list tried in priority order
-    /// (`flag: ["--session-id", "--continue", "--resume"]`).
-    Flag { flag: FlagSpec },
-    /// Any cmdline arg must equal the session UUID literally.
-    PositionalUuid,
-    /// Any cmdline substring contains the session ID.
+fn default_min_title_len() -> usize {
+    4
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FuzzyMatch {
+    /// Tab title must equal the session title exactly.
+    Exact,
+    /// Session title must be a prefix of the tab title (e.g. tab may carry
+    /// a streaming indicator prefix like `✳ Foo…`). This is still a contains
+    /// check on the trimmed/normalized tab — see matcher implementation.
+    #[default]
+    Prefix,
+    /// Tab title contains the session title as any substring.
     Contains,
 }
 
@@ -413,9 +460,15 @@ pub enum TabTitleConfig {
         r#where: String,
         path: String,
     },
+    /// Reuse the already-extracted session title (from `fields.title`) as the
+    /// tab title. Used for Claude Code, which sets its own terminal tab title
+    /// to `"✳ <first words of the first user message>"` — the same source
+    /// `fields.title` extracts, so session.title is a substring of the real
+    /// tab title and matches uniquely (unlike a shared sentinel).
+    FromTitle,
     /// A constant sentinel — the supervisor will substring-match any terminal
-    /// tab whose title *contains* this value. Used for Claude Code, which sets
-    /// its own tab title (e.g. `"✳ …"`) that we can only detect by prefix.
+    /// tab whose title *contains* this value. Used as a fallback when a more
+    /// specific per-session string isn't available.
     Literal { value: String },
     /// Use the basename of the session's `cwd`. Used by Codex, which has no
     /// in-band tab title signal — the terminal title is set by the launcher
