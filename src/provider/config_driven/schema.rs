@@ -37,6 +37,9 @@ pub struct ProviderConfigFile {
     pub tab_title: Option<TabTitleConfig>,
     #[serde(default)]
     pub session_detail: Option<SessionDetailConfig>,
+    /// Optional single-char shortcut key for "new session" in the TUI.
+    #[serde(default)]
+    pub new_session_shortcut: Option<char>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -534,6 +537,9 @@ pub struct ProviderConfigV3 {
     /// absent the detail pane falls back to summary only.
     #[serde(default)]
     pub detail: Option<SessionDetailConfig>,
+    /// Optional single-char shortcut key for "new session" in the TUI.
+    #[serde(default)]
+    pub new_session_shortcut: Option<char>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -819,6 +825,7 @@ impl TryFrom<ProviderConfigV3> for ProviderConfigFile {
             liveness_detection: translate_process(&v3.process)?,
             tab_title: v3.extract.tab_title.map(translate_tab_title).transpose()?,
             session_detail: v3.detail,
+            new_session_shortcut: v3.new_session_shortcut,
         })
     }
 }

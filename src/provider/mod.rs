@@ -38,6 +38,11 @@ pub trait Provider: Send + Sync {
     /// What this provider supports.
     fn capabilities(&self) -> ProviderCapabilities;
 
+    /// Optional single-char shortcut for launching a new session from the TUI.
+    fn new_session_shortcut(&self) -> Option<char> {
+        None
+    }
+
     // ── Discovery (required) ─────────────────────────────────────────
 
     /// Scan the CLI's state directory and return all discoverable sessions.

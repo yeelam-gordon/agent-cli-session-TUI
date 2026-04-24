@@ -226,6 +226,9 @@ impl Provider for ConfigDrivenProvider {
             supports_summary_extraction: c.supports_summary_extraction,
         }
     }
+    fn new_session_shortcut(&self) -> Option<char> {
+        self.cfg.new_session_shortcut
+    }
 
     fn discover_sessions(&self) -> Result<Vec<Session>> {
         // Cheap stat-only enumeration (no tail reads, no YAML parses).

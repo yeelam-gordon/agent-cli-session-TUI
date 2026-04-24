@@ -160,6 +160,8 @@ pub struct App {
     semantic_index_min_interval_ms: u64,
     /// Last instant at which the semantic indexer was spawned. Used to throttle.
     last_semantic_index_at: Option<std::time::Instant>,
+    /// Per-provider shortcut keys: char → provider_key. Built at startup from YAML configs.
+    shortcut_map: std::collections::HashMap<char, String>,
 }
 
 impl App {
@@ -206,6 +208,40 @@ impl App {
             }
         };
 
+        // Build per-provider shortcut map with collision detection.
+        // Reserved keys that must not be used as provider shortcuts.
+        let reserved: std::collections::HashSet<char> =
+            ['q', '/', 'a', 'h', 'v'].iter().copied().collect();
+        let mut shortcut_map: std::collections::HashMap<char, String> =
+            std::collections::HashMap::new();
+        let mut shortcut_errors: Vec<String> = Vec::new();
+        for p in registry.providers() {
+            if let Some(ch) = p.new_session_shortcut() {
+                let ch = ch.to_ascii_lowercase();
+                if reserved.contains(&ch) {
+                    shortcut_errors.push(format!(
+                        "Provider '{}': shortcut '{}' is reserved — ignored",
+                        p.key(), ch
+                    ));
+                } else if let Some(existing) = shortcut_map.get(&ch) {
+                    shortcut_errors.push(format!(
+                        "Shortcut '{}' collision: '{}' and '{}' — both ignored",
+                        ch, existing, p.key()
+                    ));
+                    shortcut_map.remove(&ch);
+                } else {
+                    shortcut_map.insert(ch, p.key().to_string());
+                }
+            }
+        }
+        let initial_status_msg = if !shortcut_errors.is_empty() {
+            let msg = format!("⚠ {}", shortcut_errors.join("; "));
+            crate::log::info(&msg);
+            msg
+        } else {
+            initial_status_msg
+        };
+
         Self {
             sessions: Vec::new(),
             hidden_sessions: Vec::new(),
@@ -239,6 +275,7 @@ impl App {
             tick_rate_ms,
             semantic_index_min_interval_ms,
             last_semantic_index_at: None,
+            shortcut_map,
         }
     }
 
@@ -959,6 +996,21 @@ impl App {
                             .push(format!("Launching new {} session...", key));
                     }
                 }
+                KeyCode::Char(ch) if self.shortcut_map.contains_key(&ch) => {
+                    let key = self.shortcut_map[&ch].clone();
+                    if self.provider_keys.contains(&key) {
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let _ = cmd_tx.send(SupervisorCommand::NewSession {
+                            provider_key: key.clone(),
+                            cwd,
+                        });
+                        self.log_lines
+                            .push(format!("Launching new {} session...", key));
+                    }
+                }
                 KeyCode::Enter => {
                     self.handle_enter(cmd_tx);
                 }
@@ -1153,21 +1205,31 @@ impl App {
             ]));
             f.render_widget(title, area);
         } else {
-            // Normal mode
-            let title = Paragraph::new(Line::from(vec![
+            // Normal mode — build shortcut hints dynamically
+            let mut spans = vec![
                 Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::styled("⏎", hl),
                 Span::raw(" open  "),
                 Span::styled("n", hl),
                 Span::raw("ew  "),
+            ];
+            // Append per-provider shortcut hints (sorted for stable order)
+            let mut shortcuts: Vec<_> = self.shortcut_map.iter().collect();
+            shortcuts.sort_by_key(|(ch, _)| *ch);
+            for (ch, key) in &shortcuts {
+                spans.push(Span::styled(ch.to_string(), hl));
+                spans.push(Span::raw(format!(" {} ", key)));
+            }
+            spans.extend_from_slice(&[
                 Span::styled("a", hl),
                 Span::raw("rchive  "),
                 Span::styled("/", hl),
                 Span::raw("search  "),
                 Span::styled("q", hl),
                 Span::raw("uit"),
-            ]));
+            ]);
+            let title = Paragraph::new(Line::from(spans));
             f.render_widget(title, area);
         }
     }
