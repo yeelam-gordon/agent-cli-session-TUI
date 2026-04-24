@@ -495,6 +495,508 @@ pub fn expand_path(s: &str) -> PathBuf {
     PathBuf::from(expanded)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V3 YAML schema types (deserialization-only) + translation to ProviderConfigFile
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Top-level v3 provider YAML.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfigV3 {
+    pub name: String,
+    pub display_name: String,
+    /// Optional `files:` section declaring source files.
+    #[serde(default)]
+    pub files: V3Files,
+    pub discovery: V3Discovery,
+    #[serde(default)]
+    pub events: V3Events,
+    pub extract: V3Extract,
+    pub process: V3Process,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct V3Files {
+    #[serde(default)]
+    pub metadata: Option<String>,
+    #[serde(default)]
+    pub events: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Discovery {
+    pub base_dir: String,
+    pub strategy: String,
+    #[serde(default)]
+    pub glob: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub hide_paths_glob: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct V3Events {
+    #[serde(default)]
+    pub filter_out: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Extract {
+    pub session_id: V3SessionId,
+    pub cwd: V3Cwd,
+    pub title: V3FieldSpec,
+    pub updated_at: V3TimestampSpec,
+    pub state: V3State,
+    #[serde(default)]
+    pub tab_title: Option<V3TabTitle>,
+}
+
+// ── session_id ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3SessionId {
+    pub from: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+}
+
+// ── cwd ──────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Cwd {
+    pub from: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub decoder: Option<String>,
+    #[serde(default)]
+    pub backtrack: bool,
+    #[serde(default)]
+    pub from_parent: bool,
+    #[serde(default)]
+    pub r#where: Option<String>,
+    // config_file fields
+    #[serde(default)]
+    pub lookup_file: Option<String>,
+    #[serde(default)]
+    pub key_source: Option<String>,
+    #[serde(default)]
+    pub container_path: Option<String>,
+}
+
+// ── field specs (title etc.) ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3FieldSpec {
+    pub from: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub r#where: Option<String>,
+    #[serde(default)]
+    pub transforms: Vec<String>,
+    #[serde(default)]
+    pub fallback: Vec<V3FieldSpec>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+}
+
+// ── timestamp ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3TimestampSpec {
+    pub from: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+// ── state signals ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3State {
+    pub from: String,
+    #[serde(default)]
+    pub last_event_map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub event_predicates: Vec<V3EventPredicate>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3EventPredicate {
+    pub r#where: String,
+    pub value: String,
+}
+
+// ── tab title ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3TabTitle {
+    pub from: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub r#where: Option<String>,
+    #[serde(default)]
+    pub iterate_path: Option<String>,
+    #[serde(default)]
+    pub tool_name_path: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub args_path: Option<String>,
+    #[serde(default)]
+    pub arg_field: Option<String>,
+}
+
+// ── process match ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Process {
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub script_contains: Option<String>,
+    pub r#match: V3ProcessMatch,
+    #[serde(default)]
+    pub fallback: Option<V3ProcessFallback>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3ProcessMatch {
+    pub field: String,
+    pub on: String,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub pid_regex: Option<String>,
+    #[serde(default)]
+    pub flag: Option<V3FlagValue>,
+}
+
+/// Accepts both `flag: "--x"` and `flag: ["--x", "--y"]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum V3FlagValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3ProcessFallback {
+    #[serde(default)]
+    pub recently_active_secs: Option<u64>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Translation: V3 → ProviderConfigFile
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl TryFrom<ProviderConfigV3> for ProviderConfigFile {
+    type Error = anyhow::Error;
+
+    fn try_from(v3: ProviderConfigV3) -> Result<Self, Self::Error> {
+        Ok(ProviderConfigFile {
+            name: v3.name,
+            display_name: v3.display_name,
+            capabilities: CapabilitiesConfig::default(),
+            discovery: translate_discovery(&v3.discovery, &v3.files)?,
+            session_id: translate_session_id(&v3.extract.session_id)?,
+            cwd: translate_cwd(&v3.extract.cwd)?,
+            events: EventsConfig {
+                format: EventFormat::Jsonl,
+                filter_out: v3.events.filter_out,
+            },
+            fields: translate_fields(&v3.extract)?,
+            state_signals: translate_state(&v3.extract.state),
+            process_match: translate_process(&v3.process)?,
+            tab_title: v3.extract.tab_title.map(translate_tab_title).transpose()?,
+            session_detail: None,
+        })
+    }
+}
+
+fn translate_discovery(d: &V3Discovery, files: &V3Files) -> Result<DiscoveryConfig, anyhow::Error> {
+    let strategy = match d.strategy.as_str() {
+        "dir_per_session" => DiscoveryStrategy::DirPerSession {
+            metadata_file: files.metadata.clone(),
+            events_file: files
+                .events
+                .clone()
+                .unwrap_or_else(|| "events.jsonl".to_string()),
+            tail_bytes: default_tail_bytes(),
+            lockfile_pattern: None, // populated from process match later if needed
+        },
+        "file_per_session" => DiscoveryStrategy::FilePerSession {
+            glob: d.glob.clone().unwrap_or_else(|| "**/*.jsonl".to_string()),
+            tail_bytes: default_tail_bytes(),
+            hide_paths_glob: d.hide_paths_glob.clone(),
+        },
+        "date_partitioned" => DiscoveryStrategy::DatePartitioned {
+            pattern: d
+                .pattern
+                .clone()
+                .unwrap_or_else(|| "{YYYY}/{MM}/{DD}/*.jsonl".to_string()),
+            tail_bytes: default_tail_bytes(),
+        },
+        other => anyhow::bail!("unknown v3 discovery strategy: {other}"),
+    };
+    Ok(DiscoveryConfig {
+        base_dir: d.base_dir.clone(),
+        strategy,
+    })
+}
+
+fn translate_session_id(sid: &V3SessionId) -> Result<SessionIdConfig, anyhow::Error> {
+    match sid.from.as_str() {
+        "dirname" => Ok(SessionIdConfig::Dirname),
+        "filename_stem" => Ok(SessionIdConfig::FilenameStem),
+        "events" => {
+            if sid.strategy.as_deref() == Some("first_event_field") {
+                let field = sid
+                    .path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("v3 session_id from events needs `path`"))?;
+                Ok(SessionIdConfig::FirstEventField { field })
+            } else {
+                anyhow::bail!("v3 session_id from events: unknown strategy {:?}", sid.strategy)
+            }
+        }
+        other => anyhow::bail!("unknown v3 session_id.from: {other}"),
+    }
+}
+
+fn translate_cwd(cwd: &V3Cwd) -> Result<CwdConfig, anyhow::Error> {
+    match cwd.from.as_str() {
+        "metadata" => Ok(CwdConfig::YamlField {
+            path: cwd.path.clone().unwrap_or_else(|| "cwd".to_string()),
+        }),
+        "events" => Ok(CwdConfig::EventField {
+            event_type: cwd.r#where.as_ref().and_then(|w| extract_type_eq(w)),
+            field: cwd
+                .path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("v3 cwd from events needs `path`"))?,
+        }),
+        "dirname" => Ok(CwdConfig::DirnameDecode {
+            decoder: cwd
+                .decoder
+                .clone()
+                .unwrap_or_else(|| "drive_dash".to_string()),
+            backtrack: cwd.backtrack,
+            from_parent: cwd.from_parent,
+        }),
+        "config_file" => Ok(CwdConfig::ConfigReverseLookup {
+            lookup_file: cwd
+                .lookup_file
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("v3 cwd config_file needs `lookup_file`"))?,
+            key_source: cwd
+                .key_source
+                .clone()
+                .unwrap_or_else(|| "parent_dir_name".to_string()),
+            container_path: cwd.container_path.clone().unwrap_or_default(),
+        }),
+        other => anyhow::bail!("unknown v3 cwd.from: {other}"),
+    }
+}
+
+/// Extract the value from `type == "X"` pattern used in where clauses.
+fn extract_type_eq(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    // Match: type == "value"
+    if let Some(rest) = expr.strip_prefix("type ==") {
+        let rest = rest.trim().trim_matches('"').trim_matches('\'');
+        return Some(rest.to_string());
+    }
+    None
+}
+
+fn translate_v3_field(f: &V3FieldSpec) -> FieldSpec {
+    let strategy = match f.from.as_str() {
+        "metadata" => "metadata_field".to_string(),
+        "events" => "first_matching_event".to_string(),
+        _ => f.strategy.clone().unwrap_or_else(|| "first_matching_event".to_string()),
+    };
+    FieldSpec {
+        strategy,
+        r#where: f.r#where.clone(),
+        path: f.path.clone().unwrap_or_default(),
+        transforms: f.transforms.clone(),
+        join: None,
+        limit: None,
+        nth: None,
+        fallback: f.fallback.iter().map(translate_v3_field).collect(),
+    }
+}
+
+fn translate_fields(extract: &V3Extract) -> Result<FieldsConfig, anyhow::Error> {
+    Ok(FieldsConfig {
+        title: translate_v3_field(&extract.title),
+        summary: None,
+        created_at: None,
+        updated_at: translate_timestamp(&extract.updated_at),
+        summary_parts: Vec::new(),
+        discard_if_empty: true,
+    })
+}
+
+fn translate_timestamp(ts: &V3TimestampSpec) -> TimestampSpec {
+    let strategy = ts
+        .strategy
+        .clone()
+        .unwrap_or_else(|| "file_mtime".to_string());
+    TimestampSpec {
+        strategy,
+        path: ts.path.clone(),
+        fallback: Vec::new(),
+    }
+}
+
+/// Translate v3 shorthand interaction values to internal model values.
+fn translate_interaction(v: &str) -> String {
+    match v {
+        "waiting" => "waiting_input".to_string(),
+        "busy" => "busy".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn translate_state(state: &V3State) -> StateSignalsConfig {
+    let last_event_map = state
+        .last_event_map
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                StateSignalDelta {
+                    interaction: Some(translate_interaction(v)),
+                    process: None,
+                },
+            )
+        })
+        .collect();
+
+    let event_predicates = state
+        .event_predicates
+        .iter()
+        .map(|p| EventPredicate {
+            r#where: p.r#where.clone(),
+            delta: StateSignalDelta {
+                interaction: Some(translate_interaction(&p.value)),
+                process: None,
+            },
+        })
+        .collect();
+
+    StateSignalsConfig {
+        last_event_map,
+        event_predicates,
+        idle_threshold_seconds: default_idle_secs(),
+        unfinished_turn_when: None,
+        recent_tool_activity_when: None,
+    }
+}
+
+fn translate_tab_title(tt: V3TabTitle) -> Result<TabTitleConfig, anyhow::Error> {
+    match tt.from.as_str() {
+        "events" => {
+            match tt.strategy.as_deref() {
+                Some("from_tool_call") => Ok(TabTitleConfig::FromToolCall {
+                    tool_name: tt.tool_name.unwrap_or_default(),
+                    arg_field: tt.arg_field.unwrap_or_default(),
+                    r#where: tt.r#where.unwrap_or_default(),
+                    tool_name_path: tt.tool_name_path.unwrap_or_default(),
+                    args_path: tt.args_path.unwrap_or_default(),
+                    iterate_path: tt.iterate_path,
+                }),
+                _ => anyhow::bail!("v3 tab_title from events: unknown strategy {:?}", tt.strategy),
+            }
+        }
+        "literal" => Ok(TabTitleConfig::Literal {
+            value: tt.value.unwrap_or_default(),
+        }),
+        "cwd" => {
+            match tt.strategy.as_deref() {
+                Some("cwd_basename") | None => Ok(TabTitleConfig::CwdBasename),
+                other => anyhow::bail!("v3 tab_title from cwd: unknown strategy {other:?}"),
+            }
+        }
+        other => anyhow::bail!("unknown v3 tab_title.from: {other}"),
+    }
+}
+
+fn translate_process(p: &V3Process) -> Result<ProcessMatchConfig, anyhow::Error> {
+    let recently_active_secs = p
+        .fallback
+        .as_ref()
+        .and_then(|f| f.recently_active_secs);
+
+    match p.r#match.on.as_str() {
+        "lockfile" => Ok(ProcessMatchConfig::Lockfile {
+            lockfile_pattern: p
+                .r#match
+                .pattern
+                .clone()
+                .unwrap_or_else(|| "inuse.*.lock".to_string()),
+            pid_extract_regex: p
+                .r#match
+                .pid_regex
+                .clone()
+                .unwrap_or_else(|| r"inuse\.(\d+)\.lock".to_string()),
+        }),
+        "flag" => {
+            let flag = match &p.r#match.flag {
+                Some(V3FlagValue::One(s)) => FlagSpec::One(s.clone()),
+                Some(V3FlagValue::Many(v)) => FlagSpec::Many(v.clone()),
+                None => anyhow::bail!("v3 process match on flag: missing `flag` field"),
+            };
+            Ok(ProcessMatchConfig::Cmdline {
+                executable: p.executable.clone().unwrap_or_default(),
+                script_contains: p.script_contains.clone(),
+                not_contains: None,
+                id_match: CmdlineIdMatch::Flag { flag },
+                recently_active_secs,
+            })
+        }
+        "positional_arg" => Ok(ProcessMatchConfig::Cmdline {
+            executable: p.executable.clone().unwrap_or_default(),
+            script_contains: p.script_contains.clone(),
+            not_contains: None,
+            id_match: CmdlineIdMatch::PositionalUuid,
+            recently_active_secs,
+        }),
+        "contains" => Ok(ProcessMatchConfig::Cmdline {
+            executable: p.executable.clone().unwrap_or_default(),
+            script_contains: p.script_contains.clone(),
+            not_contains: None,
+            id_match: CmdlineIdMatch::Contains,
+            recently_active_secs,
+        }),
+        other => anyhow::bail!("unknown v3 process.match.on: {other}"),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3 detection helper
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Returns true if the YAML text looks like a v3 provider config
+/// (has top-level `extract:` key, which old format never has).
+pub fn is_v3_yaml(text: &str) -> bool {
+    // Quick heuristic: v3 always has `extract:` at the top level.
+    // The old format uses `session_id:`, `cwd:`, `fields:`, `state_signals:`.
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed == "extract:" || trimmed.starts_with("extract:")
+    })
+}
+
 #[cfg(test)]
 mod expand_path_tests {
     use super::*;

@@ -43,9 +43,22 @@ pub struct ConfigDrivenProvider {
 
 impl ConfigDrivenProvider {
     /// Load a provider from a YAML file on disk.
+    /// Tries v3 format first (detected by top-level `extract:` key), then
+    /// falls back to the original format.
     pub fn load_from_yaml(path: &Path, app_cfg: &AppProviderConfig) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading provider YAML: {path:?}"))?;
+
+        // Try v3 format first (has `extract:` key).
+        if schema::is_v3_yaml(&text) {
+            let v3: schema::ProviderConfigV3 = serde_yaml::from_str(&text)
+                .with_context(|| format!("parsing v3 provider YAML: {path:?}"))?;
+            let cfg = ProviderConfigFile::try_from(v3)
+                .with_context(|| format!("translating v3 YAML: {path:?}"))?;
+            return Self::from_config(cfg, app_cfg);
+        }
+
+        // Fall back to old format.
         let cfg: ProviderConfigFile = serde_yaml::from_str(&text)
             .with_context(|| format!("parsing provider YAML: {path:?}"))?;
         Self::from_config(cfg, app_cfg)
@@ -2155,8 +2168,16 @@ tab_title:
             .join(format!("{name}.yaml"));
         assert!(yaml.exists(), "providers/{name}.yaml missing");
         let text = std::fs::read_to_string(&yaml).unwrap();
-        serde_yaml::from_str(&text)
-            .unwrap_or_else(|e| panic!("providers/{name}.yaml must parse: {e}"))
+        // Try v3 format first, fall back to old format.
+        if schema::is_v3_yaml(&text) {
+            let v3: schema::ProviderConfigV3 = serde_yaml::from_str(&text)
+                .unwrap_or_else(|e| panic!("providers/{name}.yaml v3 parse failed: {e}"));
+            ProviderConfigFile::try_from(v3)
+                .unwrap_or_else(|e| panic!("providers/{name}.yaml v3 translation failed: {e}"))
+        } else {
+            serde_yaml::from_str(&text)
+                .unwrap_or_else(|e| panic!("providers/{name}.yaml must parse: {e}"))
+        }
     }
 
     #[test]
