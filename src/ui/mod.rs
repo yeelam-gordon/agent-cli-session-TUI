@@ -593,6 +593,9 @@ impl App {
     }
 
     fn draw_session_list(&mut self, f: &mut Frame, area: Rect) {
+        // Title can use most of the row width. Reserve space for:
+        //   badge(3) + provider(6) + spaces(2) + state/age suffix(~20) + border(2)
+        let title_max = (area.width as usize).saturating_sub(35).max(20);
         let items: Vec<ListItem> = self
             .filtered_indices
             .iter()
@@ -606,7 +609,7 @@ impl App {
                 let title_display = if s.title.is_empty() {
                     short_id.to_string()
                 } else {
-                    truncate_str_safe(&s.title, 25)
+                    truncate_str_safe(&s.title, title_max)
                 };
 
                 let sem_icon = if self.semantic_matches.contains(&session_idx) {
@@ -636,17 +639,14 @@ impl App {
                         format!(" {}", sem_icon),
                         Style::default().fg(Color::Magenta),
                     ),
-                ]);
-
-                let age_line = Line::from(vec![
-                    Span::raw("   "),
+                    Span::raw(" "),
                     Span::styled(
                         format!("{} · {}", s.state.label(), age),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]);
 
-                ListItem::new(vec![line, age_line])
+                ListItem::new(vec![line])
             })
             .collect();
 
