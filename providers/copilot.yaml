@@ -1,13 +1,16 @@
-# Copilot CLI provider — declarative config.
+# Copilot CLI provider — v3 YAML (parse-time sugar over internal schema).
 #
-# Fresh re-investigation of on-disk layout (~/.copilot/session-state/<UUID>/):
-#   - workspace.yaml         — session metadata (cwd, summary)
-#   - events.jsonl           — append-only event stream
-#   - inuse.<PID>.lock       — per-process live-lock file(s)
+# v3 surface collapses the old split between discovery/fields/liveness/tab_title
+# blocks into a single `extract:` contract plus a tiny `process:` block. Every
+# field declares its source via `from:` (metadata | events | dirname | cwd),
+# so strategy boilerplate (`strategy: metadata_field`, `strategy:
+# first_matching_event`) disappears. Downstream code sees the same internal
+# ProviderConfigFile regardless of v2/v3 source.
 #
-# Dead code INTENTIONALLY dropped:
-#   - human.message fallback (never observed in real sessions)
-#   - plan.md parsing (rare; not worth special-casing)
+# On-disk layout (~/.copilot/session-state/<UUID>/):
+#   - workspace.yaml     — session metadata (cwd, summary)
+#   - events.jsonl       — append-only event stream
+#   - inuse.<PID>.lock   — per-process live-lock file(s)
 
 name: copilot
 display_name: Copilot
@@ -21,122 +24,110 @@ capabilities:
   supports_archive: true
   supports_summary_extraction: true
 
+files:
+  metadata: workspace.yaml
+  events: events.jsonl
+
 discovery:
   base_dir: ${HOME}/.copilot/session-state
   strategy: dir_per_session
-  metadata_file: workspace.yaml
-  events_file: events.jsonl
-  tail_bytes: 2097152          # 512 KB; enough for tab-title + last messages
-  lockfile_pattern: "inuse.*.lock"
+  tail_bytes: 2097152
 
-session_id:
-  source: dirname
+extract:
+  session_id:
+    from: dirname
 
-cwd:
-  source: yaml_field
-  path: cwd
+  cwd:
+    from: metadata
+    path: cwd
 
-events:
-  format: jsonl
-  filter_out: []              # no noise events in Copilot's stream
-
-fields:
-  discard_if_empty: true
   title:
-    # Prefer the workspace.yaml summary (Copilot writes a human-readable
-    # summary there). Fall back to the first user.message event if no
-    # summary has been written yet.
-    strategy: metadata_field
+    from: metadata
     path: summary
-    transforms:
-      - strip_newlines
-      - trim
-      - truncate:60
+    transforms: [strip_newlines, trim, "truncate:60"]
     fallback:
-      - strategy: first_matching_event
+      - from: events
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
-        transforms:
-          - strip_newlines
-          - trim
-          - truncate:60
+        transforms: [strip_newlines, trim, "truncate:60"]
+
   summary:
-    strategy: metadata_field
+    from: metadata
     path: summary
-    transforms:
-      - trim
-      - truncate:500
+    transforms: [trim, "truncate:500"]
+
   summary_parts:
     - name: first_user
       label: "── First message ──"
       spec:
-        strategy: first_matching_event
+        from: events
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
+        transforms: [trim, "truncate:2000"]
     - name: last_user
       label: "── Last user message ──"
       skip_if_same_as: first_user
       spec:
+        from: events
         strategy: last_matching_event
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
+        transforms: [trim, "truncate:2000"]
     - name: prev_assistant
       label: "── Previous response ──"
       spec:
+        from: events
         strategy: nth_from_end_matching_event
         where: 'type == "assistant.message" and data.content != null and data.content != "" and (not data.toolRequests or len(data.content) > 100)'
         nth: 2
         path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
+        transforms: [trim, "truncate:2000"]
     - name: last_assistant
       label: "── Last Copilot response ──"
       spec:
+        from: events
         strategy: last_matching_event
         where: 'type == "assistant.message" and data.content != null and data.content != "" and (not data.toolRequests or len(data.content) > 100)'
         path: data.content // data.message // data.text
-        transforms:
-          - trim
-          - truncate:2000
+        transforms: [trim, "truncate:2000"]
+
   created_at:
+    from: events
     strategy: first_event_field
     path: timestamp
     fallback:
-      - strategy: file_mtime
+      - from: file
+        strategy: file_mtime
+
   updated_at:
-    strategy: file_mtime       # events.jsonl mtime = real-time activity
+    from: file
+    strategy: file_mtime
 
-state_signals:
-  # Scanned most-recent-first; the first event type that matches wins.
-  last_event_map:
-    "assistant.turn_start":     { interaction: busy }
-    "assistant.turn_end":       { interaction: waiting_input }
-    "assistant.turn_complete":  { interaction: waiting_input }
-    "session.task_complete":    { interaction: waiting_input }
-    "user.message":             { interaction: busy }
-    "tool.execution_start":     { interaction: busy }
-    "tool.execution_complete":  { interaction: busy }
-  idle_threshold_seconds: 1800
+  state:
+    from: events
+    last_event_map:
+      "assistant.turn_start":    busy
+      "assistant.turn_end":      waiting
+      "assistant.turn_complete": waiting
+      "session.task_complete":   waiting
+      "user.message":            busy
+      "tool.execution_start":    busy
+      "tool.execution_complete": busy
+    idle_threshold_seconds: 1800
 
-liveness_detection:
-  strategies:
-    - strategy: lockfile
-      lockfile_pattern: "inuse.*.lock"
-      # Capture the PID from filename: `inuse.12345.lock` → `12345`.
-      pid_extract_regex: 'inuse\.(\d+)\.lock'
+  tab_title:
+    from: events
+    strategy: from_tool_call
+    where: 'type == "assistant.message"'
+    iterate_path: data.toolRequests
+    tool_name_path: name
+    tool_name: report_intent
+    args_path: arguments
+    arg_field: intent
 
-tab_title:
-  strategy: from_tool_call
-  where: 'type == "assistant.message"'
-  iterate_path: data.toolRequests
-  tool_name_path: name
-  tool_name: report_intent
-  args_path: arguments
-  arg_field: intent
+process:
+  match:
+    field: lockfile
+    on: lockfile
+    pattern: "inuse.*.lock"
+    pid_regex: 'inuse\.(\d+)\.lock'

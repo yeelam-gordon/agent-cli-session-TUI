@@ -491,6 +491,670 @@ pub struct SessionDetailConfig {
     pub plan_item_done_path: Option<String>,
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// V3 YAML schema — deserialization-only sugar layer.
+//
+// v3 is a shrinkage of the v2 YAML surface: every field declares its source
+// via `from:` (metadata / events / dirname), so strategy-level boilerplate
+// (`strategy: metadata_field`, `strategy: first_matching_event`) disappears.
+// The entire extract contract lives under a single `extract:` block, and
+// source files are named once in `files:`.
+//
+// Ported from `experiment/yaml-providers-minimal`, extended here to preserve
+// all full-TUI features the minimal branch dropped (summary, summary_parts,
+// created_at, capabilities, session_detail, idle_threshold).
+//
+// Detection: [`is_v3_yaml`] sniffs for a top-level `extract:` key. v2 YAMLs
+// don't have it, so the two formats coexist and migration is per-file.
+//
+// Translation: [`TryFrom<ProviderConfigV3>`] on [`ProviderConfigFile`] lowers
+// v3 to the same internal struct used by the existing eval pipeline — so once
+// loaded, v2 and v3 are indistinguishable downstream.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Top-level v3 provider YAML.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfigV3 {
+    pub name: String,
+    pub display_name: String,
+    /// Optional top-level capabilities. Defaults to full's `CapabilitiesConfig::default()`
+    /// (all false) when absent, matching v2 behavior for YAMLs that omit the block.
+    #[serde(default)]
+    pub capabilities: Option<CapabilitiesConfig>,
+    /// Optional `files:` section declaring named source files. Referenced by
+    /// `from:` in `extract:` below.
+    #[serde(default)]
+    pub files: V3Files,
+    pub discovery: V3Discovery,
+    #[serde(default)]
+    pub events: V3Events,
+    pub extract: V3Extract,
+    pub process: V3Process,
+    /// Optional session detail pane config (plan items etc.). Optional — when
+    /// absent the detail pane falls back to summary only.
+    #[serde(default)]
+    pub detail: Option<SessionDetailConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct V3Files {
+    #[serde(default)]
+    pub metadata: Option<String>,
+    #[serde(default)]
+    pub events: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Discovery {
+    pub base_dir: String,
+    pub strategy: String,
+    #[serde(default)]
+    pub glob: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub hide_paths_glob: Vec<String>,
+    /// Optional tail_bytes override (applies to all discovery strategies).
+    #[serde(default)]
+    pub tail_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct V3Events {
+    #[serde(default)]
+    pub filter_out: Vec<String>,
+    /// Optional JSON format override (defaults to JSONL).
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Extract {
+    pub session_id: V3SessionId,
+    pub cwd: V3Cwd,
+    pub title: V3FieldSpec,
+    /// Extended v3 (full TUI): optional 500-char summary for the detail pane.
+    /// Absent → synthesized as a never-matching spec (empty summary).
+    #[serde(default)]
+    pub summary: Option<V3FieldSpec>,
+    /// Extended v3 (full TUI): optional created_at timestamp.
+    /// Absent → synthesized as `file_mtime`.
+    #[serde(default)]
+    pub created_at: Option<V3TimestampSpec>,
+    pub updated_at: V3TimestampSpec,
+    pub state: V3State,
+    #[serde(default)]
+    pub tab_title: Option<V3TabTitle>,
+    /// Extended v3 (full TUI): labeled summary parts for the detail pane.
+    #[serde(default)]
+    pub summary_parts: Vec<V3SummaryPart>,
+    /// Extended v3 (full TUI): if true, sessions with no title/summary are dropped.
+    /// Defaults to true (matches minimal's v3 default; discard_if_empty was a
+    /// legacy opt-in in v2 but the new behavior consistently drops empties).
+    #[serde(default = "default_true")]
+    pub discard_if_empty: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ── session_id ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3SessionId {
+    pub from: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// Optional regex for session id extraction (e.g. gemini's filename pattern).
+    #[serde(default)]
+    pub regex: Option<String>,
+}
+
+// ── cwd ──────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Cwd {
+    pub from: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub decoder: Option<String>,
+    #[serde(default)]
+    pub backtrack: bool,
+    #[serde(default)]
+    pub from_parent: bool,
+    #[serde(default)]
+    pub r#where: Option<String>,
+    // config_file fields
+    #[serde(default)]
+    pub lookup_file: Option<String>,
+    #[serde(default)]
+    pub key_source: Option<String>,
+    #[serde(default)]
+    pub container_path: Option<String>,
+}
+
+// ── field specs (title/summary/etc.) ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3FieldSpec {
+    pub from: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub r#where: Option<String>,
+    #[serde(default)]
+    pub transforms: Vec<String>,
+    #[serde(default)]
+    pub fallback: Vec<V3FieldSpec>,
+    /// Optional explicit strategy override (defaults based on `from:`).
+    /// Useful to select `last_matching_event` vs `first_matching_event`, or
+    /// `nth_from_end_matching_event` with `nth`.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// For nth_from_end_matching_event strategy.
+    #[serde(default)]
+    pub nth: Option<usize>,
+    /// For joined_events strategy.
+    #[serde(default)]
+    pub join: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+// ── summary parts (full-TUI extension) ───────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3SummaryPart {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub label: String,
+    pub spec: V3FieldSpec,
+    #[serde(default)]
+    pub skip_if_same_as: Option<String>,
+}
+
+// ── timestamp ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3TimestampSpec {
+    pub from: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub fallback: Vec<V3TimestampSpec>,
+}
+
+// ── state signals ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3State {
+    pub from: String,
+    #[serde(default)]
+    pub last_event_map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub event_predicates: Vec<V3EventPredicate>,
+    /// Extended v3 (full TUI): idle threshold override. Defaults to 1800s.
+    #[serde(default)]
+    pub idle_threshold_seconds: Option<u64>,
+    #[serde(default)]
+    pub unfinished_turn_when: Option<String>,
+    #[serde(default)]
+    pub recent_tool_activity_when: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3EventPredicate {
+    pub r#where: String,
+    pub value: String,
+}
+
+// ── tab title ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3TabTitle {
+    pub from: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub r#where: Option<String>,
+    #[serde(default)]
+    pub iterate_path: Option<String>,
+    #[serde(default)]
+    pub tool_name_path: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub args_path: Option<String>,
+    #[serde(default)]
+    pub arg_field: Option<String>,
+    /// For `from: field` (FromField variant) — path inside matched event.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// For TabTitleMatch liveness-style fuzzy match (full-TUI extension).
+    #[serde(default)]
+    pub fuzzy: Option<String>,
+    #[serde(default)]
+    pub min_title_len: Option<usize>,
+}
+
+// ── process match ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3Process {
+    #[serde(default)]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub script_contains: Option<String>,
+    #[serde(default)]
+    pub not_contains: Option<String>,
+    pub r#match: V3ProcessMatch,
+    #[serde(default)]
+    pub fallback: Option<V3ProcessFallback>,
+    /// Extended v3 (full TUI): extra liveness strategies appended after `match:`.
+    /// Enables the chained strategy model (e.g. cmdline_flag_uuid, then
+    /// tab_title_match, then recently_active) while still keeping the primary
+    /// `match:` block readable. Each entry is a v2-style raw LivenessStrategy.
+    #[serde(default)]
+    pub extra_strategies: Vec<LivenessStrategy>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3ProcessMatch {
+    pub field: String,
+    pub on: String,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub pid_regex: Option<String>,
+    #[serde(default)]
+    pub flag: Option<V3FlagValue>,
+}
+
+/// Accepts both `flag: "--x"` and `flag: ["--x", "--y"]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum V3FlagValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct V3ProcessFallback {
+    #[serde(default)]
+    pub recently_active_secs: Option<u64>,
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Translation: V3 → ProviderConfigFile
+// ═════════════════════════════════════════════════════════════════════════════
+
+impl TryFrom<ProviderConfigV3> for ProviderConfigFile {
+    type Error = anyhow::Error;
+
+    fn try_from(v3: ProviderConfigV3) -> Result<Self, Self::Error> {
+        Ok(ProviderConfigFile {
+            name: v3.name,
+            display_name: v3.display_name,
+            capabilities: v3.capabilities.unwrap_or_default(),
+            discovery: translate_discovery(&v3.discovery, &v3.files)?,
+            session_id: translate_session_id(&v3.extract.session_id)?,
+            cwd: translate_cwd(&v3.extract.cwd)?,
+            events: EventsConfig {
+                format: match v3.events.format.as_deref() {
+                    Some("json_array") => EventFormat::JsonArray,
+                    _ => EventFormat::Jsonl,
+                },
+                filter_out: v3.events.filter_out,
+            },
+            fields: translate_fields(&v3.extract)?,
+            state_signals: translate_state(&v3.extract.state),
+            liveness_detection: translate_process(&v3.process)?,
+            tab_title: v3.extract.tab_title.map(translate_tab_title).transpose()?,
+            session_detail: v3.detail,
+        })
+    }
+}
+
+fn translate_discovery(d: &V3Discovery, files: &V3Files) -> Result<DiscoveryConfig, anyhow::Error> {
+    let tail_bytes = d.tail_bytes.unwrap_or_else(default_tail_bytes);
+    let strategy = match d.strategy.as_str() {
+        "dir_per_session" => DiscoveryStrategy::DirPerSession {
+            metadata_file: files.metadata.clone(),
+            events_file: files
+                .events
+                .clone()
+                .unwrap_or_else(|| "events.jsonl".to_string()),
+            tail_bytes,
+            lockfile_pattern: None,
+        },
+        "file_per_session" => DiscoveryStrategy::FilePerSession {
+            glob: d.glob.clone().unwrap_or_else(|| "**/*.jsonl".to_string()),
+            tail_bytes,
+            hide_paths_glob: d.hide_paths_glob.clone(),
+        },
+        "date_partitioned" => DiscoveryStrategy::DatePartitioned {
+            pattern: d
+                .pattern
+                .clone()
+                .unwrap_or_else(|| "{YYYY}/{MM}/{DD}/*.jsonl".to_string()),
+            tail_bytes,
+        },
+        other => anyhow::bail!("unknown v3 discovery strategy: {other}"),
+    };
+    Ok(DiscoveryConfig {
+        base_dir: d.base_dir.clone(),
+        strategy,
+    })
+}
+
+fn translate_session_id(sid: &V3SessionId) -> Result<SessionIdConfig, anyhow::Error> {
+    match sid.from.as_str() {
+        "dirname" => Ok(SessionIdConfig::Dirname),
+        "filename_stem" => {
+            if let Some(regex) = sid.regex.clone() {
+                Ok(SessionIdConfig::FilenameRegex { regex })
+            } else {
+                Ok(SessionIdConfig::FilenameStem)
+            }
+        }
+        "events" => {
+            if sid.strategy.as_deref() == Some("first_event_field") {
+                let field = sid
+                    .path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("v3 session_id from events needs `path`"))?;
+                Ok(SessionIdConfig::FirstEventField { field })
+            } else {
+                anyhow::bail!(
+                    "v3 session_id from events: unknown strategy {:?}",
+                    sid.strategy
+                )
+            }
+        }
+        other => anyhow::bail!("unknown v3 session_id.from: {other}"),
+    }
+}
+
+fn translate_cwd(cwd: &V3Cwd) -> Result<CwdConfig, anyhow::Error> {
+    match cwd.from.as_str() {
+        "metadata" => Ok(CwdConfig::YamlField {
+            path: cwd.path.clone().unwrap_or_else(|| "cwd".to_string()),
+        }),
+        "events" => Ok(CwdConfig::EventField {
+            event_type: cwd.r#where.as_ref().and_then(|w| extract_type_eq(w)),
+            field: cwd
+                .path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("v3 cwd from events needs `path`"))?,
+        }),
+        "dirname" => Ok(CwdConfig::DirnameDecode {
+            decoder: cwd
+                .decoder
+                .clone()
+                .unwrap_or_else(|| "drive_dash".to_string()),
+            backtrack: cwd.backtrack,
+            from_parent: cwd.from_parent,
+        }),
+        "config_file" => Ok(CwdConfig::ConfigReverseLookup {
+            lookup_file: cwd
+                .lookup_file
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("v3 cwd config_file needs `lookup_file`"))?,
+            key_source: cwd
+                .key_source
+                .clone()
+                .unwrap_or_else(|| "parent_dir_name".to_string()),
+            container_path: cwd.container_path.clone().unwrap_or_default(),
+        }),
+        other => anyhow::bail!("unknown v3 cwd.from: {other}"),
+    }
+}
+
+/// Extract the value from `type == "X"` pattern used in where clauses.
+fn extract_type_eq(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    if let Some(rest) = expr.strip_prefix("type ==") {
+        let rest = rest.trim().trim_matches('"').trim_matches('\'');
+        return Some(rest.to_string());
+    }
+    None
+}
+
+fn translate_v3_field(f: &V3FieldSpec) -> FieldSpec {
+    let strategy = f.strategy.clone().unwrap_or_else(|| match f.from.as_str() {
+        "metadata" => "metadata_field".to_string(),
+        "events" => "first_matching_event".to_string(),
+        _ => "first_matching_event".to_string(),
+    });
+    FieldSpec {
+        strategy,
+        r#where: f.r#where.clone(),
+        path: f.path.clone().unwrap_or_default(),
+        transforms: f.transforms.clone(),
+        join: f.join.clone(),
+        limit: f.limit,
+        nth: f.nth,
+        fallback: f.fallback.iter().map(translate_v3_field).collect(),
+    }
+}
+
+/// A FieldSpec that never matches — used when v3 YAML omits an optional field
+/// (like `extract.summary`) but the internal struct requires one. eval.rs
+/// handles this gracefully (returns empty string).
+fn never_matching_field() -> FieldSpec {
+    FieldSpec {
+        strategy: "first_matching_event".to_string(),
+        r#where: Some("false".to_string()),
+        path: String::new(),
+        transforms: Vec::new(),
+        join: None,
+        limit: None,
+        nth: None,
+        fallback: Vec::new(),
+    }
+}
+
+fn translate_fields(extract: &V3Extract) -> Result<FieldsConfig, anyhow::Error> {
+    let summary = extract
+        .summary
+        .as_ref()
+        .map(translate_v3_field)
+        .unwrap_or_else(never_matching_field);
+    let created_at = extract
+        .created_at
+        .as_ref()
+        .map(translate_timestamp)
+        .unwrap_or_else(|| TimestampSpec {
+            strategy: "file_mtime".to_string(),
+            path: None,
+            fallback: Vec::new(),
+        });
+    let summary_parts = extract
+        .summary_parts
+        .iter()
+        .map(|p| SummaryPart {
+            name: p.name.clone(),
+            label: p.label.clone(),
+            spec: translate_v3_field(&p.spec),
+            skip_if_same_as: p.skip_if_same_as.clone(),
+        })
+        .collect();
+    Ok(FieldsConfig {
+        title: translate_v3_field(&extract.title),
+        summary,
+        created_at,
+        updated_at: translate_timestamp(&extract.updated_at),
+        summary_parts,
+        discard_if_empty: extract.discard_if_empty,
+    })
+}
+
+fn translate_timestamp(ts: &V3TimestampSpec) -> TimestampSpec {
+    let strategy = ts
+        .strategy
+        .clone()
+        .unwrap_or_else(|| match ts.from.as_str() {
+            "metadata" => "metadata_field".to_string(),
+            "events" => "event_field".to_string(),
+            _ => "file_mtime".to_string(),
+        });
+    TimestampSpec {
+        strategy,
+        path: ts.path.clone(),
+        fallback: ts.fallback.iter().map(translate_timestamp).collect(),
+    }
+}
+
+/// Translate v3 shorthand interaction values to internal model values.
+fn translate_interaction(v: &str) -> String {
+    match v {
+        "waiting" => "waiting_input".to_string(),
+        "busy" => "busy".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn translate_state(state: &V3State) -> StateSignalsConfig {
+    let last_event_map = state
+        .last_event_map
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                StateSignalDelta {
+                    interaction: Some(translate_interaction(v)),
+                    process: None,
+                },
+            )
+        })
+        .collect();
+
+    let event_predicates = state
+        .event_predicates
+        .iter()
+        .map(|p| EventPredicate {
+            r#where: p.r#where.clone(),
+            delta: StateSignalDelta {
+                interaction: Some(translate_interaction(&p.value)),
+                process: None,
+            },
+        })
+        .collect();
+
+    StateSignalsConfig {
+        last_event_map,
+        event_predicates,
+        idle_threshold_seconds: state.idle_threshold_seconds.unwrap_or_else(default_idle_secs),
+        unfinished_turn_when: state.unfinished_turn_when.clone(),
+        recent_tool_activity_when: state.recent_tool_activity_when.clone(),
+    }
+}
+
+fn translate_tab_title(tt: V3TabTitle) -> Result<TabTitleConfig, anyhow::Error> {
+    match tt.from.as_str() {
+        "events" => match tt.strategy.as_deref() {
+            Some("from_tool_call") => Ok(TabTitleConfig::FromToolCall {
+                tool_name: tt.tool_name.unwrap_or_default(),
+                arg_field: tt.arg_field.unwrap_or_default(),
+                r#where: tt.r#where.unwrap_or_default(),
+                tool_name_path: tt.tool_name_path.unwrap_or_default(),
+                args_path: tt.args_path.unwrap_or_default(),
+                iterate_path: tt.iterate_path,
+            }),
+            Some("from_field") => Ok(TabTitleConfig::FromField {
+                r#where: tt.r#where.unwrap_or_default(),
+                path: tt.path.unwrap_or_default(),
+            }),
+            _ => anyhow::bail!(
+                "v3 tab_title from events: unknown strategy {:?}",
+                tt.strategy
+            ),
+        },
+        "literal" => Ok(TabTitleConfig::Literal {
+            value: tt.value.unwrap_or_default(),
+        }),
+        "cwd" => match tt.strategy.as_deref() {
+            Some("cwd_basename") | None => Ok(TabTitleConfig::CwdBasename),
+            other => anyhow::bail!("v3 tab_title from cwd: unknown strategy {other:?}"),
+        },
+        "title" => Ok(TabTitleConfig::FromTitle),
+        "none" => Ok(TabTitleConfig::None),
+        other => anyhow::bail!("unknown v3 tab_title.from: {other}"),
+    }
+}
+
+fn translate_process(p: &V3Process) -> Result<LivenessDetectionConfig, anyhow::Error> {
+    let recently_active_secs = p.fallback.as_ref().and_then(|f| f.recently_active_secs);
+
+    let primary = match p.r#match.on.as_str() {
+        "lockfile" => LivenessStrategy::Lockfile {
+            lockfile_pattern: p
+                .r#match
+                .pattern
+                .clone()
+                .unwrap_or_else(|| "inuse.*.lock".to_string()),
+            pid_extract_regex: p
+                .r#match
+                .pid_regex
+                .clone()
+                .unwrap_or_else(|| r"inuse\.(\d+)\.lock".to_string()),
+        },
+        "flag" => {
+            let flag = match &p.r#match.flag {
+                Some(V3FlagValue::One(s)) => FlagSpec::One(s.clone()),
+                Some(V3FlagValue::Many(v)) => FlagSpec::Many(v.clone()),
+                None => anyhow::bail!("v3 process match on flag: missing `flag` field"),
+            };
+            LivenessStrategy::CmdlineFlagUuid { flag }
+        }
+        "positional_arg" => LivenessStrategy::CmdlinePositionalUuid,
+        "contains" => LivenessStrategy::CmdlineContains,
+        other => anyhow::bail!("unknown v3 process.match.on: {other}"),
+    };
+
+    let mut strategies = vec![primary];
+    strategies.extend(p.extra_strategies.iter().cloned());
+    if let Some(secs) = recently_active_secs {
+        strategies.push(LivenessStrategy::RecentlyActive { within_secs: secs });
+    }
+
+    Ok(LivenessDetectionConfig {
+        executable: p.executable.clone(),
+        script_contains: p.script_contains.clone(),
+        not_contains: p.not_contains.clone(),
+        strategies,
+    })
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// V3 detection helper
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Returns true if the YAML text looks like a v3 provider config.
+///
+/// Heuristic: v3 always has a top-level `extract:` key. The v2 format uses
+/// `session_id:`, `cwd:`, `fields:`, `state_signals:` at the top level and
+/// never has `extract:`. We scan for a line that starts (after leading
+/// whitespace stripped from the *line itself*, not indent) with `extract:` —
+/// comments and indented sub-keys don't count.
+pub fn is_v3_yaml(text: &str) -> bool {
+    text.lines().any(|line| {
+        // Top-level only: line must not be indented.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            return false;
+        }
+        line.trim_end() == "extract:" || line.starts_with("extract:")
+    })
+}
+
 // ── Template expansion ───────────────────────────────────────────────────────
 
 /// Expand `${HOME}`, `${CACHE_DIR}`, and `${CONFIG_DIR}` in a path string.

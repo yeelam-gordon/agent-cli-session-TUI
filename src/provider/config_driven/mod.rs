@@ -149,11 +149,24 @@ pub struct ConfigDrivenProvider {
 
 impl ConfigDrivenProvider {
     /// Load a provider from a YAML file on disk.
+    ///
+    /// Accepts either the classic v2 format (explicit strategy discriminators)
+    /// or the v3 sugar format (inferred strategies via `from:`). v3 is
+    /// detected by the presence of a top-level `extract:` key and translated
+    /// at parse time via [`ProviderConfigFile::try_from`] — downstream code
+    /// sees a v2-shaped config regardless of the source format.
     pub fn load_from_yaml(path: &Path, app_cfg: &AppProviderConfig) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading provider YAML: {path:?}"))?;
-        let cfg: ProviderConfigFile = serde_yaml::from_str(&text)
-            .with_context(|| format!("parsing provider YAML: {path:?}"))?;
+        let cfg: ProviderConfigFile = if is_v3_yaml(&text) {
+            let v3: ProviderConfigV3 = serde_yaml::from_str(&text)
+                .with_context(|| format!("parsing provider YAML (v3): {path:?}"))?;
+            ProviderConfigFile::try_from(v3)
+                .with_context(|| format!("translating v3 → internal: {path:?}"))?
+        } else {
+            serde_yaml::from_str(&text)
+                .with_context(|| format!("parsing provider YAML: {path:?}"))?
+        };
         Self::from_config(cfg, app_cfg)
     }
 
@@ -2787,8 +2800,15 @@ tab_title:
             .join(format!("{name}.yaml"));
         assert!(yaml.exists(), "providers/{name}.yaml missing");
         let text = std::fs::read_to_string(&yaml).unwrap();
-        serde_yaml::from_str(&text)
-            .unwrap_or_else(|e| panic!("providers/{name}.yaml must parse: {e}"))
+        if is_v3_yaml(&text) {
+            let v3: ProviderConfigV3 = serde_yaml::from_str(&text)
+                .unwrap_or_else(|e| panic!("providers/{name}.yaml (v3) must parse: {e}"));
+            ProviderConfigFile::try_from(v3)
+                .unwrap_or_else(|e| panic!("providers/{name}.yaml v3→internal: {e}"))
+        } else {
+            serde_yaml::from_str(&text)
+                .unwrap_or_else(|e| panic!("providers/{name}.yaml must parse: {e}"))
+        }
     }
 
     #[test]
