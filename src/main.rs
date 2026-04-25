@@ -1,6 +1,7 @@
 mod archive;
 mod config;
 mod focus;
+mod groups;
 mod log;
 mod log_search;
 mod models;
@@ -108,6 +109,11 @@ async fn main() -> Result<()> {
     // responsible for calling `flush_blocking()` so no buffered state
     // is lost on quit.
     ArchiveStore::spawn_persist_worker(&archive);
+
+    // Session groups (separate from archives)
+    let groups_path = config.data_dir.join("groups.json");
+    log::info(&format!("Groups path: {:?}", groups_path));
+    let group_mgr = groups::GroupManager::open(&groups_path);
 
     // Build provider registry
     let mut registry = ProviderRegistry::new();
@@ -225,6 +231,7 @@ async fn main() -> Result<()> {
         semantic,
         config.tick_rate_ms,
         config.semantic_index_min_interval_ms,
+        group_mgr,
     );
     app.run(event_rx, cmd_tx).await?;
 

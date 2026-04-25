@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::log_search::LogSearcher;
 use crate::models::{InteractionState, PersistenceState, ProcessState, Session};
 use crate::provider::ProviderRegistry;
+use crate::groups::GroupManager;
 use crate::supervisor::{SupervisorCommand, SupervisorEvent};
 use crate::util::truncate_str_safe;
 
@@ -32,6 +33,8 @@ enum Focus {
 enum ViewMode {
     /// Normal: active sessions only.
     Active,
+    /// Grouped: sessions organized under group headers.
+    Grouped,
     /// Archive: archived + empty sessions.
     Hidden,
 }
@@ -95,6 +98,15 @@ fn clamp_cursor_after_removal(prev_index: usize, new_len: usize) -> Option<usize
 struct PendingTransition {
     key: String,
     confirmed: bool,
+}
+
+/// State for the group-assignment text prompt.
+#[derive(Debug, Clone)]
+struct GroupPrompt {
+    /// The session key being assigned ("provider:session_id").
+    session_key: String,
+    /// Current text input.
+    input: String,
 }
 
 /// The main TUI application state.
@@ -162,6 +174,10 @@ pub struct App {
     last_semantic_index_at: Option<std::time::Instant>,
     /// Per-provider shortcut keys: char → provider_key. Built at startup from YAML configs.
     shortcut_map: std::collections::HashMap<char, String>,
+    /// Session group manager (multi-group assignments, persisted to groups.json).
+    group_mgr: GroupManager,
+    /// Active group-assignment prompt (None = not showing).
+    group_prompt: Option<GroupPrompt>,
 }
 
 impl App {
@@ -175,6 +191,7 @@ impl App {
         semantic: std::sync::Arc<std::sync::Mutex<crate::search::SemanticPlugin>>,
         tick_rate_ms: u64,
         semantic_index_min_interval_ms: u64,
+        group_mgr: GroupManager,
     ) -> Self {
         let mut list_state = ListState::default();
         // No selection until all providers report in
@@ -276,13 +293,15 @@ impl App {
             semantic_index_min_interval_ms,
             last_semantic_index_at: None,
             shortcut_map,
+            group_mgr,
+            group_prompt: None,
         }
     }
 
     /// Get the list being displayed based on view mode.
     fn current_view_sessions(&self) -> &[Session] {
         match self.view_mode {
-            ViewMode::Active => &self.sessions,
+            ViewMode::Active | ViewMode::Grouped => &self.sessions,
             ViewMode::Hidden => &self.hidden_sessions,
         }
     }
@@ -767,11 +786,12 @@ impl App {
                         } else {
                             let shown = self.filtered_indices.len();
                             let total = match self.view_mode {
-                                ViewMode::Active => active_count,
+                                ViewMode::Active | ViewMode::Grouped => active_count,
                                 ViewMode::Hidden => hidden_count,
                             };
                             let mode_label = match self.view_mode {
                                 ViewMode::Active => "active",
+                                ViewMode::Grouped => "grouped",
                                 ViewMode::Hidden => "hidden",
                             };
                             format!(
@@ -892,6 +912,39 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
+        // ── Group assignment prompt intercepts all keys ──────────────
+        if let Some(ref mut prompt) = self.group_prompt {
+            match key.code {
+                KeyCode::Esc => {
+                    self.group_prompt = None;
+                    return;
+                }
+                KeyCode::Enter => {
+                    let input = prompt.input.trim().to_string();
+                    if !input.is_empty() {
+                        let sk = prompt.session_key.clone();
+                        self.group_mgr.assign_human(&sk, &input);
+                        self.log_lines.push(format!(
+                            "Assigned to group '{}': {}",
+                            input,
+                            crate::util::short_id(&sk, 16)
+                        ));
+                    }
+                    self.group_prompt = None;
+                    return;
+                }
+                KeyCode::Backspace => {
+                    prompt.input.pop();
+                    return;
+                }
+                KeyCode::Char(c) => {
+                    prompt.input.push(c);
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         // Global shortcuts — always work regardless of mode
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Char('q'))
@@ -1014,13 +1067,45 @@ impl App {
                 KeyCode::Enter => {
                     self.handle_enter(cmd_tx);
                 }
+                KeyCode::Char('g') if self.group_prompt.is_none() => {
+                    // Open group-assignment prompt for the selected session.
+                    if let Some(session) = self.selected_session() {
+                        let session_key = format!(
+                            "{}:{}",
+                            session.provider_name, session.provider_session_id
+                        );
+                        self.group_prompt = Some(GroupPrompt {
+                            session_key,
+                            input: String::new(),
+                        });
+                    }
+                }
+                KeyCode::Char('u') => {
+                    // Unassign: remove selected session from its first group.
+                    if let Some(session) = self.selected_session() {
+                        let session_key = format!(
+                            "{}:{}",
+                            session.provider_name, session.provider_session_id
+                        );
+                        let groups = self.group_mgr.groups_for(&session_key);
+                        if let Some(first) = groups.first() {
+                            let g = first.clone();
+                            self.group_mgr.unassign(&session_key, &g);
+                            self.log_lines.push(format!(
+                                "Unassigned from '{}': {}",
+                                g,
+                                crate::util::short_id(&session_key, 16)
+                            ));
+                        }
+                    }
+                }
                 KeyCode::Char('a') => {
                     if let Some(session) = self.selected_session() {
                         let psid = session.provider_session_id.clone();
                         let pname = session.provider_name.clone();
                         let key = format!("{}:{}", pname, psid);
                         match self.view_mode {
-                            ViewMode::Active => {
+                            ViewMode::Active | ViewMode::Grouped => {
                                 let _ = cmd_tx.send(SupervisorCommand::ArchiveSession {
                                     provider_session_id: psid.clone(),
                                     provider_key: pname.clone(),
@@ -1095,9 +1180,10 @@ impl App {
                     }
                 }
                 KeyCode::BackTab => {
-                    // Shift+Tab: toggle between Active and Hidden view
+                    // Shift+Tab: cycle Active → Grouped → Hidden → Active
                     self.view_mode = match self.view_mode {
-                        ViewMode::Active => ViewMode::Hidden,
+                        ViewMode::Active => ViewMode::Grouped,
+                        ViewMode::Grouped => ViewMode::Hidden,
                         ViewMode::Hidden => ViewMode::Active,
                     };
                     self.selected_index = 0;
@@ -1108,6 +1194,7 @@ impl App {
                         "View: {}",
                         match self.view_mode {
                             ViewMode::Active => "Active sessions",
+                            ViewMode::Grouped => "Grouped sessions",
                             ViewMode::Hidden => "Archived & hidden sessions",
                         }
                     ));
@@ -1185,12 +1272,60 @@ impl App {
 
         // Status bar
         self.draw_status_bar(f, chunks[3]);
+
+        // Group assignment prompt overlay (renders over status bar area)
+        if let Some(ref prompt) = self.group_prompt {
+            let all_groups = self.group_mgr.all_groups();
+            let filtered: Vec<_> = if prompt.input.is_empty() {
+                all_groups.iter().take(5).collect()
+            } else {
+                let q = prompt.input.to_lowercase();
+                all_groups
+                    .iter()
+                    .filter(|(name, _)| name.to_lowercase().contains(&q))
+                    .take(5)
+                    .collect()
+            };
+            let hint = if filtered.is_empty() && !prompt.input.is_empty() {
+                format!(" (new group '{}' will be created)", prompt.input)
+            } else {
+                filtered
+                    .iter()
+                    .map(|(name, count)| format!(" {}({})", name, count))
+                    .collect::<Vec<_>>()
+                    .join(" │")
+            };
+            let prompt_text = Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " Group: ",
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("{}▏", prompt.input)),
+                Span::styled(hint, Style::default().fg(Color::DarkGray)),
+                Span::styled("  Esc: cancel", Style::default().fg(Color::DarkGray)),
+            ]))
+            .style(Style::default().bg(Color::Black).fg(Color::White));
+            f.render_widget(prompt_text, chunks[3]);
+        }
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
         let hl = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 
-        if self.search_active {
+        if self.group_prompt.is_some() {
+            // Group assignment prompt mode
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(" Assign Group ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw("  type name  "),
+                Span::styled("⏎", hl),
+                Span::raw(" assign  "),
+                Span::styled("↑↓", hl),
+                Span::raw(" pick existing  "),
+                Span::styled("Esc", hl),
+                Span::raw(" cancel"),
+            ]));
+            f.render_widget(title, area);
+        } else if self.search_active {
             let title = Paragraph::new(Line::from(vec![
                 Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
@@ -1205,32 +1340,70 @@ impl App {
             ]));
             f.render_widget(title, area);
         } else {
-            // Normal mode — build shortcut hints dynamically
-            let mut spans = vec![
-                Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled("⏎", hl),
-                Span::raw(" open  "),
-                Span::styled("n", hl),
-                Span::raw("ew  "),
-            ];
-            // Append per-provider shortcut hints (sorted for stable order)
-            let mut shortcuts: Vec<_> = self.shortcut_map.iter().collect();
-            shortcuts.sort_by_key(|(ch, _)| *ch);
-            for (ch, key) in &shortcuts {
-                spans.push(Span::styled(ch.to_string(), hl));
-                spans.push(Span::raw(format!(" {} ", key)));
+            match self.view_mode {
+                ViewMode::Active => {
+                    let mut spans = vec![
+                        Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::raw("  "),
+                        Span::styled("⏎", hl),
+                        Span::raw(" open  "),
+                        Span::styled("n", hl),
+                        Span::raw("ew  "),
+                    ];
+                    let mut shortcuts: Vec<_> = self.shortcut_map.iter().collect();
+                    shortcuts.sort_by_key(|(ch, _)| *ch);
+                    for (ch, key) in &shortcuts {
+                        spans.push(Span::styled(ch.to_string(), hl));
+                        spans.push(Span::raw(format!(" {} ", key)));
+                    }
+                    spans.extend_from_slice(&[
+                        Span::styled("g", hl),
+                        Span::raw("roup  "),
+                        Span::styled("a", hl),
+                        Span::raw("rchive  "),
+                        Span::styled("/", hl),
+                        Span::raw("search  "),
+                        Span::styled("q", hl),
+                        Span::raw("uit"),
+                    ]);
+                    let title = Paragraph::new(Line::from(spans));
+                    f.render_widget(title, area);
+                }
+                ViewMode::Grouped => {
+                    let title = Paragraph::new(Line::from(vec![
+                        Span::styled(" 📂 Grouped ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::raw("  "),
+                        Span::styled("⏎", hl),
+                        Span::raw(" open  "),
+                        Span::styled("g", hl),
+                        Span::raw("roup  "),
+                        Span::styled("u", hl),
+                        Span::raw("nassign  "),
+                        Span::styled("a", hl),
+                        Span::raw("rchive  "),
+                        Span::styled("/", hl),
+                        Span::raw("search  "),
+                        Span::styled("q", hl),
+                        Span::raw("uit"),
+                    ]));
+                    f.render_widget(title, area);
+                }
+                ViewMode::Hidden => {
+                    let title = Paragraph::new(Line::from(vec![
+                        Span::styled(" 📦 Archived ", Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                        Span::raw("  "),
+                        Span::styled("⏎", hl),
+                        Span::raw(" open  "),
+                        Span::styled("a", hl),
+                        Span::raw(" unarchive  "),
+                        Span::styled("/", hl),
+                        Span::raw("search  "),
+                        Span::styled("q", hl),
+                        Span::raw("uit"),
+                    ]));
+                    f.render_widget(title, area);
+                }
             }
-            spans.extend_from_slice(&[
-                Span::styled("a", hl),
-                Span::raw("rchive  "),
-                Span::styled("/", hl),
-                Span::raw("search  "),
-                Span::styled("q", hl),
-                Span::raw("uit"),
-            ]);
-            let title = Paragraph::new(Line::from(spans));
-            f.render_widget(title, area);
         }
     }
 
@@ -1280,11 +1453,24 @@ impl App {
                     ),
                 ]);
 
+                // Group badges on the age line (e.g. " [agent-tui] [perf]")
+                let session_key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                let group_names = self.group_mgr.groups_for(&session_key);
+                let group_badge_str = if group_names.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", group_names.iter().map(|g| format!("[{}]", g)).collect::<Vec<_>>().join(" "))
+                };
+
                 let age_line = Line::from(vec![
                     Span::raw("   "),
                     Span::styled(
                         format!("{} · {}", s.state.label(), age),
                         Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        group_badge_str,
+                        Style::default().fg(Color::Blue),
                     ),
                 ]);
 
@@ -1300,6 +1486,7 @@ impl App {
 
         let view_label = match self.view_mode {
             ViewMode::Active => "Sessions",
+            ViewMode::Grouped => "📂 Grouped",
             ViewMode::Hidden => "📦 Archived & Hidden",
         };
         let view_count = self.current_view_sessions().len();
@@ -1564,8 +1751,9 @@ impl App {
 
     fn draw_status_bar(&self, f: &mut Frame, area: Rect) {
         let view_hint = match self.view_mode {
-            ViewMode::Active => "Shift+Tab: show archived  a: archive",
-            ViewMode::Hidden => "Shift+Tab: show active  a: unarchive",
+            ViewMode::Active => "Shift+Tab: grouped view",
+            ViewMode::Grouped => "Shift+Tab: archived view",
+            ViewMode::Hidden => "Shift+Tab: active view",
         };
         let sem_indicator = match &self.semantic_status_cache {
             crate::search::SemanticStatus::Ready { count } => {
