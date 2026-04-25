@@ -41,6 +41,10 @@ pub enum SupervisorEvent {
         provider_session_id: String,
     },
     Error(String),
+    /// ACP AI suggestion completed — JSON string of suggestions.
+    AcpResult(String),
+    /// ACP AI suggestion failed.
+    AcpError(String),
 }
 
 /// Commands from the TUI to the supervisor.
@@ -69,6 +73,10 @@ pub enum SupervisorCommand {
         title: String,
         provider_session_id: String,
     },
+    /// ACP AI suggestion completed successfully (JSON string of Vec<AiSuggestion>).
+    AcpResult(String),
+    /// ACP AI suggestion failed (error message).
+    AcpError(String),
     Shutdown,
 }
 
@@ -258,6 +266,12 @@ impl Supervisor {
                 Some(cmd) = cmd_rx.recv() => {
                     let cmd_start = std::time::Instant::now();
                     match cmd {
+                        SupervisorCommand::AcpResult(json) => {
+                            let _ = event_tx.send(SupervisorEvent::AcpResult(json));
+                        }
+                        SupervisorCommand::AcpError(msg) => {
+                            let _ = event_tx.send(SupervisorEvent::AcpError(msg));
+                        }
                         SupervisorCommand::Shutdown => {
                             // Final sync write of any buffered archive
                             // mutations before the process exits. The

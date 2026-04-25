@@ -30,6 +30,9 @@ pub struct AppConfig {
     pub semantic_index_min_interval_ms: u64,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+    /// ACP (AI) configuration for group suggestions.
+    #[serde(default)]
+    pub acp: AcpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +73,34 @@ pub struct ProviderConfig {
 
 fn default_launch_method() -> String {
     "wt".into()
+}
+
+/// Configuration for ACP-based AI group suggestions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpConfig {
+    /// The CLI command to use for AI suggestions (e.g., "codex", "qwen", "copilot").
+    #[serde(default = "default_acp_command")]
+    pub command: String,
+    /// Extra args appended to the command (e.g., ["--model", "gpt-4o-mini"] for cost control).
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Path to the prompt template file. Defaults to `<exe-dir>/prompts/group-suggest.md`.
+    #[serde(default)]
+    pub prompt_template: Option<PathBuf>,
+}
+
+fn default_acp_command() -> String {
+    "copilot".into()
+}
+
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            command: default_acp_command(),
+            extra_args: Vec::new(),
+            prompt_template: None,
+        }
+    }
 }
 
 fn default_data_dir() -> PathBuf {
@@ -189,6 +220,7 @@ impl Default for AppConfig {
             semantic_index_min_interval_ms: default_semantic_index_min_interval_ms(),
             log_max_lines: default_log_lines(),
             providers,
+            acp: AcpConfig::default(),
         }
     }
 }

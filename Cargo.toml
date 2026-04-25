@@ -29,6 +29,8 @@ libloading = "0.9.0"
 
 # Full-text search over session logs (Lucene-like, MIT-licensed)
 tantivy = { version = "0.22", default-features = false, features = ["mmap", "stopwords"] }
+agent-client-protocol = "0.11.1"
+agent-client-protocol-tokio = "0.11.1"
 
 # Process info — disable disk/network/component/user, keep only process lookup
 [target.'cfg(windows)'.dependencies]

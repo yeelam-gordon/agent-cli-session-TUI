@@ -2,6 +2,7 @@ mod archive;
 mod config;
 mod focus;
 mod groups;
+mod acp;
 mod log;
 mod log_search;
 mod models;
@@ -232,6 +233,7 @@ async fn main() -> Result<()> {
         config.tick_rate_ms,
         config.semantic_index_min_interval_ms,
         group_mgr,
+        config.acp.clone(),
     );
     app.run(event_rx, cmd_tx).await?;
 

@@ -17,6 +17,7 @@ use crate::log_search::LogSearcher;
 use crate::models::{InteractionState, PersistenceState, ProcessState, Session};
 use crate::provider::ProviderRegistry;
 use crate::groups::GroupManager;
+use crate::acp::AiSuggestion;
 use crate::supervisor::{SupervisorCommand, SupervisorEvent};
 use crate::util::truncate_str_safe;
 
@@ -109,6 +110,19 @@ struct GroupPrompt {
     input: String,
 }
 
+/// State for ACP AI suggestion flow.
+#[derive(Debug, Clone)]
+enum AcpState {
+    /// No ACP operation running.
+    Idle,
+    /// ACP agent subprocess running, waiting for response.
+    Running { started: std::time::Instant },
+    /// Suggestions received, user reviewing them.
+    Results { suggestions: Vec<AiSuggestion>, cursor: usize },
+    /// ACP call failed.
+    Failed(String),
+}
+
 /// The main TUI application state.
 pub struct App {
     sessions: Vec<Session>,
@@ -178,6 +192,13 @@ pub struct App {
     group_mgr: GroupManager,
     /// Active group-assignment prompt (None = not showing).
     group_prompt: Option<GroupPrompt>,
+    /// ACP AI suggestion state machine.
+    acp_state: AcpState,
+    /// ACP configuration (command, extra_args, prompt_template).
+    acp_config: crate::config::AcpConfig,
+    /// In Grouped view: maps visual row index → session index in self.sessions.
+    /// None = header row (not selectable as session). Rebuilt each draw.
+    grouped_row_map: Vec<Option<usize>>,
 }
 
 impl App {
@@ -192,6 +213,7 @@ impl App {
         tick_rate_ms: u64,
         semantic_index_min_interval_ms: u64,
         group_mgr: GroupManager,
+        acp_config: crate::config::AcpConfig,
     ) -> Self {
         let mut list_state = ListState::default();
         // No selection until all providers report in
@@ -295,6 +317,9 @@ impl App {
             shortcut_map,
             group_mgr,
             group_prompt: None,
+            acp_state: AcpState::Idle,
+            acp_config,
+            grouped_row_map: Vec::new(),
         }
     }
 
@@ -308,9 +333,17 @@ impl App {
 
     /// Get the currently selected session (through the filter).
     fn selected_session(&self) -> Option<&Session> {
-        self.filtered_indices
-            .get(self.selected_index)
-            .and_then(|&idx| self.current_view_sessions().get(idx))
+        if self.view_mode == ViewMode::Grouped && !self.grouped_row_map.is_empty() {
+            // In grouped view, use the row map to resolve visual index → session
+            self.grouped_row_map
+                .get(self.selected_index)
+                .and_then(|opt| opt.as_ref())
+                .and_then(|&idx| self.current_view_sessions().get(idx))
+        } else {
+            self.filtered_indices
+                .get(self.selected_index)
+                .and_then(|&idx| self.current_view_sessions().get(idx))
+        }
     }
 
     /// Rebuild the filtered indices based on the search query.
@@ -831,6 +864,28 @@ impl App {
                         self.status_message = format!("Error: {}", e);
                         self.log_lines.push(format!("ERROR: {}", e));
                     }
+                    SupervisorEvent::AcpResult(json) => {
+                        match serde_json::from_str::<Vec<AiSuggestion>>(&json) {
+                            Ok(suggestions) if suggestions.is_empty() => {
+                                self.acp_state = AcpState::Idle;
+                                self.status_message = "AI: no strong grouping suggestions found".to_string();
+                            }
+                            Ok(suggestions) => {
+                                let count = suggestions.len();
+                                self.acp_state = AcpState::Results { suggestions, cursor: 0 };
+                                self.status_message = format!("AI: {} suggestions ready — review with y/n/e", count);
+                            }
+                            Err(e) => {
+                                self.acp_state = AcpState::Failed(format!("Parse error: {}", e));
+                                self.status_message = format!("⚠ AI response parse error: {}", e);
+                            }
+                        }
+                    }
+                    SupervisorEvent::AcpError(msg) => {
+                        self.acp_state = AcpState::Failed(msg.clone());
+                        self.status_message = format!("⚠ AI: {}", msg);
+                        self.log_lines.push(format!("ACP ERROR: {}", msg));
+                    }
                 }
             }
 
@@ -943,6 +998,100 @@ impl App {
                 }
                 _ => return,
             }
+        }
+
+        // ── ACP suggestion results intercept keys ────────────────────
+        if let AcpState::Results { ref suggestions, ref mut cursor } = self.acp_state {
+            match key.code {
+                KeyCode::Esc => {
+                    self.acp_state = AcpState::Idle;
+                    return;
+                }
+                KeyCode::Up | KeyCode::Char('k') if *cursor > 0 => {
+                    *cursor -= 1;
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') if *cursor + 1 < suggestions.len() => {
+                    *cursor += 1;
+                    return;
+                }
+                KeyCode::Char('y') => {
+                    // Accept current suggestion
+                    let sg = suggestions[*cursor].clone();
+                    self.group_mgr.assign_human(&sg.session, &sg.group);
+                    self.log_lines.push(format!(
+                        "AI: assigned '{}' → {} ({}%)",
+                        crate::util::short_id(&sg.session, 16),
+                        sg.group,
+                        (sg.score * 100.0) as u32
+                    ));
+                    // Remove accepted suggestion, stay in Results if more remain
+                    let mut sgs = suggestions.clone();
+                    sgs.remove(*cursor);
+                    if sgs.is_empty() {
+                        self.acp_state = AcpState::Idle;
+                        self.status_message = "All suggestions processed".to_string();
+                    } else {
+                        let new_cursor = (*cursor).min(sgs.len() - 1);
+                        self.acp_state = AcpState::Results { suggestions: sgs, cursor: new_cursor };
+                    }
+                    return;
+                }
+                KeyCode::Char('n') => {
+                    // Dismiss current suggestion
+                    let sg = suggestions[*cursor].clone();
+                    self.group_mgr.dismiss(&sg.session, &sg.group);
+                    self.log_lines.push(format!(
+                        "AI: dismissed '{}' for {}",
+                        sg.group,
+                        crate::util::short_id(&sg.session, 16)
+                    ));
+                    let mut sgs = suggestions.clone();
+                    sgs.remove(*cursor);
+                    if sgs.is_empty() {
+                        self.acp_state = AcpState::Idle;
+                        self.status_message = "All suggestions processed".to_string();
+                    } else {
+                        let new_cursor = (*cursor).min(sgs.len() - 1);
+                        self.acp_state = AcpState::Results { suggestions: sgs, cursor: new_cursor };
+                    }
+                    return;
+                }
+                KeyCode::Char('e') => {
+                    // Edit: open group prompt pre-filled with suggestion name
+                    let sg = suggestions[*cursor].clone();
+                    self.group_prompt = Some(GroupPrompt {
+                        session_key: sg.session.clone(),
+                        input: sg.group.clone(),
+                    });
+                    // Remove from suggestions list
+                    let mut sgs = suggestions.clone();
+                    sgs.remove(*cursor);
+                    if sgs.is_empty() {
+                        self.acp_state = AcpState::Idle;
+                    } else {
+                        let new_cursor = (*cursor).min(sgs.len() - 1);
+                        self.acp_state = AcpState::Results { suggestions: sgs, cursor: new_cursor };
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        // ── ACP running: only Esc to cancel ──────────────────────────
+        if matches!(self.acp_state, AcpState::Running { .. }) {
+            if key.code == KeyCode::Esc {
+                self.acp_state = AcpState::Idle;
+                self.status_message = "AI suggestion cancelled".to_string();
+            }
+            return;
+        }
+
+        // ── ACP failed: any key returns to idle ──────────────────────
+        if matches!(self.acp_state, AcpState::Failed(_)) {
+            self.acp_state = AcpState::Idle;
+            return;
         }
 
         // Global shortcuts — always work regardless of mode
@@ -1099,6 +1248,49 @@ impl App {
                         }
                     }
                 }
+                KeyCode::Char('s') if matches!(self.view_mode, ViewMode::Grouped) => {
+                    // AI suggest: prepare prompt and spawn ACP background task
+                    // Try to get semantic similarities (non-blocking try_lock)
+                    let sem_ref = self.semantic.try_lock().ok();
+                    let sem_plugin = sem_ref.as_deref();
+                    match crate::acp::prepare_prompt(&self.acp_config, &self.sessions, &self.group_mgr, sem_plugin) {
+                        Ok((prompt, count)) => {
+                            self.acp_state = AcpState::Running {
+                                started: std::time::Instant::now(),
+                            };
+                            self.status_message = format!("🤖 Analyzing {} sessions...", count);
+                            self.log_lines.push(format!("AI: sending {} ungrouped sessions to ACP agent", count));
+
+                            // Spawn background task with timeout
+                            let cfg = self.acp_config.clone();
+                            let event_tx = cmd_tx.clone();
+                            tokio::spawn(async move {
+                                let timeout = tokio::time::Duration::from_secs(60);
+                                let result = tokio::time::timeout(
+                                    timeout,
+                                    crate::acp::run_acp_suggest(cfg, prompt),
+                                ).await;
+                                let _ = match result {
+                                    Ok(Ok(suggestions)) => {
+                                        let json = serde_json::to_string(&suggestions).unwrap_or_default();
+                                        event_tx.send(SupervisorCommand::AcpResult(json))
+                                    }
+                                    Ok(Err(e)) => {
+                                        event_tx.send(SupervisorCommand::AcpError(e))
+                                    }
+                                    Err(_) => {
+                                        event_tx.send(SupervisorCommand::AcpError(
+                                            "ACP agent timed out after 60s".to_string()
+                                        ))
+                                    }
+                                };
+                            });
+                        }
+                        Err(e) => {
+                            self.status_message = format!("⚠ {}", e);
+                        }
+                    }
+                }
                 KeyCode::Char('a') => {
                     if let Some(session) = self.selected_session() {
                         let psid = session.provider_session_id.clone();
@@ -1112,8 +1304,14 @@ impl App {
                                 });
                                 // Track locally so incoming refreshes don't put it back
                                 self.pending_archives.push(PendingTransition { key, confirmed: false });
+                                // Resolve the actual session index (Grouped view has header rows)
+                                let session_idx_opt = if self.view_mode == ViewMode::Grouped && !self.grouped_row_map.is_empty() {
+                                    self.grouped_row_map.get(self.selected_index).and_then(|o| *o)
+                                } else {
+                                    self.filtered_indices.get(self.selected_index).copied()
+                                };
                                 // Instantly move from active to hidden
-                                if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
+                                if let Some(idx) = session_idx_opt {
                                     if idx < self.sessions.len() {
                                         let removed = self.sessions.remove(idx);
                                         self.hidden_sessions.insert(0, removed);
@@ -1325,6 +1523,41 @@ impl App {
                 Span::raw(" cancel"),
             ]));
             f.render_widget(title, area);
+        } else if let AcpState::Running { started } = &self.acp_state {
+            let elapsed = started.elapsed().as_secs();
+            let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let frame = spinner[(elapsed as usize) % spinner.len()];
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(" 🤖 AI Analyzing ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  {} {}s  ", frame, elapsed)),
+                Span::styled("Esc", hl),
+                Span::raw(" cancel"),
+            ]));
+            f.render_widget(title, area);
+        } else if let AcpState::Results { suggestions, cursor } = &self.acp_state {
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(" 🤖 AI Suggestions ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  {}/{} ", cursor + 1, suggestions.len())),
+                Span::styled("y", hl),
+                Span::raw(" accept  "),
+                Span::styled("n", hl),
+                Span::raw(" dismiss  "),
+                Span::styled("e", hl),
+                Span::raw(" edit  "),
+                Span::styled("↑↓", hl),
+                Span::raw(" nav  "),
+                Span::styled("Esc", hl),
+                Span::raw(" done"),
+            ]));
+            f.render_widget(title, area);
+        } else if let AcpState::Failed(ref msg) = self.acp_state {
+            let display = if msg.len() > 60 { &msg[..60] } else { msg.as_str() };
+            let title = Paragraph::new(Line::from(vec![
+                Span::styled(" ⚠ AI Error ", Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  {}  ", display)),
+                Span::raw("press any key"),
+            ]));
+            f.render_widget(title, area);
         } else if self.search_active {
             let title = Paragraph::new(Line::from(vec![
                 Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -1379,6 +1612,8 @@ impl App {
                         Span::raw("roup  "),
                         Span::styled("u", hl),
                         Span::raw("nassign  "),
+                        Span::styled("s", hl),
+                        Span::raw(" AI suggest  "),
                         Span::styled("a", hl),
                         Span::raw("rchive  "),
                         Span::styled("/", hl),
@@ -1407,30 +1642,127 @@ impl App {
         }
     }
 
-    fn draw_session_list(&mut self, f: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .filtered_indices
+    fn build_session_item(&self, list_idx: usize, session_idx: usize, show_badges: bool) -> ListItem<'static> {
+        let s = &self.current_view_sessions()[session_idx];
+        let badge = s.state.badge();
+        let age = format_age(&s.updated_at);
+        let short_id = crate::util::short_id(&s.provider_session_id, 8);
+
+        let title_display = if s.title.is_empty() {
+            short_id.to_string()
+        } else {
+            truncate_str_safe(&s.title, 25)
+        };
+
+        let sem_icon = if self.semantic_matches.contains(&session_idx) {
+            "✨"
+        } else {
+            ""
+        };
+
+        let line = Line::from(vec![
+            Span::raw(format!("{} ", badge)),
+            Span::styled(
+                format!("{:<6}", s.provider_name),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                title_display,
+                if list_idx == self.selected_index {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+            Span::styled(
+                format!(" {}", sem_icon),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]);
+
+        let session_key = format!("{}:{}", s.provider_name, s.provider_session_id);
+        let group_names = self.group_mgr.groups_for(&session_key);
+        let group_badge_str = if !show_badges || group_names.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", group_names.iter().map(|g| format!("[{}]", g)).collect::<Vec<_>>().join(" "))
+        };
+
+        let age_line = Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                format!("{} · {}", s.state.label(), age),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                group_badge_str,
+                Style::default().fg(Color::Blue),
+            ),
+        ]);
+
+        ListItem::new(vec![line, age_line])
+    }
+
+    fn build_flat_list_items(&self) -> Vec<ListItem<'static>> {
+        self.filtered_indices
             .iter()
             .enumerate()
-            .map(|(list_idx, &session_idx)| {
-                let s = &self.current_view_sessions()[session_idx];
+            .map(|(list_idx, &session_idx)| self.build_session_item(list_idx, session_idx, true))
+            .collect()
+    }
+
+    fn build_grouped_list_items(&mut self) -> Vec<ListItem<'static>> {
+        // Collect sessions by group. A session can appear under multiple groups.
+        let sessions = self.current_view_sessions();
+        let mut grouped: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut ungrouped_indices: Vec<usize> = Vec::new();
+
+        for &session_idx in &self.filtered_indices {
+            let s = &sessions[session_idx];
+            let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+            let groups = self.group_mgr.groups_for(&key);
+            if groups.is_empty() {
+                ungrouped_indices.push(session_idx);
+            } else {
+                for g in groups {
+                    grouped.entry(g).or_default().push(session_idx);
+                }
+            }
+        }
+
+        let mut items: Vec<ListItem<'static>> = Vec::new();
+        let mut row_map: Vec<Option<usize>> = Vec::new();
+        let mut visual_idx = 0usize;
+
+        // Render each group with a header
+        for (group_name, session_indices) in &grouped {
+            // Group header
+            let header = Line::from(vec![
+                Span::styled(
+                    format!("▼ {} ({})", group_name, session_indices.len()),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            items.push(ListItem::new(vec![header]));
+            row_map.push(None);
+            visual_idx += 1;
+
+            // Sessions under this group (indented)
+            for &session_idx in session_indices {
+                let s = &sessions[session_idx];
                 let badge = s.state.badge();
                 let age = format_age(&s.updated_at);
-                let short_id = crate::util::short_id(&s.provider_session_id, 8);
-
                 let title_display = if s.title.is_empty() {
-                    short_id.to_string()
+                    crate::util::short_id(&s.provider_session_id, 8).to_string()
                 } else {
-                    truncate_str_safe(&s.title, 25)
-                };
-
-                let sem_icon = if self.semantic_matches.contains(&session_idx) {
-                    "✨"
-                } else {
-                    ""
+                    truncate_str_safe(&s.title, 23)
                 };
 
                 let line = Line::from(vec![
+                    Span::raw("  "),
                     Span::raw(format!("{} ", badge)),
                     Span::styled(
                         format!("{:<6}", s.provider_name),
@@ -1439,44 +1771,94 @@ impl App {
                     Span::raw(" "),
                     Span::styled(
                         title_display,
-                        if list_idx == self.selected_index {
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD)
+                        if visual_idx == self.selected_index {
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Gray)
                         },
                     ),
-                    Span::styled(
-                        format!(" {}", sem_icon),
-                        Style::default().fg(Color::Magenta),
-                    ),
                 ]);
-
-                // Group badges on the age line (e.g. " [agent-tui] [perf]")
-                let session_key = format!("{}:{}", s.provider_name, s.provider_session_id);
-                let group_names = self.group_mgr.groups_for(&session_key);
-                let group_badge_str = if group_names.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", group_names.iter().map(|g| format!("[{}]", g)).collect::<Vec<_>>().join(" "))
-                };
-
                 let age_line = Line::from(vec![
-                    Span::raw("   "),
+                    Span::raw("     "),
                     Span::styled(
                         format!("{} · {}", s.state.label(), age),
                         Style::default().fg(Color::DarkGray),
                     ),
+                ]);
+                items.push(ListItem::new(vec![line, age_line]));
+                row_map.push(Some(session_idx));
+                visual_idx += 1;
+            }
+        }
+
+        // Ungrouped section
+        if !ungrouped_indices.is_empty() {
+            let header = Line::from(vec![
+                Span::styled(
+                    format!("▼ Ungrouped ({})", ungrouped_indices.len()),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            items.push(ListItem::new(vec![header]));
+            row_map.push(None);
+            visual_idx += 1;
+
+            for &session_idx in &ungrouped_indices {
+                let s = &sessions[session_idx];
+                let badge = s.state.badge();
+                let age = format_age(&s.updated_at);
+                let title_display = if s.title.is_empty() {
+                    crate::util::short_id(&s.provider_session_id, 8).to_string()
+                } else {
+                    truncate_str_safe(&s.title, 23)
+                };
+
+                let line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(format!("{} ", badge)),
                     Span::styled(
-                        group_badge_str,
-                        Style::default().fg(Color::Blue),
+                        format!("{:<6}", s.provider_name),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        title_display,
+                        if visual_idx == self.selected_index {
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
                     ),
                 ]);
+                let age_line = Line::from(vec![
+                    Span::raw("     "),
+                    Span::styled(
+                        format!("{} · {}", s.state.label(), age),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+                items.push(ListItem::new(vec![line, age_line]));
+                row_map.push(Some(session_idx));
+                visual_idx += 1;
+            }
+        }
 
-                ListItem::new(vec![line, age_line])
-            })
-            .collect();
+        self.grouped_row_map = row_map;
+        items
+    }
+
+    fn draw_session_list(&mut self, f: &mut Frame, area: Rect) {
+        // When AI suggestions are showing, render them instead of sessions
+        if let AcpState::Results { ref suggestions, ref cursor } = self.acp_state.clone() {
+            self.draw_suggestion_list(f, area, suggestions, *cursor);
+            return;
+        }
+
+        let items: Vec<ListItem> = if self.view_mode == ViewMode::Grouped {
+            self.build_grouped_list_items()
+        } else {
+            self.build_flat_list_items()
+        };
 
         let border_style = if self.focus == Focus::SessionList || self.search_active {
             Style::default().fg(Color::Cyan)
@@ -1522,12 +1904,188 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
+    fn draw_suggestion_list(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        suggestions: &[AiSuggestion],
+        cursor: usize,
+    ) {
+        // Compact: one line per suggestion — title → group (score%)
+        let items: Vec<ListItem> = suggestions
+            .iter()
+            .enumerate()
+            .map(|(i, sg)| {
+                let is_selected = i == cursor;
+                let new_badge = if sg.is_new { "✨" } else { "" };
+                let score_pct = (sg.score * 100.0) as u32;
+
+                // Try to find session title from self.sessions
+                let title = self.sessions.iter()
+                    .find(|s| {
+                        let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                        key == sg.session
+                    })
+                    .map(|s| truncate_str_safe(&s.title, 20))
+                    .unwrap_or_else(|| crate::util::short_id(&sg.session, 12).to_string());
+
+                let line = Line::from(vec![
+                    Span::styled(
+                        if is_selected { " ▸ " } else { "   " },
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        title,
+                        if is_selected {
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    ),
+                    Span::raw(" → "),
+                    Span::styled(
+                        format!("{}{}", new_badge, sg.group),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::styled(
+                        format!(" {}%", score_pct),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+
+                ListItem::new(vec![line])
+            })
+            .collect();
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(cursor));
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green))
+                    .title(format!(" 🤖 AI Suggestions ({}) ", suggestions.len())),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .scroll_padding(2);
+
+        f.render_stateful_widget(list, area, &mut list_state);
+    }
+
     fn draw_session_detail(&self, f: &mut Frame, area: Rect) {
         let border_style = if self.focus == Focus::Detail {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
         };
+
+        // When AI suggestions are showing, render suggestion detail + session info
+        if let AcpState::Results { ref suggestions, ref cursor } = self.acp_state {
+            if let Some(sg) = suggestions.get(*cursor) {
+                let mut lines = vec![];
+
+                // Suggestion header
+                lines.push(Line::from(Span::styled(
+                    " AI Suggestion",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    " ─────────────────────────",
+                    Style::default().fg(Color::DarkGray),
+                )));
+
+                // Group info
+                let new_badge = if sg.is_new { " ✨ new group" } else { " existing group" };
+                lines.push(Line::from(vec![
+                    Span::styled(" Group: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&sg.group, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(new_badge, Style::default().fg(Color::Yellow)),
+                ]));
+
+                // Score
+                lines.push(Line::from(vec![
+                    Span::styled(" Score: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{}%", (sg.score * 100.0) as u32),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+
+                // Reason (full, wrapped)
+                lines.push(Line::from(vec![
+                    Span::styled(" Reason: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&sg.reason, Style::default().fg(Color::White)),
+                ]));
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " ─────────────────────────",
+                    Style::default().fg(Color::DarkGray),
+                )));
+
+                // Session info (if found)
+                if let Some(session) = self.sessions.iter().find(|s| {
+                    let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                    key == sg.session
+                }) {
+                    lines.push(Line::from(Span::styled(
+                        " Original Session",
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(" Title: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&session.title, Style::default().fg(Color::White)),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled(" Provider: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&session.provider_name, Style::default().fg(Color::Cyan)),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled(" CWD: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            session.cwd.to_string_lossy().to_string(),
+                            Style::default().fg(Color::Gray),
+                        ),
+                    ]));
+                    if !session.summary.is_empty() {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            " Summary:",
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                        // Wrap summary text
+                        for chunk in session.summary.as_bytes().chunks(70) {
+                            let text = String::from_utf8_lossy(chunk);
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}", text),
+                                Style::default().fg(Color::Gray),
+                            )));
+                        }
+                    }
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(" Session: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&sg.session, Style::default().fg(Color::Gray)),
+                    ]));
+                }
+
+                let detail = Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Green))
+                            .title(" Suggestion Detail "),
+                    )
+                    .wrap(ratatui::widgets::Wrap { trim: false });
+                f.render_widget(detail, area);
+                return;
+            }
+        }
 
         if let Some(session) = self.selected_session() {
             let mut lines = vec![];

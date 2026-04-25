@@ -4,6 +4,7 @@ pub mod archive;
 pub mod config;
 pub mod focus;
 pub mod groups;
+pub mod acp;
 pub mod log;
 pub mod log_search;
 pub mod models;

@@ -696,6 +696,32 @@ impl SemanticPlugin {
 
         if sim <= -2.0 { None } else { Some(sim) }
     }
+
+    /// Compute pairwise cosine similarities between cached session embeddings.
+    /// Returns pairs `(session_a, session_b, similarity)` where similarity > threshold.
+    /// Uses only cached vectors — does not load the model.
+    pub fn pairwise_similarities(
+        &self,
+        session_keys: &[String],
+        threshold: f32,
+    ) -> Vec<(String, String, f32)> {
+        let vecs: Vec<(&String, &Vec<f32>)> = session_keys
+            .iter()
+            .filter_map(|k| self.cache.entries.get(k).map(|c| (k, &c.vector)))
+            .collect();
+
+        let mut result = Vec::new();
+        for i in 0..vecs.len() {
+            for j in (i + 1)..vecs.len() {
+                let sim = cosine_similarity(vecs[i].1, vecs[j].1);
+                if sim > threshold {
+                    result.push((vecs[i].0.clone(), vecs[j].0.clone(), sim));
+                }
+            }
+        }
+        result.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        result
+    }
 }
 
 /// Pure-Rust cosine similarity (no DLL needed — for cached vector search).
