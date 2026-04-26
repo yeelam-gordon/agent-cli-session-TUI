@@ -107,3 +107,18 @@ launch_fallback = "{{LAUNCH_FALLBACK}}"
 {{LAUNCH_CMD_LINE}}
 {{LAUNCH_ARGS_LINE}}
 # wt_profile = "PowerShell"
+
+# ─── Kimi ───
+[providers.kimi]
+enabled = true
+command = "kimi"
+default_args = []
+# default_args = ["--model", "kimi-k2"]
+state_dir = '~/.kimi/sessions'
+resume_flag = "--resume"
+# startup_dir = 'D:\'
+launch_method = "{{LAUNCH_METHOD}}"
+launch_fallback = "{{LAUNCH_FALLBACK}}"
+{{LAUNCH_CMD_LINE}}
+{{LAUNCH_ARGS_LINE}}
+# wt_profile = "PowerShell"

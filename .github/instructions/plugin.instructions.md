@@ -9,16 +9,23 @@ A provider plugin teaches the TUI how to discover, monitor, and launch sessions 
 
 ## Quick Start
 
-1. **Create** `src/provider/<yourname>/mod.rs`
-2. **Implement** the `Provider` trait (see below)
-3. **Register** in `src/main.rs::create_provider()` — add one match arm
-4. **Add config** section in `config.toml` under `[providers.<yourname>]`
-5. **Write test** in `tests/<yourname>_lifecycle_test.rs` using the shared framework
+1. **Create** `providers/<yourname>.yaml`
+2. **Describe** discovery / fields / liveness declaratively in YAML
+3. **Add config** section in `config.toml` under `[providers.<yourname>]`
+4. **Optionally add** a built-in default in `src/config.rs`
+5. **Write test** in `tests/<yourname>_lifecycle_test.rs` using `ConfigDrivenProvider`
 6. **Build & test**: `cargo build --release && cargo test --test <yourname>_lifecycle_test -- --nocapture`
 
-## The Provider Trait
+## Provider Architecture
 
-Defined in `src/provider/mod.rs`. Every method you must implement:
+Providers are now **YAML-backed**. `src/main.rs::create_provider()` generically loads
+`providers/<key>.yaml` into `ConfigDrivenProvider`; new providers normally do **not**
+require a dedicated `src/provider/<name>/mod.rs` module.
+
+Defined in `src/provider/mod.rs`, the runtime still consumes the `Provider` trait, but
+for config-driven providers that trait is implemented once by `ConfigDrivenProvider`.
+Only extend Rust code when the shared engine/schema truly cannot express a provider's
+layout.
 
 ```rust
 pub trait Provider: Send + Sync {
@@ -167,18 +174,19 @@ wt_profile = "PowerShell"           # optional WT profile name
 
 ```rust
 use agent_session_tui::config::AppConfig;
-use agent_session_tui::provider::mycli::MyCliProvider;
+use agent_session_tui::provider::config_driven::ConfigDrivenProvider;
 use agent_session_tui::testing::TestRunner;
 use agent_session_tui::testing::scenarios;
+use std::path::Path;
 
 #[test]
 fn mycli_lifecycle() {
     let config = AppConfig::load().expect("config");
     let pc = config.providers.get("mycli").expect("'mycli' not in config");
-    let provider = MyCliProvider::new(pc);
+    let yaml = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers").join("mycli.yaml");
+    let provider = ConfigDrivenProvider::load_from_yaml(&yaml, pc).expect("load mycli yaml");
     let mut runner = TestRunner::new("MyCLI");
 
-    // Common scenarios work with any Provider
     scenarios::discover(&mut runner, &provider);
     scenarios::graceful(&mut runner, &provider);
 
@@ -214,7 +222,7 @@ cargo test --test mycli_lifecycle_test -- --nocapture --scenario kill
 
 Providers share structural patterns (discovery, process matching, state inference, summary extraction, tab title). A bug in one often means the same bug lurks in others. Before closing any provider change:
 
-1. **Audit all providers** — grep for the same pattern across `src/provider/*/mod.rs`. If 3 out of 5 providers have the same issue, fix all 5.
+1. **Audit all providers** — grep across shipped YAMLs in `providers/*.yaml` and shared engine code in `src/provider/config_driven/*.rs`. If 3 out of 5 providers have the same issue, fix all 5.
 2. **Push common logic to the foundation** — if a fix applies to ≥3 providers, it likely belongs in:
    - `src/provider/mod.rs` (trait default methods, shared helpers)
    - `src/models.rs` (state enums, shared types)

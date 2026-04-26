@@ -1,0 +1,126 @@
+name: kimi
+display_name: Kimi
+
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+
+# Kimi stores sessions at
+#   ~/.kimi/sessions/<workdir-md5>/<session-uuid>/context.jsonl
+# The session directory also contains companion files (`state.json`, `wire.jsonl`).
+discovery:
+  base_dir: ${HOME}/.kimi/sessions
+  strategy: file_per_session
+  glob: "*/*/context.jsonl"
+  tail_bytes: 524288
+
+# The matched filename is always `context.jsonl`, so the canonical session id
+# must come from the parent directory name (the UUID).
+session_id:
+  source: parent_dir_name
+
+# Recover cwd from `~/.kimi/kimi.json` work_dirs array by matching
+# last_session_id to the current session UUID.
+cwd:
+  source: session_id_config_lookup
+  lookup_file: ${HOME}/.kimi/kimi.json
+  container_path: "work_dirs"
+  session_id_path: "last_session_id"
+  value_path: "path"
+
+events:
+  format: jsonl
+  filter_out:
+    - 'role == "_system_prompt"'
+    - 'role == "system"'
+
+fields:
+  discard_if_empty: true
+  title:
+    strategy: first_matching_event
+    where: 'role == "user"'
+    path: "content.0.text // content"
+    transforms:
+      - strip_xml_tags
+      - first_line
+      - truncate:60
+  summary:
+    strategy: first_matching_event
+    where: 'role == "user"'
+    path: "content.0.text // content"
+    transforms:
+      - strip_xml_tags
+      - truncate:4000
+  summary_parts:
+    - name: first_user
+      label: "── First message ──"
+      spec:
+        strategy: first_matching_event
+        where: 'role == "user"'
+        path: "content.0.text // content"
+        transforms:
+          - strip_xml_tags
+          - trim
+          - truncate:2000
+    - name: last_user
+      label: "── Last user message ──"
+      skip_if_same_as: first_user
+      spec:
+        strategy: last_matching_event
+        where: 'role == "user"'
+        path: "content.0.text // content"
+        transforms:
+          - strip_xml_tags
+          - trim
+          - truncate:2000
+    - name: prev_assistant
+      label: "── Previous response ──"
+      spec:
+        strategy: nth_from_end_matching_event
+        where: 'role == "assistant"'
+        nth: 2
+        path: "content.0.text // content"
+        transforms:
+          - strip_xml_tags
+          - trim
+          - truncate:2000
+    - name: last_assistant
+      label: "── Last Kimi response ──"
+      spec:
+        strategy: last_matching_event
+        where: 'role == "assistant"'
+        path: "content.0.text // content"
+        transforms:
+          - strip_xml_tags
+          - trim
+          - truncate:2000
+  created_at:
+    strategy: first_event_field
+    path: "timestamp // created_at"
+    fallback:
+      - strategy: file_mtime
+  updated_at:
+    strategy: file_mtime
+
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "assistant": { interaction: waiting_input }
+    "user":      { interaction: busy }
+
+liveness_detection:
+  executable: kimi
+  strategies:
+    - strategy: cmdline_flag_uuid
+      flag:
+        - "--session"
+        - "--resume"
+        - "-S"
+        - "-r"
+    - strategy: recently_active
+      within_secs: 1800

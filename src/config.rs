@@ -213,6 +213,27 @@ impl Default for AppConfig {
             },
         );
 
+        // Kimi
+        providers.insert(
+            "kimi".into(),
+            ProviderConfig {
+                enabled: true,
+                default: false,
+                command: "kimi".into(),
+                default_args: vec![],
+                state_dir: dirs::home_dir().map(|h| h.join(".kimi").join("sessions")),
+                resume_flag: Some("--resume".into()),
+                startup_dir: None,
+                launch_method: "wt".into(),
+                launch_cmd: None,
+                launch_args: None,
+                launch_fallback_cmd: None,
+                launch_fallback_args: None,
+                launch_fallback: Some("cmd".into()),
+                wt_profile: None,
+            },
+        );
+
         Self {
             data_dir: default_data_dir(),
             poll_interval_ms: default_poll_interval_ms(),

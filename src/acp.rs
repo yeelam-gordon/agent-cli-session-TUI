@@ -85,7 +85,7 @@ fn render_prompt(
     let sessions_json = {
         let items: Vec<String> = ungrouped
             .iter()
-            .take(20)
+            .take(30)
             .map(|(s, key)| {
                 let title = s.title.replace('"', r#"\""#);
                 // Truncate summary to 100 chars to keep prompt compact
@@ -132,7 +132,7 @@ pub fn prepare_prompt(
             let key = format!("{}:{}", s.provider_name, s.provider_session_id);
             group_mgr.groups_for(&key).is_empty()
         })
-        .take(20)
+        .take(30)
         .map(|s| {
             let key = format!("{}:{}", s.provider_name, s.provider_session_id);
             (s, key)

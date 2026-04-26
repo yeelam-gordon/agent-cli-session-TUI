@@ -125,6 +125,7 @@ impl GroupManager {
     }
 
     /// Rename a group across all sessions.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn rename_group(&mut self, old_name: &str, new_name: &str) {
         for sg in self.store.sessions.values_mut() {
             if let Some(assignment) = sg.groups.remove(old_name) {
@@ -135,6 +136,7 @@ impl GroupManager {
     }
 
     /// Delete a group — removes the label from all sessions.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn delete_group(&mut self, group: &str) {
         for sg in self.store.sessions.values_mut() {
             sg.groups.remove(group);
@@ -159,6 +161,7 @@ impl GroupManager {
     }
 
     /// Check if a suggestion was previously dismissed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_dismissed(&self, session_key: &str, group: &str) -> bool {
         self.store
             .dismissed

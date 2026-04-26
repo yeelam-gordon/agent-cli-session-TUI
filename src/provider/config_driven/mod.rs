@@ -232,7 +232,7 @@ impl Provider for ConfigDrivenProvider {
 
     fn discover_sessions(&self) -> Result<Vec<Session>> {
         // Cheap stat-only enumeration (no tail reads, no YAML parses).
-        let stubs = list_stubs(&self.cfg.discovery, &self.base_dir)?;
+        let stubs = list_stubs(&self.cfg.discovery, &self.cfg.session_id, &self.base_dir)?;
 
         let mut cache = self.scan_cache.lock().unwrap();
         let mut seen: HashSet<String> = HashSet::with_capacity(stubs.len());
@@ -310,11 +310,16 @@ impl Provider for ConfigDrivenProvider {
     /// returned `sessions.len()` may be smaller than `limit`.
     fn discover_sessions_paged(&self, offset: usize, limit: usize) -> Result<PagedSessions> {
         // Stat-only enumeration to get total candidate count for `has_more`.
-        let total_candidates = count_candidates(&self.cfg.discovery, &self.base_dir)?;
+        let total_candidates = count_candidates(&self.cfg.discovery, &self.cfg.session_id, &self.base_dir)?;
 
         // Load only (offset+limit) candidates by mtime-desc.
         let take = offset.saturating_add(limit);
-        let candidates = list_candidates(&self.cfg.discovery, &self.base_dir, Some(take))?;
+        let candidates = list_candidates(
+            &self.cfg.discovery,
+            &self.cfg.session_id,
+            &self.base_dir,
+            Some(take),
+        )?;
 
         let mut parsed: Vec<Session> = Vec::with_capacity(candidates.len());
         for cand in candidates {
@@ -449,7 +454,11 @@ struct SessionStub {
 /// Cheap enumeration of session stubs. Stats filesystem only — no tail reads,
 /// no YAML parses, no JSONL parses. Used by `discover_sessions` to drive the
 /// mtime-keyed scan cache.
-fn list_stubs(disc: &DiscoveryConfig, base_dir: &Path) -> Result<Vec<SessionStub>> {
+fn list_stubs(
+    disc: &DiscoveryConfig,
+    session_id_cfg: &SessionIdConfig,
+    base_dir: &Path,
+) -> Result<Vec<SessionStub>> {
     if !base_dir.exists() {
         return Ok(vec![]);
     }
@@ -491,7 +500,15 @@ fn list_stubs(disc: &DiscoveryConfig, base_dir: &Path) -> Result<Vec<SessionStub
             hide_paths_glob,
         } => {
             let mut stubs: Vec<FileStub> = Vec::new();
-            stat_files_recursive(base_dir, base_dir, glob, hide_paths_glob, &mut stubs);
+            let session_id_from_parent = matches!(session_id_cfg, SessionIdConfig::ParentDirName);
+            stat_files_recursive(
+                base_dir,
+                base_dir,
+                glob,
+                hide_paths_glob,
+                session_id_from_parent,
+                &mut stubs,
+            );
             Ok(stubs
                 .into_iter()
                 .map(|s| SessionStub {
@@ -562,6 +579,7 @@ fn finalize_stub(stub: &SessionStub) -> Candidate {
 
 fn list_candidates(
     disc: &DiscoveryConfig,
+    session_id_cfg: &SessionIdConfig,
     base_dir: &Path,
     limit: Option<usize>,
 ) -> Result<Vec<Candidate>> {
@@ -576,7 +594,14 @@ fn list_candidates(
             glob,
             tail_bytes,
             hide_paths_glob,
-        } => list_file_per_session(base_dir, glob, *tail_bytes, hide_paths_glob, limit),
+        } => list_file_per_session(
+            base_dir,
+            glob,
+            *tail_bytes,
+            hide_paths_glob,
+            matches!(session_id_cfg, SessionIdConfig::ParentDirName),
+            limit,
+        ),
         DiscoveryStrategy::DatePartitioned { pattern, tail_bytes } => {
             list_date_partitioned(base_dir, pattern, *tail_bytes, limit)
         }
@@ -585,7 +610,11 @@ fn list_candidates(
 
 /// Cheap count of candidate dirs/files without tail reads or YAML parses.
 /// Used by paged discovery to compute `total` / `has_more`.
-fn count_candidates(disc: &DiscoveryConfig, base_dir: &Path) -> Result<usize> {
+fn count_candidates(
+    disc: &DiscoveryConfig,
+    session_id_cfg: &SessionIdConfig,
+    base_dir: &Path,
+) -> Result<usize> {
     if !base_dir.exists() {
         return Ok(0);
     }
@@ -602,7 +631,15 @@ fn count_candidates(disc: &DiscoveryConfig, base_dir: &Path) -> Result<usize> {
         }
         DiscoveryStrategy::FilePerSession { glob, hide_paths_glob, .. } => {
             let mut stubs: Vec<FileStub> = Vec::new();
-            stat_files_recursive(base_dir, base_dir, glob, hide_paths_glob, &mut stubs);
+            let session_id_from_parent = matches!(session_id_cfg, SessionIdConfig::ParentDirName);
+            stat_files_recursive(
+                base_dir,
+                base_dir,
+                glob,
+                hide_paths_glob,
+                session_id_from_parent,
+                &mut stubs,
+            );
             Ok(stubs.len())
         }
         DiscoveryStrategy::DatePartitioned { .. } => {
@@ -707,6 +744,7 @@ fn list_file_per_session(
     glob_pat: &str,
     tail_bytes: usize,
     hide_globs: &[String],
+    session_id_from_parent: bool,
     limit: Option<usize>,
 ) -> Result<Vec<Candidate>> {
     if !base.exists() {
@@ -715,7 +753,14 @@ fn list_file_per_session(
 
     // Phase A: stat-only enumeration.
     let mut stubs: Vec<FileStub> = Vec::new();
-    stat_files_recursive(base, base, glob_pat, hide_globs, &mut stubs);
+    stat_files_recursive(
+        base,
+        base,
+        glob_pat,
+        hide_globs,
+        session_id_from_parent,
+        &mut stubs,
+    );
 
     // Phase B: sort by mtime desc and truncate if limit requested.
     if limit.is_some() {
@@ -743,6 +788,7 @@ fn stat_files_recursive(
     dir: &Path,
     glob_pat: &str,
     hide_globs: &[String],
+    session_id_from_parent: bool,
     out: &mut Vec<FileStub>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -753,7 +799,7 @@ fn stat_files_recursive(
             Err(_) => continue,
         };
         if ft.is_dir() {
-            stat_files_recursive(root, &p, glob_pat, hide_globs, out);
+            stat_files_recursive(root, &p, glob_pat, hide_globs, session_id_from_parent, out);
             continue;
         }
         if !matches_simple_glob(&p, root, glob_pat) {
@@ -762,11 +808,18 @@ fn stat_files_recursive(
         if hide_globs.iter().any(|pat| matches_simple_glob(&p, root, pat)) {
             continue;
         }
-        let session_id = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+        let session_id = if session_id_from_parent {
+            p.parent()
+                .and_then(|dir| dir.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string()
+        };
         if session_id.is_empty() { continue; }
         let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
         out.push(FileStub { path: p, session_id, mtime_raw, mtime_str });
@@ -922,7 +975,9 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
 
     // session id
     let session_id = match &cfg.session_id {
-        SessionIdConfig::Dirname | SessionIdConfig::FilenameStem => cand.session_id.clone(),
+        SessionIdConfig::Dirname
+        | SessionIdConfig::FilenameStem
+        | SessionIdConfig::ParentDirName => cand.session_id.clone(),
         SessionIdConfig::FilenameRegex { regex } => {
             regex_capture1(regex, &cand.session_id).unwrap_or_else(|| cand.session_id.clone())
         }
@@ -1052,6 +1107,38 @@ fn resolve_cwd(
                         if !s.is_empty() {
                             return Ok(Some(PathBuf::from(s)));
                         }
+                    }
+                }
+            }
+            Ok(None)
+        }
+        CwdConfig::SessionIdConfigLookup {
+            lookup_file,
+            container_path,
+            session_id_path,
+            value_path,
+        } => {
+            let p = expand_path(lookup_file);
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let session_id = &cand.session_id;
+            let container_value = if container_path.is_empty() {
+                json.clone()
+            } else {
+                prov.expr(container_path).eval(&json)
+            };
+            if let Some(obj) = container_value.as_object() {
+                if let Some(entry) = obj.get(session_id) {
+                    let expr = prov.expr(value_path);
+                    return Ok(expr.eval_str(entry).map(PathBuf::from));
+                }
+            }
+            if let Some(arr) = container_value.as_array() {
+                let id_expr = prov.expr(session_id_path);
+                let value_expr = prov.expr(value_path);
+                for entry in arr {
+                    if id_expr.eval_str(entry).as_deref() == Some(session_id.as_str()) {
+                        return Ok(value_expr.eval_str(entry).map(PathBuf::from));
                     }
                 }
             }
@@ -1305,6 +1392,17 @@ fn apply_transforms(input: &str, transforms: &[String], limit: Option<usize>) ->
             "trim" => s.trim().to_string(),
             "first_line" => s.lines().next().unwrap_or("").to_string(),
             "strip_newlines" => s.replace(['\n', '\r'], " "),
+            "strip_xml_tags" => {
+                // Remove XML/HTML-like tags: <system>, </system>, <notification ...>, etc.
+                let mut out = String::with_capacity(s.len());
+                let mut in_tag = false;
+                for ch in s.chars() {
+                    if ch == '<' { in_tag = true; continue; }
+                    if ch == '>' { in_tag = false; continue; }
+                    if !in_tag { out.push(ch); }
+                }
+                out.trim().to_string()
+            }
             "truncate" => {
                 let n = arg.and_then(|a| a.parse::<usize>().ok()).unwrap_or(60);
                 truncate_str_safe(&s, n)
@@ -2101,6 +2199,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_transforms_strip_xml_tags() {
+        assert_eq!(
+            apply_transforms(
+                "<system>Previous context has been compacted.</system>",
+                &["strip_xml_tags".into()],
+                None,
+            ),
+            "Previous context has been compacted."
+        );
+        assert_eq!(
+            apply_transforms(
+                "<notification id=\"abc\" type=\"task.completed\">some content</notification>",
+                &["strip_xml_tags".into(), "first_line".into(), "truncate:20".into()],
+                None,
+            ),
+            "some content"
+        );
+    }
+
     /// End-to-end smoke test: parse `providers/copilot.yaml` against a synthetic
     /// Copilot session on disk. Exercises schema loading, discovery,
     /// title/summary/timestamp extraction, and state signal detection.
@@ -2849,5 +2967,218 @@ tab_title:
             }
             other => panic!("expected ConfigReverseLookup, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn file_per_session_parent_dir_session_id() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "7f5f7d4f-2862-4127-a954-c7b84efb3b17";
+        let session_dir = tmp.path().join("workdir-md5").join(sid);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("context.jsonl"),
+            r#"{"timestamp":"2026-04-20T01:52:17Z","type":"user","message":{"parts":[{"text":"hello kimi"}]}}
+{"timestamp":"2026-04-20T01:52:20Z","type":"assistant","message":{"parts":[{"text":"hi"}]}}
+"#,
+        )
+        .unwrap();
+
+        let yaml_src = format!(
+            r#"name: kimi
+display_name: Kimi
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+discovery:
+  base_dir: {base}
+  strategy: file_per_session
+  glob: "*/*/context.jsonl"
+  tail_bytes: 524288
+session_id:
+  source: parent_dir_name
+cwd:
+  source: event_field
+  field: "cwd"
+events:
+  format: jsonl
+fields:
+  title:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "message.parts.0.text"
+  summary:
+    strategy: first_matching_event
+    where: 'type == "user"'
+    path: "message.parts.0.text"
+  created_at:
+    strategy: first_event_field
+    path: "timestamp"
+  updated_at:
+    strategy: file_mtime
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "assistant": {{ interaction: waiting_input }}
+    "user": {{ interaction: busy }}
+liveness_detection:
+  executable: kimi
+  strategies:
+    - strategy: recently_active
+      within_secs: 1800
+"#,
+            base = tmp.path().display().to_string().replace('\\', "\\\\"),
+        );
+        let cfg: ProviderConfigFile = serde_yaml::from_str(&yaml_src).unwrap();
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "kimi".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov = ConfigDrivenProvider::from_config(cfg, &app_cfg).unwrap();
+        let sessions = prov.discover_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].provider_session_id, sid);
+    }
+
+    #[test]
+    fn providers_kimi_yaml_parses() {
+        let cfg = load_shipped_yaml("kimi");
+        assert_eq!(cfg.name, "kimi");
+        match &cfg.session_id {
+            SessionIdConfig::ParentDirName => {}
+            other => panic!("expected ParentDirName, got {other:?}"),
+        }
+        match &cfg.cwd {
+            CwdConfig::SessionIdConfigLookup {
+                container_path,
+                session_id_path,
+                value_path,
+                ..
+            } => {
+                assert_eq!(container_path, "work_dirs");
+                assert_eq!(session_id_path, "last_session_id");
+                assert_eq!(value_path, "path");
+            }
+            other => panic!("expected SessionIdConfigLookup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_id_config_lookup_recovers_kimi_cwd() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sid = "7f5f7d4f-2862-4127-a954-c7b84efb3b17";
+        let session_dir = tmp.path().join("workdir-md5").join(sid);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("context.jsonl"),
+            r#"{"role":"user","content":"hello kimi"}
+{"role":"assistant","content":"hi"}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("kimi.json"),
+            format!(
+                r#"{{"work_dirs":[{{"path":"D:/Demo/agent-session-tui","last_session_id":"{sid}"}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let yaml_src = format!(
+            r#"name: kimi
+display_name: Kimi
+capabilities:
+  supports_resume: true
+  supports_discovery: true
+  supports_logs: true
+  supports_wait_detection: true
+  supports_kill: true
+  supports_archive: true
+  supports_summary_extraction: true
+discovery:
+  base_dir: {base}
+  strategy: file_per_session
+  glob: "*/*/context.jsonl"
+  tail_bytes: 524288
+session_id:
+  source: parent_dir_name
+cwd:
+  source: session_id_config_lookup
+  lookup_file: {lookup}
+  container_path: "work_dirs"
+  session_id_path: "last_session_id"
+  value_path: "path"
+events:
+  format: jsonl
+fields:
+  title:
+    strategy: first_matching_event
+    where: 'role == "user"'
+    path: "content"
+  summary:
+    strategy: first_matching_event
+    where: 'role == "user"'
+    path: "content"
+  created_at:
+    strategy: first_event_field
+    path: "timestamp"
+  updated_at:
+    strategy: file_mtime
+state_signals:
+  idle_threshold_seconds: 1800
+  last_event_map:
+    "assistant": {{ interaction: waiting_input }}
+    "user": {{ interaction: busy }}
+liveness_detection:
+  executable: kimi
+  strategies:
+    - strategy: recently_active
+      within_secs: 1800
+"#,
+            base = tmp.path().display().to_string().replace('\\', "\\\\"),
+            lookup = tmp.path().join("kimi.json").display().to_string().replace('\\', "\\\\"),
+        );
+        let cfg: ProviderConfigFile = serde_yaml::from_str(&yaml_src).unwrap();
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "kimi".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+        };
+        let prov = ConfigDrivenProvider::from_config(cfg, &app_cfg).unwrap();
+        let sessions = prov.discover_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].provider_session_id, sid);
+        assert_eq!(sessions[0].cwd, std::path::PathBuf::from("D:/Demo/agent-session-tui"));
     }
 }

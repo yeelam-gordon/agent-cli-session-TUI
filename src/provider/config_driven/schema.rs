@@ -112,6 +112,10 @@ fn default_tail_bytes() -> usize {
     524_288 // 512KB
 }
 
+fn default_session_id_path() -> String {
+    "last_session_id".to_string()
+}
+
 // ── Session ID extraction ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -121,6 +125,9 @@ pub enum SessionIdConfig {
     Dirname,
     /// File stem (FilePerSession).
     FilenameStem,
+    /// Parent directory name of the matched file (nested FilePerSession layouts
+    /// like `.../<session-id>/context.jsonl`).
+    ParentDirName,
     /// File stem passed through a regex (optional capture group 1).
     FilenameRegex { regex: String },
     /// A field in the first event.
@@ -141,6 +148,19 @@ pub enum CwdConfig {
         event_type: Option<String>,
         /// The field path (dot notation).
         field: String,
+    },
+    /// Look up the cwd in a JSON config file using the session id as the key.
+    SessionIdConfigLookup {
+        /// File path with `${HOME}` expansion.
+        lookup_file: String,
+        /// Dot path to the array/object holding session entries. Empty means root.
+        #[serde(default)]
+        container_path: String,
+        /// Dot path to the session id inside each entry when the container is an array.
+        #[serde(default = "default_session_id_path")]
+        session_id_path: String,
+        /// Dot path to the cwd inside the matching entry.
+        value_path: String,
     },
     /// Decode the directory name using a decoder.
     DirnameDecode {
