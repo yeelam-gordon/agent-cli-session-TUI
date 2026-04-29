@@ -42,25 +42,16 @@ pub struct ConfigDrivenProvider {
 }
 
 impl ConfigDrivenProvider {
-    /// Load a provider from a YAML file on disk.
-    /// Tries v3 format first (detected by top-level `extract:` key), then
-    /// falls back to the original format.
+    /// Load a provider from a v3 YAML file on disk.
+    ///
+    /// All shipped providers are v3-format; there is no fallback to older shapes.
     pub fn load_from_yaml(path: &Path, app_cfg: &AppProviderConfig) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading provider YAML: {path:?}"))?;
-
-        // Try v3 format first (has `extract:` key).
-        if schema::is_v3_yaml(&text) {
-            let v3: schema::ProviderConfigV3 = serde_yaml::from_str(&text)
-                .with_context(|| format!("parsing v3 provider YAML: {path:?}"))?;
-            let cfg = ProviderConfigFile::try_from(v3)
-                .with_context(|| format!("translating v3 YAML: {path:?}"))?;
-            return Self::from_config(cfg, app_cfg);
-        }
-
-        // Fall back to old format.
-        let cfg: ProviderConfigFile = serde_yaml::from_str(&text)
-            .with_context(|| format!("parsing provider YAML: {path:?}"))?;
+        let v3: schema::ProviderConfigV3 = serde_yaml::from_str(&text)
+            .with_context(|| format!("parsing v3 provider YAML: {path:?}"))?;
+        let cfg = ProviderConfigFile::try_from(v3)
+            .with_context(|| format!("translating v3 YAML: {path:?}"))?;
         Self::from_config(cfg, app_cfg)
     }
 
@@ -103,15 +94,16 @@ impl Provider for ConfigDrivenProvider {
         &self.cfg.name
     }
     fn capabilities(&self) -> ProviderCapabilities {
-        let c = &self.cfg.capabilities;
+        // The engine reads sessions from disk; only `supports_discovery`
+        // matters at runtime. Other flags are kept for future extensibility.
         ProviderCapabilities {
-            supports_resume: c.supports_resume,
-            supports_discovery: c.supports_discovery,
-            supports_logs: c.supports_logs,
-            supports_wait_detection: c.supports_wait_detection,
-            supports_kill: c.supports_kill,
-            supports_archive: c.supports_archive,
-            supports_summary_extraction: c.supports_summary_extraction,
+            supports_resume: false,
+            supports_discovery: true,
+            supports_logs: false,
+            supports_wait_detection: false,
+            supports_kill: false,
+            supports_archive: false,
+            supports_summary_extraction: false,
         }
     }
 
@@ -480,9 +472,6 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     // session id
     let session_id = match &cfg.session_id {
         SessionIdConfig::Dirname | SessionIdConfig::FilenameStem => cand.session_id.clone(),
-        SessionIdConfig::FilenameRegex { regex } => {
-            regex_capture1(regex, &cand.session_id).unwrap_or_else(|| cand.session_id.clone())
-        }
         SessionIdConfig::FirstEventField { field } => kept
             .first()
             .and_then(|ev| prov.expr(field).eval_str(ev))
@@ -499,56 +488,15 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
         .unwrap_or_else(|| format!("{} session", cfg.display_name));
     let title = truncate_str_safe(&title, 120);
 
-    // summary
-    let mut summary = cfg.fields.summary.as_ref()
-        .and_then(|spec| extract_field(prov, &cand.metadata, &kept, spec))
-        .unwrap_or_default();
-
-    // summary_parts — labeled multi-section composition (the richer detail
-    // pane body the legacy hand-written providers produced).
-    if !cfg.fields.summary_parts.is_empty() {
-        let mut resolved: Vec<(String, String, String)> = Vec::new(); // (name, label, value)
-        for part in &cfg.fields.summary_parts {
-            let Some(val) = extract_field(prov, &cand.metadata, &kept, &part.spec) else {
-                continue;
-            };
-            if let Some(skip_ref) = &part.skip_if_same_as {
-                if resolved.iter().any(|(n, _, v)| n == skip_ref && v == &val) {
-                    continue;
-                }
-            }
-            resolved.push((
-                part.name.clone().unwrap_or_default(),
-                part.label.clone(),
-                val,
-            ));
-        }
-        if !resolved.is_empty() {
-            let rendered: Vec<String> = resolved
-                .iter()
-                .map(|(_, label, val)| format!("{label}\n{val}"))
-                .collect();
-            let parts_block = rendered.join("\n\n");
-            summary = if summary.is_empty() {
-                parts_block
-            } else {
-                format!("{summary}\n\n{parts_block}")
-            };
-        }
-    }
-
-    // Discard truly empty sessions (no title, no summary content). Mirrors
-    // legacy main's "skip sessions with zero user interaction" guard.
-    if cfg.fields.discard_if_empty && title_used_fallback && summary.is_empty() {
+    // Discard sessions with zero user interaction (no extractable title).
+    if title_used_fallback {
         return Ok(None);
     }
 
     // timestamps
-    let created_at = cfg.fields.created_at.as_ref()
-        .and_then(|spec| extract_timestamp(prov, &cand.metadata, &kept, spec, cand.file_mtime.as_deref()))
-        .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
     let updated_at = extract_timestamp(prov, &cand.metadata, &kept, &cfg.fields.updated_at, cand.file_mtime.as_deref())
         .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
+    let created_at = updated_at.clone();
 
     // state — default Resumable unless a process matches later
     let state = SessionState {
@@ -567,7 +515,7 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
         cwd,
         title,
         tab_title: None,
-        summary,
+        summary: String::new(),
         state,
         pid: None,
         created_at,
@@ -629,17 +577,6 @@ fn resolve_cwd(
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             Ok(Some(decode_cwd_name(name, decoder, *backtrack)))
-        }
-        CwdConfig::ConfigLookup { lookup_file, key_source, value_path } => {
-            let p = expand_path(lookup_file);
-            let text = std::fs::read_to_string(&p).unwrap_or_default();
-            let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let key = resolve_key_source(key_source, &cand.path);
-            if let Some(entry) = json.get(&key) {
-                let expr = prov.expr(value_path);
-                return Ok(expr.eval_str(entry).map(PathBuf::from));
-            }
-            Ok(None)
         }
         CwdConfig::ConfigReverseLookup { lookup_file, key_source, container_path } => {
             let p = expand_path(lookup_file);
@@ -818,42 +755,14 @@ fn extract_field_one(
             Some(p) => p.eval_bool(ev),
             None => true,
         }).and_then(|ev| path.eval_str(ev)),
-        "last_matching_event" => events.iter().rev().find(|ev| match &predicate {
-            Some(p) => p.eval_bool(ev),
-            None => true,
-        }).and_then(|ev| path.eval_str(ev)),
-        "nth_from_end_matching_event" => {
-            let n = spec.nth.unwrap_or(1).max(1);
-            events
-                .iter()
-                .rev()
-                .filter(|ev| match &predicate {
-                    Some(p) => p.eval_bool(ev),
-                    None => true,
-                })
-                .nth(n - 1)
-                .and_then(|ev| path.eval_str(ev))
-        }
-        "joined_events" => {
-            let sep = spec.join.as_deref().unwrap_or("\n");
-            let parts: Vec<String> = events
-                .iter()
-                .filter(|ev| match &predicate {
-                    Some(p) => p.eval_bool(ev),
-                    None => true,
-                })
-                .filter_map(|ev| path.eval_str(ev))
-                .collect();
-            if parts.is_empty() { None } else { Some(parts.join(sep)) }
-        }
         _ => None,
     };
 
-    raw.map(|s| apply_transforms(&s, &spec.transforms, spec.limit))
+    raw.map(|s| apply_transforms(&s, &spec.transforms))
         .filter(|s| !s.is_empty())
 }
 
-fn apply_transforms(input: &str, transforms: &[String], limit: Option<usize>) -> String {
+fn apply_transforms(input: &str, transforms: &[String]) -> String {
     let mut s = input.to_string();
     for t in transforms {
         let (name, arg) = match t.split_once(':') {
@@ -870,9 +779,6 @@ fn apply_transforms(input: &str, transforms: &[String], limit: Option<usize>) ->
             }
             _ => s,
         };
-    }
-    if let Some(l) = limit {
-        s = truncate_str_safe(&s, l);
     }
     s
 }
@@ -900,15 +806,7 @@ fn extract_timestamp(
         "file_mtime" => file_mtime.map(|s| s.to_string()),
         _ => None,
     };
-    if result.is_some() {
-        return result;
-    }
-    for fb in &spec.fallback {
-        if let Some(v) = extract_timestamp(prov, meta, events, fb, file_mtime) {
-            return Some(v);
-        }
-    }
-    None
+    result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -923,8 +821,8 @@ fn match_processes_dispatch(
         ProcessMatchConfig::Lockfile { lockfile_pattern, pid_extract_regex } => {
             match_lockfile(sessions, lockfile_pattern, pid_extract_regex);
         }
-        ProcessMatchConfig::Cmdline { executable, script_contains, not_contains, id_match, recently_active_secs } => {
-            match_cmdline(sessions, executable, script_contains.as_deref(), not_contains.as_deref(), id_match, *recently_active_secs);
+        ProcessMatchConfig::Cmdline { executable, script_contains, id_match, recently_active_secs } => {
+            match_cmdline(sessions, executable, script_contains.as_deref(), id_match, *recently_active_secs);
         }
     }
 
@@ -971,7 +869,6 @@ fn match_cmdline(
     sessions: &mut [Session],
     executable: &str,
     script_contains: Option<&str>,
-    not_contains: Option<&str>,
     id_match: &CmdlineIdMatch,
     recently_active_secs: Option<u64>,
 ) {
@@ -982,9 +879,6 @@ fn match_cmdline(
     let cmd_passes_filters = |cmd: &str| -> bool {
         if let Some(req) = script_contains {
             if !cmd.contains(req) { return false; }
-        }
-        if let Some(forbidden) = not_contains {
-            if cmd.contains(forbidden) { return false; }
         }
         true
     };
@@ -1150,15 +1044,6 @@ fn build_state_signals(
         }
     }
 
-    if let Some(expr_src) = &cfg.unfinished_turn_when {
-        let e = prov.expr(expr_src);
-        signals.has_unfinished_turn = Some(events.iter().any(|ev| e.eval_bool(ev)));
-    }
-    if let Some(expr_src) = &cfg.recent_tool_activity_when {
-        let e = prov.expr(expr_src);
-        signals.recent_tool_activity = Some(events.iter().rev().take(20).any(|ev| e.eval_bool(ev)));
-    }
-
     // lockfile-strategy sets lock_file_* via scan
     if let ProcessMatchConfig::Lockfile { lockfile_pattern, pid_extract_regex } = &prov.cfg.process_match {
         if let Some(dir) = &session.state_dir {
@@ -1207,16 +1092,10 @@ fn extract_tab_title(
     events: &[Value],
 ) -> Option<String> {
     match cfg {
-        TabTitleConfig::None => None,
         TabTitleConfig::Literal { value } => Some(value.clone()),
         // Handled in the provider's `tab_title()` method where `session.cwd`
         // is available; reaching here means no events will help.
         TabTitleConfig::CwdBasename => None,
-        TabTitleConfig::FromField { r#where, path } => {
-            let w = prov.expr(r#where);
-            let p = prov.expr(path);
-            events.iter().rev().find(|ev| w.eval_bool(ev)).and_then(|ev| p.eval_str(ev))
-        }
         TabTitleConfig::FromToolCall {
             tool_name, r#where, tool_name_path, args_path, arg_field, iterate_path,
         } => {
@@ -1513,7 +1392,7 @@ mod tests {
     #[test]
     fn apply_transforms_basic() {
         assert_eq!(
-            apply_transforms("hello world", &["first_line".into(), "truncate:5".into()], None),
+            apply_transforms("hello world", &["first_line".into(), "truncate:5".into()]),
             "hello…"
         );
     }
@@ -1986,79 +1865,65 @@ mod tests {
         )
         .unwrap();
 
-        // Inline YAML mirroring providers/gemini.yaml with a tempdir
-        // lookup_file. (The shipped YAML uses ${HOME}/.gemini/projects.json
-        // which we can't safely redirect inside a parallel test run.)
+        // Inline v3-format YAML mirroring providers/gemini.yaml with a
+        // tempdir-scoped lookup_file. (The shipped YAML uses
+        // ${HOME}/.gemini/projects.json which we can't safely redirect inside
+        // a parallel test run.)
         let yaml_src = format!(
             r#"name: gemini
 display_name: Gemini CLI
-capabilities:
-  supports_resume: true
-  supports_discovery: true
-  supports_logs: true
-  supports_wait_detection: true
-  supports_kill: true
-  supports_archive: true
-  supports_summary_extraction: true
+files:
+  events: "{{session_file}}"
 discovery:
   base_dir: {base}
   strategy: file_per_session
   glob: "*/chats/session-*.jsonl"
-  tail_bytes: 524288
-session_id:
-  source: first_event_field
-  field: "sessionId"
-cwd:
-  source: config_reverse_lookup
-  lookup_file: {lookup}
-  key_source: parent_parent_dir_name
-  container_path: "projects"
 events:
-  format: jsonl
   filter_out:
     - '$set != null'
     - 'type == "info"'
-fields:
-  title:
-    strategy: first_matching_event
-    where: 'type == "user"'
-    path: "content.0.text"
-    transforms:
-      - first_line
-      - truncate:60
-  summary:
-    strategy: first_matching_event
-    where: 'type == "user"'
-    path: "content.0.text"
-    transforms:
-      - truncate:4000
-  created_at:
+extract:
+  session_id:
+    from: events
+    path: "sessionId"
     strategy: first_event_field
-    path: "startTime"
-    fallback:
-      - strategy: file_mtime
+  cwd:
+    from: config_file
+    lookup_file: {lookup}
+    key_source: parent_parent_dir_name
+    container_path: "projects"
+  title:
+    from: events
+    where: 'type == "user"'
+    path: "content.0.text"
+    transforms: [first_line, "truncate:60"]
   updated_at:
+    from: events
     strategy: file_mtime
-state_signals:
-  idle_threshold_seconds: 1800
-  last_event_map:
-    "user":   {{ interaction: busy }}
-    "gemini": {{ interaction: waiting_input }}
-process_match:
-  strategy: cmdline
+  state:
+    from: events
+    last_event_map:
+      "user":   busy
+      "gemini": waiting
+  tab_title:
+    from: cwd
+    strategy: cwd_basename
+process:
   executable: gemini
   script_contains: "gemini.js"
-  id_match_kind: contains
-  recently_active_secs: 15
-tab_title:
-  strategy: cwd_basename
+  match:
+    field: session_id
+    on: contains
+  fallback:
+    recently_active_secs: 1800
 "#,
             base = tmp.path().display().to_string().replace('\\', "\\\\"),
             lookup = projects_json.display().to_string().replace('\\', "\\\\"),
         );
 
-        let cfg: ProviderConfigFile =
-            serde_yaml::from_str(&yaml_src).expect("parse inline gemini yaml");
+        let v3: schema::ProviderConfigV3 =
+            serde_yaml::from_str(&yaml_src).expect("parse inline v3 gemini yaml");
+        let cfg = ProviderConfigFile::try_from(v3).expect("translate v3 gemini yaml");
 
         let app_cfg = AppProviderConfig {
             enabled: true,
@@ -2094,11 +1959,8 @@ tab_title:
 
         // Title: first `type == "user"` line, content.0.text, first_line only.
         assert_eq!(s.title, "write a plugin");
-        assert!(
-            s.summary.starts_with("write a plugin"),
-            "summary: {:?}",
-            s.summary
-        );
+        // Minimal v3 schema does not extract summary — it stays empty.
+        assert!(s.summary.is_empty(), "summary should be empty: {:?}", s.summary);
 
         // cwd from ConfigReverseLookup on projects.json: the directory
         // `agent-session-tui` matches the VALUE, so we return the KEY
@@ -2168,16 +2030,10 @@ tab_title:
             .join(format!("{name}.yaml"));
         assert!(yaml.exists(), "providers/{name}.yaml missing");
         let text = std::fs::read_to_string(&yaml).unwrap();
-        // Try v3 format first, fall back to old format.
-        if schema::is_v3_yaml(&text) {
-            let v3: schema::ProviderConfigV3 = serde_yaml::from_str(&text)
-                .unwrap_or_else(|e| panic!("providers/{name}.yaml v3 parse failed: {e}"));
-            ProviderConfigFile::try_from(v3)
-                .unwrap_or_else(|e| panic!("providers/{name}.yaml v3 translation failed: {e}"))
-        } else {
-            serde_yaml::from_str(&text)
-                .unwrap_or_else(|e| panic!("providers/{name}.yaml must parse: {e}"))
-        }
+        let v3: schema::ProviderConfigV3 = serde_yaml::from_str(&text)
+            .unwrap_or_else(|e| panic!("providers/{name}.yaml v3 parse failed: {e}"));
+        ProviderConfigFile::try_from(v3)
+            .unwrap_or_else(|e| panic!("providers/{name}.yaml v3 translation failed: {e}"))
     }
 
     #[test]

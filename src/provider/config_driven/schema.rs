@@ -1,9 +1,14 @@
 //! Serde schema for provider YAML files.
 //!
-//! Every provider is a `ProviderConfig` parsed from `providers/<name>.yaml`.
-//! The shape is intentionally unified across all 5 agent CLIs — strategy
-//! discriminators (`DiscoveryStrategy`, `CwdStrategy`, `ProcessMatchStrategy`)
-//! pick the right behavior while keeping the surface identical.
+//! Two layers:
+//!   - `ProviderConfigV3`        — the user-facing v3 YAML shape (the only
+//!                                 shape we accept; see `providers/*.yaml`).
+//!   - `ProviderConfigFile`      — the engine-facing runtime config; built
+//!                                 from a `ProviderConfigV3` via `TryFrom`.
+//!
+//! Strategy discriminators (`DiscoveryStrategy`, `CwdConfig`,
+//! `ProcessMatchConfig`, `TabTitleConfig`) keep the runtime surface small
+//! and dispatch happens via simple match arms in the engine.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,14 +19,10 @@ use serde::{Deserialize, Serialize};
 pub struct ProviderConfigFile {
     pub name: String,
     pub display_name: String,
-    /// Optional — defaults to all-false. Only `supports_discovery` is
-    /// checked at runtime (supervisor uses it to gate scanning).
-    #[serde(default)]
-    pub capabilities: CapabilitiesConfig,
     pub discovery: DiscoveryConfig,
     pub session_id: SessionIdConfig,
     pub cwd: CwdConfig,
-    /// Optional — defaults to JSONL format with no filters.
+    /// Optional — defaults to JSONL with no filters.
     #[serde(default)]
     pub events: EventsConfig,
     pub fields: FieldsConfig,
@@ -29,41 +30,6 @@ pub struct ProviderConfigFile {
     pub process_match: ProcessMatchConfig,
     #[serde(default)]
     pub tab_title: Option<TabTitleConfig>,
-    #[serde(default)]
-    pub session_detail: Option<SessionDetailConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CapabilitiesConfig {
-    #[serde(default)]
-    pub supports_resume: bool,
-    /// Defaults to true — the only capability flag actually checked at runtime.
-    #[serde(default = "default_true")]
-    pub supports_discovery: bool,
-    #[serde(default)]
-    pub supports_logs: bool,
-    #[serde(default)]
-    pub supports_wait_detection: bool,
-    #[serde(default)]
-    pub supports_kill: bool,
-    #[serde(default)]
-    pub supports_archive: bool,
-    #[serde(default)]
-    pub supports_summary_extraction: bool,
-}
-
-impl Default for CapabilitiesConfig {
-    fn default() -> Self {
-        Self {
-            supports_resume: false,
-            supports_discovery: true, // only flag checked at runtime
-            supports_logs: false,
-            supports_wait_detection: false,
-            supports_kill: false,
-            supports_archive: false,
-            supports_summary_extraction: false,
-        }
-    }
 }
 
 // ── Discovery ────────────────────────────────────────────────────────────────
@@ -127,8 +93,6 @@ pub enum SessionIdConfig {
     Dirname,
     /// File stem (FilePerSession).
     FilenameStem,
-    /// File stem passed through a regex (optional capture group 1).
-    FilenameRegex { regex: String },
     /// A field in the first event.
     FirstEventField { field: String },
 }
@@ -160,16 +124,6 @@ pub enum CwdConfig {
         #[serde(default)]
         from_parent: bool,
     },
-    /// Look up in a JSON config file by key (Gemini's reverse-path map).
-    ConfigLookup {
-        /// File path with `${HOME}` expansion (e.g. `${HOME}/.gemini/projects.json`).
-        lookup_file: String,
-        /// Where the CWD lives in the JSON (dot path, relative to the value for our key).
-        /// Our key comes from the session's parent directory name.
-        key_source: String, // "parent_dir_name" | "parent_parent_dir_name"
-        /// Path inside each entry where the full CWD lives.
-        value_path: String,
-    },
     /// Reverse-lookup in a JSON map whose KEYS are CWDs and VALUES are project
     /// names (Gemini's `~/.gemini/projects.json`). The session's ancestor
     /// directory name matches a VALUE; we scan the map for the entry whose
@@ -190,83 +144,25 @@ pub enum CwdConfig {
 
 // ── Events ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Event-stream pre-processing. Only JSONL format is supported.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct EventsConfig {
-    #[serde(default = "default_format")]
-    pub format: EventFormat,
     /// Expressions — an event is skipped if ANY filter evaluates true.
     #[serde(default)]
     pub filter_out: Vec<String>,
 }
 
-impl Default for EventsConfig {
-    fn default() -> Self {
-        Self { format: EventFormat::Jsonl, filter_out: Vec::new() }
-    }
-}
-
-fn default_format() -> EventFormat {
-    EventFormat::Jsonl
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum EventFormat {
-    Jsonl,
-    /// Some Gemini files are a single JSON array rather than line-delimited.
-    JsonArray,
-}
-
-// ── Fields (title / summary / timestamps) ────────────────────────────────────
+// ── Fields (title / timestamps) ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FieldsConfig {
     pub title: FieldSpec,
-    /// Summary extraction spec. Optional — when absent, Session.summary is
-    /// left empty (suitable for list-only TUI with no detail pane).
-    #[serde(default)]
-    pub summary: Option<FieldSpec>,
-    /// Created-at timestamp. Optional — when absent, falls back to empty string.
-    #[serde(default)]
-    pub created_at: Option<TimestampSpec>,
     pub updated_at: TimestampSpec,
-    /// Optional labeled parts appended to the primary `summary` value.
-    /// When present, the final Session.summary is composed by appending each
-    /// resolved part below the primary summary. Lets provider YAMLs build the
-    /// 4-section "First message / Last user message / Previous response /
-    /// Last <Provider> response" block the legacy hand-written providers
-    /// produced.
-    #[serde(default)]
-    pub summary_parts: Vec<SummaryPart>,
-    /// If true, sessions with no extractable title AND no summary content
-    /// are dropped entirely (matches legacy main's "skip sessions with zero
-    /// user interaction" behavior). Defaults to true.
-    #[serde(default = "default_true")]
-    pub discard_if_empty: bool,
-}
-
-fn default_true() -> bool { true }
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SummaryPart {
-    /// Optional name so later parts can reference via `skip_if_same_as`.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Label rendered above the extracted value (e.g. "--- First message ---").
-    pub label: String,
-    /// Extraction spec for this part's value.
-    pub spec: FieldSpec,
-    /// If this part's resolved value equals the named earlier part's value,
-    /// skip rendering it. Used to avoid "last user message == first user
-    /// message" duplication.
-    #[serde(default)]
-    pub skip_if_same_as: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FieldSpec {
-    /// `first_matching_event`, `last_matching_event`,
-    /// `nth_from_end_matching_event`, `metadata_field`, `joined_events`.
+    /// `metadata_field` or `first_matching_event`.
     pub strategy: String,
     /// Optional predicate expression to filter events before picking.
     #[serde(default)]
@@ -276,16 +172,6 @@ pub struct FieldSpec {
     /// Optional transforms applied in order.
     #[serde(default)]
     pub transforms: Vec<String>,
-    /// For `joined_events` strategy — join with this separator.
-    #[serde(default)]
-    pub join: Option<String>,
-    /// For `joined_events` strategy — hard cap on result length.
-    #[serde(default)]
-    pub limit: Option<usize>,
-    /// For `nth_from_end_matching_event` — 1-based index from end.
-    /// n=1 behaves like `last_matching_event`; n=2 is "second-to-last".
-    #[serde(default)]
-    pub nth: Option<usize>,
     /// Additional specs tried in order if the primary strategy returns
     /// nothing. Each fallback runs independently (same event/metadata
     /// context) and may itself specify transforms, `where`, etc.
@@ -295,13 +181,10 @@ pub struct FieldSpec {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TimestampSpec {
-    /// `metadata_field`, `event_field`, `file_mtime`, `first_event_field`, `last_event_field`.
+    /// `file_mtime`, `metadata_field`, `first_event_field`, or `last_event_field`.
     pub strategy: String,
     #[serde(default)]
     pub path: Option<String>,
-    /// Fallback chain: additional strategies tried if the primary returns None.
-    #[serde(default)]
-    pub fallback: Vec<TimestampSpec>,
 }
 
 // ── State signals ────────────────────────────────────────────────────────────
@@ -322,12 +205,6 @@ pub struct StateSignalsConfig {
     /// Seconds of inactivity before the session is considered idle.
     #[serde(default = "default_idle_secs")]
     pub idle_threshold_seconds: u64,
-    /// Optional predicate that means "has unfinished turn".
-    #[serde(default)]
-    pub unfinished_turn_when: Option<String>,
-    /// Optional predicate that means "recent tool activity".
-    #[serde(default)]
-    pub recent_tool_activity_when: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -371,12 +248,6 @@ pub enum ProcessMatchConfig {
         /// Optional substring that must appear in the cmdline (e.g. `qwen.js`).
         #[serde(default)]
         script_contains: Option<String>,
-        /// Optional substring that must NOT appear in the cmdline. Used to
-        /// disambiguate co-tenant agents (e.g. Claude's cmdline can mention
-        /// `claude` when another tool like `copilot` is also running under
-        /// `node.exe`; set `not_contains: "copilot"` to skip those).
-        #[serde(default)]
-        not_contains: Option<String>,
         /// How to match session ID against cmdline: a flag, or a positional UUID.
         #[serde(flatten)]
         id_match: CmdlineIdMatch,
@@ -440,11 +311,6 @@ pub enum TabTitleConfig {
         #[serde(default)]
         iterate_path: Option<String>,
     },
-    /// Use the value of some field in the latest matching event.
-    FromField {
-        r#where: String,
-        path: String,
-    },
     /// A constant sentinel — the supervisor will substring-match any terminal
     /// tab whose title *contains* this value. Used for Claude Code, which sets
     /// its own tab title (e.g. `"✳ …"`) that we can only detect by prefix.
@@ -453,21 +319,6 @@ pub enum TabTitleConfig {
     /// in-band tab title signal — the terminal title is set by the launcher
     /// from the working directory's folder name.
     CwdBasename,
-    /// No tab title support.
-    None,
-}
-
-// ── Session detail (plan items etc.) ─────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct SessionDetailConfig {
-    /// Expression that produces a list of plan items (title + done bool).
-    #[serde(default)]
-    pub plan_items_where: Option<String>,
-    #[serde(default)]
-    pub plan_item_title_path: Option<String>,
-    #[serde(default)]
-    pub plan_item_done_path: Option<String>,
 }
 
 // ── Template expansion ───────────────────────────────────────────────────────
@@ -704,19 +555,16 @@ impl TryFrom<ProviderConfigV3> for ProviderConfigFile {
         Ok(ProviderConfigFile {
             name: v3.name,
             display_name: v3.display_name,
-            capabilities: CapabilitiesConfig::default(),
             discovery: translate_discovery(&v3.discovery, &v3.files)?,
             session_id: translate_session_id(&v3.extract.session_id)?,
             cwd: translate_cwd(&v3.extract.cwd)?,
             events: EventsConfig {
-                format: EventFormat::Jsonl,
                 filter_out: v3.events.filter_out,
             },
             fields: translate_fields(&v3.extract)?,
             state_signals: translate_state(&v3.extract.state),
             process_match: translate_process(&v3.process)?,
             tab_title: v3.extract.tab_title.map(translate_tab_title).transpose()?,
-            session_detail: None,
         })
     }
 }
@@ -828,9 +676,6 @@ fn translate_v3_field(f: &V3FieldSpec) -> FieldSpec {
         r#where: f.r#where.clone(),
         path: f.path.clone().unwrap_or_default(),
         transforms: f.transforms.clone(),
-        join: None,
-        limit: None,
-        nth: None,
         fallback: f.fallback.iter().map(translate_v3_field).collect(),
     }
 }
@@ -838,11 +683,7 @@ fn translate_v3_field(f: &V3FieldSpec) -> FieldSpec {
 fn translate_fields(extract: &V3Extract) -> Result<FieldsConfig, anyhow::Error> {
     Ok(FieldsConfig {
         title: translate_v3_field(&extract.title),
-        summary: None,
-        created_at: None,
         updated_at: translate_timestamp(&extract.updated_at),
-        summary_parts: Vec::new(),
-        discard_if_empty: true,
     })
 }
 
@@ -854,7 +695,6 @@ fn translate_timestamp(ts: &V3TimestampSpec) -> TimestampSpec {
     TimestampSpec {
         strategy,
         path: ts.path.clone(),
-        fallback: Vec::new(),
     }
 }
 
@@ -898,8 +738,6 @@ fn translate_state(state: &V3State) -> StateSignalsConfig {
         last_event_map,
         event_predicates,
         idle_threshold_seconds: default_idle_secs(),
-        unfinished_turn_when: None,
-        recent_tool_activity_when: None,
     }
 }
 
@@ -959,7 +797,6 @@ fn translate_process(p: &V3Process) -> Result<ProcessMatchConfig, anyhow::Error>
             Ok(ProcessMatchConfig::Cmdline {
                 executable: p.executable.clone().unwrap_or_default(),
                 script_contains: p.script_contains.clone(),
-                not_contains: None,
                 id_match: CmdlineIdMatch::Flag { flag },
                 recently_active_secs,
             })
@@ -967,34 +804,17 @@ fn translate_process(p: &V3Process) -> Result<ProcessMatchConfig, anyhow::Error>
         "positional_arg" => Ok(ProcessMatchConfig::Cmdline {
             executable: p.executable.clone().unwrap_or_default(),
             script_contains: p.script_contains.clone(),
-            not_contains: None,
             id_match: CmdlineIdMatch::PositionalUuid,
             recently_active_secs,
         }),
         "contains" => Ok(ProcessMatchConfig::Cmdline {
             executable: p.executable.clone().unwrap_or_default(),
             script_contains: p.script_contains.clone(),
-            not_contains: None,
             id_match: CmdlineIdMatch::Contains,
             recently_active_secs,
         }),
         other => anyhow::bail!("unknown v3 process.match.on: {other}"),
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// V3 detection helper
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Returns true if the YAML text looks like a v3 provider config
-/// (has top-level `extract:` key, which old format never has).
-pub fn is_v3_yaml(text: &str) -> bool {
-    // Quick heuristic: v3 always has `extract:` at the top level.
-    // The old format uses `session_id:`, `cwd:`, `fields:`, `state_signals:`.
-    text.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed == "extract:" || trimmed.starts_with("extract:")
-    })
 }
 
 #[cfg(test)]
