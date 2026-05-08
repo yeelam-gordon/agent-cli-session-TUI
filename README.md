@@ -1,6 +1,6 @@
 # Agent CLI Session TUI
 
-A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, and extensible to others.
+A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, **Kimi**, and extensible to others.
 <img width="2818" height="1608" alt="image" src="https://github.com/user-attachments/assets/28922190-474b-4019-be01-45d291954fe9" />
 
 ## Pain Points Solved
@@ -27,7 +27,7 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 │  Discovery · Process matching · Launch/Resume (config-driven)│
 ├─────────────────────────────────────────────────────────────┤
 │ Provider plugins (data-only — read from each CLI's state)   │
-│  Copilot │ Claude │ Codex │ Qwen │ Gemini │ (extensible)   │
+│  Copilot │ Claude │ Codex │ Qwen │ Gemini │ Kimi │ (more…) │
 ├─────────────────────────────────────────────────────────────┤
 │ Shared infrastructure                                       │
 │  Process detection │ Semantic DLL (optional) │ Archive store │
@@ -77,6 +77,7 @@ Native mouse text selection works (click-drag to highlight and copy).
 | **Codex CLI** | `~/.codex/sessions/` | Session directories with state files |
 | **Qwen CLI** | `~/.qwen/projects/` | `<encoded-cwd>/chats/<session-id>.jsonl` |
 | **Gemini CLI** | `~/.gemini/tmp/` | `<project>/chats/session-*.jsonl` + subdirs |
+| **Kimi** | `~/.kimi/sessions/` | Session JSONL files |
 
 ## Configuration
 

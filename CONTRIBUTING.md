@@ -21,32 +21,30 @@ CI runs automatically on PRs: build + unit tests on both Ubuntu and Windows.
 
 ## Adding a Provider Plugin
 
-See [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.instructions.md) for the full guide. Quick summary:
+See [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.instructions.md) for the full guide. Most providers are now **YAML-backed** via the `ConfigDrivenProvider` engine — you usually don't need to write Rust:
 
-1. Create `src/provider/<name>/mod.rs` implementing the `Provider` trait
-   - Required: `discover_sessions()`, `detect_state()`, `parse_log()`
-   - Paginated: `discover_sessions_paged(offset, limit)` — default impl calls `discover_sessions()` with slicing; override for lazy discovery
-   - Optional: `tab_title(session)` — return a custom tab label (e.g. branch name); defaults to `None`
-2. Add match arm in `main.rs::create_provider()`
-3. Add `pub mod <name>;` in `src/provider/mod.rs`
-4. Add unit tests for state detection (waiting vs busy) with fixture JSONL data
-5. Create `tests/<name>_lifecycle_test.rs` using the shared test framework
+1. Create `providers/<name>.yaml` describing discovery, fields, and liveness rules
+2. Add a `[providers.<name>]` section to `config.toml.template`
+3. Add the provider name to `EXPECTED_PROVIDERS` in `scripts/validate_configs.py`
+4. Create `tests/<name>_lifecycle_test.rs` using the shared test framework + `ConfigDrivenProvider::load_from_yaml`
+5. Add scanner unit tests for state detection (waiting vs busy) — fixture JSONL inline
+
+Only fall back to a dedicated `src/provider/<name>/mod.rs` when the YAML schema can't express the layout.
 
 ## Semantic Search Plugin
 
 The optional semantic search plugin lives in `semantic-plugin/` (a separate Cargo crate that builds a cdylib DLL).
 
 1. **Build**: `cd semantic-plugin && cargo build --release` — produces `semantic_search_plugin.dll` (Windows) / `libsemantic_search_plugin.so` (Linux) / `libsemantic_search_plugin.dylib` (macOS) in `semantic-plugin/target/release/`
-2. **Install**: copy the DLL next to the TUI binary (same directory as `agent-session-tui(.exe)`); the TUI loads it at startup if found. Example:
-   ```powershell
-   Copy-Item semantic-plugin\target\release\semantic_search_plugin.dll target\release\
-   ```
-3. **Test**: `cd semantic-plugin && cargo test` — runs the plugin's own unit tests
-4. **MSVC toolchain**: Windows builds require the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`); MinGW is not supported
+2. **Install**: copy the DLL next to the TUI binary (same directory as `agent-session-tui(.exe)`); the TUI loads it at startup if found.
+3. **Test**: `cd semantic-plugin && cargo test`
+4. **MSVC toolchain**: Windows builds require the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`); MinGW is not supported.
 
 ## Search Module
 
-The `src/search.rs` module handles fuzzy and semantic search across sessions. It contains 22 unit tests covering tokenisation, ranking, embedding cache I/O, and query parsing. Run them with:
+`src/search.rs` handles fuzzy and semantic search across sessions. Embeddings are now **multi-vector per session** (base + compaction summaries + task-complete summaries + user messages), so a name buried in a long compacted conversation still matches. Full-text search lives in `src/log_search.rs` and indexes the same enriched content via Tantivy.
+
+Run search-related tests with:
 
 ```
 cargo test --lib search
@@ -54,8 +52,9 @@ cargo test --lib search
 
 ## Code Standards
 
-- **Zero warnings** — `cargo build` must produce no warnings
+- **Zero clippy warnings** — `cargo clippy --release -- -D warnings` must be clean (CI runs this with `-D warnings`)
 - **Unit tests for state detection** — every provider must have tests verifying waiting/busy/idle states with fixture data
+- **Regression test for every bug fix** — see [`testing.instructions.md`](.github/instructions/testing.instructions.md) § Regression Test Policy
 - **No mouse capture** — native terminal text selection must work
 - **No `terminal.clear()` for redraw** — causes flicker
 - **Unicode-safe** — use `unicode-width` for display width, never byte-index strings

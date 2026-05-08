@@ -22,4 +22,5 @@ This tool reads session data from local CLI state directories (read-only) and la
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | ✅ Current |
+| 0.3.x   | ✅ Current |
+| < 0.3   | ❌ Please upgrade |

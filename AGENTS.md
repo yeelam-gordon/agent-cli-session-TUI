@@ -4,7 +4,7 @@
 
 ## What This Project Is
 
-A Rust TUI that manages agent CLI sessions (**Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, and extensible to others). It discovers sessions from each CLI's state directory, monitors running processes, and provides a unified view with search, resume, and archive capabilities.
+A Rust TUI that manages agent CLI sessions (**Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, **Kimi**, and extensible to others). It discovers sessions from each CLI's state directory, monitors running processes, and provides a unified view with search, resume, archive, thematic grouping, and optional AI-assisted group suggestions.
 
 ## Instruction Files
 
@@ -30,38 +30,42 @@ agent-session-tui/
 ├── src/
 │   ├── main.rs             # Entry point — config, provider registration, supervisor + TUI startup
 │   ├── lib.rs              # Library re-exports (all pub mod) for use by tests
-│   ├── config.rs           # TOML config loading (AppConfig, ProviderConfig)
+│   ├── config.rs           # TOML config loading (AppConfig, ProviderConfig, AcpConfig)
 │   ├── models.rs           # Core types: Session, SessionState (4-axis), StateSignals
 │   ├── archive.rs          # JSON-based archive store
+│   ├── groups.rs           # GroupManager: assign sessions to thematic groups (groups.json)
+│   ├── acp.rs              # ACP-based AI grouping suggestions (spawns Copilot CLI)
 │   ├── log.rs              # File-based logging (%TEMP%/agent-session-tui.log)
-│   ├── process_info.rs     # Shared process discovery (WMI on Windows + sysinfo fallback)
-│   ├── search.rs           # Tiered search: exact → fuzzy → semantic (optional DLL plugin)
+│   ├── log_search.rs       # Tantivy full-text index over session content (head/tail/compaction/user)
+│   ├── process_info.rs     # Shared process discovery (sysinfo + WMI fallback with cooldown)
+│   ├── search.rs           # Tiered search: exact → fuzzy → semantic; multi-vector embedding cache
 │   ├── util.rs             # UTF-8 safe string truncation
 │   ├── focus/
 │   │   ├── mod.rs          # Tab focus API (platform-gated)
 │   │   └── win.rs          # Windows UI Automation: find & focus WT tabs via COM
 │   ├── provider/
 │   │   ├── mod.rs          # Provider trait + ProviderRegistry + default state inference
+│   │   ├── config_driven/  # YAML-backed provider engine — most providers use this
 │   │   ├── copilot/mod.rs  # Copilot CLI plugin
 │   │   ├── claude/mod.rs   # Claude Code plugin
 │   │   ├── codex/mod.rs    # Codex CLI plugin
 │   │   ├── qwen/mod.rs     # Qwen CLI plugin
-│   │   └── gemini/mod.rs   # Gemini CLI plugin
+│   │   ├── gemini/mod.rs   # Gemini CLI plugin
+│   │   └── kimi/mod.rs     # Kimi plugin
 │   ├── supervisor/mod.rs   # Background tokio task: parallel scan, reconcile, launch, archive
 │   ├── testing/
 │   │   ├── mod.rs          # TestRunner (shared by all provider tests)
 │   │   └── scenarios.rs    # Provider-agnostic test scenarios (discover, graceful, launch, kill)
-│   └── ui/mod.rs           # ratatui TUI: session list, detail, log viewer, search, keybindings
+│   └── ui/mod.rs           # ratatui TUI: session list, detail, log viewer, search, groups, AI suggest
+├── providers/              # YAML provider definitions (one per provider; config_driven engine reads these)
+├── prompts/
+│   └── group-suggest.md    # AI grouping prompt template (shipped next to exe in release zip)
 ├── semantic-plugin/        # Optional semantic search DLL (separate crate, ~26 MB with ONNX model)
-├── tests/
-│   ├── copilot_lifecycle_test.rs
-│   ├── claude_lifecycle_test.rs
-│   ├── codex_lifecycle_test.rs
-│   ├── qwen_lifecycle_test.rs
-│   └── gemini_lifecycle_test.rs
+├── tests/                  # One *_lifecycle_test.rs per provider (integration tests)
 ├── config.toml.template    # Source template with placeholders; release build substitutes per-OS defaults into dist/config.toml.example
 ├── scripts/
-│   └── generate_config.py  # Per-OS substitution (invoked by release workflow)
+│   ├── generate_config.py  # Per-OS substitution (invoked by release workflow)
+│   └── validate_configs.py # CI check: per-OS configs have the expected provider set
 ├── Cargo.toml              # Dependencies and build profile
 └── rust-toolchain.toml     # Pins stable MSVC toolchain
 ```
