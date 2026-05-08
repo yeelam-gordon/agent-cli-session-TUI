@@ -8,7 +8,8 @@ A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code
 - **Where is my running agent?** — press `Enter` on any 🟡 Waiting or 🟢 Running session to instantly focus its terminal tab
 - **Too many tabs** — see all sessions in one view with clear status badges
 - **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
-- **Finding that one session** — `/` to search with tiered ranking: exact match → fuzzy word match → ✨ semantic similarity (optional). Results ranked by relevance, not just recency
+- **Finding that one session** — `/` to search with tiered ranking: exact match → fuzzy word match → ✨ semantic similarity (optional). Now indexes head, tail, compaction summaries, and your own messages — names buried inside long conversations show up in results
+- **Hundreds of sessions piling up** — assign sessions to thematic groups with `g`, view by group via `Shift+Tab`. Optional [AI auto-suggest](#ai-auto-grouping) proposes groups for you
 - **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later
 - **Resume after reboot** — session summaries, last activity, full last response help you decide what to pick up
 - **One place for all agents** — manage Copilot, Claude, Codex, Qwen, Gemini sessions from a single TUI
