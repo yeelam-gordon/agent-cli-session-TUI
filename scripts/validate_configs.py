@@ -5,7 +5,7 @@ Usage: validate_configs.py <dir>
 
 Checks each .toml file in <dir>:
   - parses as valid TOML
-  - contains exactly 5 providers
+  - contains exactly the EXPECTED_PROVIDERS set
   - copilot provider has the OS-appropriate launcher
     (Windows -> launch_method=wt, no launch_cmd;
      Linux   -> launch_cmd=gnome-terminal;
@@ -19,6 +19,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+# Update this set when adding/removing a provider in config.toml.template.
+EXPECTED_PROVIDERS = {"copilot", "claude", "codex", "qwen", "gemini", "kimi"}
+
 
 def check(path: Path) -> list[str]:
     errors: list[str] = []
@@ -28,8 +31,13 @@ def check(path: Path) -> list[str]:
         return [f"TOML parse error: {e}"]
 
     provs = data.get("providers", {})
-    if len(provs) != 5:
-        errors.append(f"expected 5 providers, got {len(provs)}")
+    actual = set(provs.keys())
+    missing = EXPECTED_PROVIDERS - actual
+    extra = actual - EXPECTED_PROVIDERS
+    if missing:
+        errors.append(f"missing providers: {sorted(missing)}")
+    if extra:
+        errors.append(f"unexpected providers: {sorted(extra)}")
 
     cop = provs.get("copilot")
     if not cop:
