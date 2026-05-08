@@ -39,6 +39,7 @@ static PROCESS_CACHE: Mutex<Option<ProcessCacheState>> = Mutex::new(None);
 /// How long a successful snapshot is reused before refreshing.
 const CACHE_TTL_SECS: u64 = 30;
 /// How long to avoid WMI after a timeout (backoff).
+#[cfg(windows)]
 const WMI_BACKOFF_SECS: u64 = 300; // 5 minutes
 
 /// Known provider executables for the combined WMI fallback query.
