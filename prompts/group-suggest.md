@@ -26,7 +26,7 @@ For each session, decide ONE of:
 ## Response Format (strict compact JSON, single line)
 
 ```json
-{"suggestions":[{"session":"copilot:abc-123","group":"agent-customization","is_new":true,"score":0.87,"reason":"Building hooks and skills for agent CLIs"},{"session":"claude:def-456","group":"tui-development","is_new":true,"score":0.74,"reason":"TUI feature work and UI improvements"}]}
+{"suggestions":[{"session":"copilot:703611e6-890c-4df2-b4ef-a83672ab518e","group":"agent-customization","is_new":true,"score":0.87,"reason":"Building hooks and skills for agent CLIs"},{"session":"claude:f4d24d65-8c3a-4b21-9e7d-12345abcdef0","group":"tui-development","is_new":true,"score":0.74,"reason":"TUI feature work and UI improvements"}]}
 ```
 
 Rules:
@@ -37,3 +37,4 @@ Rules:
 - `is_new`: true if group name not in existing groups list
 - `score`: 0.0-1.0 confidence
 - `reason`: one sentence describing the BROADER theme, not just the immediate task
+- **`session`: copy the EXACT `id` field from the input session list. Do NOT truncate, abbreviate, or shorten the UUID. The full provider-prefixed UUID is required so the TUI can match the suggestion to the correct session.**

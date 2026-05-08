@@ -5,7 +5,7 @@
 //! - Fingerprint sidecar at `{data_dir}/log_index_fingerprints.json` maps
 //!   `session_id` → combined (mtime+size) hash, so we skip re-indexing
 //!   sessions whose log files haven't changed.
-//! - Only the last 256 KB of each log file is indexed (tails). For ~700
+//! - The first and last 256 KB of each log file are indexed (head+tail). For ~700
 //!   sessions this keeps the index well under 200 MB.
 //! - The UI thread only calls `search()`; a background thread owns
 //!   `refresh()`. Tantivy readers are `Clone` and see committed docs
@@ -323,15 +323,135 @@ fn source_path(src: &ActivitySource) -> &Path {
     }
 }
 
+/// Read the head (first N bytes), tail (last N bytes), AND all compaction
+/// summaries from an events file. Compaction summaries (`session.compaction_complete`
+/// → `data.summaryContent`) are the densest source of searchable context in
+/// long Copilot sessions — ~10KB each, containing structured overviews of
+/// everything discussed before the compaction point.
 fn read_tail(path: &Path) -> Option<String> {
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
-    if len > TAIL_BYTES {
-        f.seek(SeekFrom::Start(len - TAIL_BYTES)).ok()?;
+
+    if len <= TAIL_BYTES * 2 {
+        // Small file — read the whole thing
+        let mut buf = String::with_capacity(len as usize);
+        f.read_to_string(&mut buf).ok()?;
+        return Some(buf);
     }
-    let mut buf = Vec::with_capacity(TAIL_BYTES as usize);
-    f.take(TAIL_BYTES).read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+
+    let mut buf = String::with_capacity((TAIL_BYTES * 3) as usize);
+
+    // Read head
+    let mut head_bytes = vec![0u8; TAIL_BYTES as usize];
+    let head_read = f.read(&mut head_bytes).ok()?;
+    buf.push_str(&String::from_utf8_lossy(&head_bytes[..head_read]));
+    buf.push_str("\n...\n");
+
+    // Scan entire file for high-value structured events (only if JSONL)
+    drop(f);
+    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+        extract_structured_summaries(path, &mut buf);
+    }
+
+    // Read tail
+    let mut f = fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(len - TAIL_BYTES)).ok()?;
+    buf.push_str("\n...\n");
+    let mut tail = Vec::with_capacity(TAIL_BYTES as usize);
+    f.read_to_end(&mut tail).ok()?;
+    buf.push_str(&String::from_utf8_lossy(&tail));
+
+    Some(buf)
+}
+
+/// Extract high-value structured text from JSONL events:
+/// - `session.compaction_complete` → `data.summaryContent` (HIGHEST: ~10KB each, LLM-written overviews)
+/// - `session.task_complete` → `data.summary` (HIGH: ~0.5KB each, concise task descriptions)
+/// - `user.message` → `data.content` (HIGH: first 150 chars each — captures what the user asked about)
+///
+/// These are the densest sources of searchable context. Names, decisions, topics,
+/// and technical details that would otherwise be lost in the middle of a large
+/// events file are captured here.
+fn extract_structured_summaries(path: &Path, buf: &mut String) {
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(file);
+    let mut total_added = 0usize;
+    const MAX_EXTRACT_BYTES: usize = 2 * 1024 * 1024; // cap at 2MB total
+    const USER_MSG_CAP: usize = 150; // first N chars of each user message
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        if total_added >= MAX_EXTRACT_BYTES {
+            break;
+        }
+
+        // Quick pre-filter before parsing JSON
+        if line.contains("session.compaction_complete") {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("session.compaction_complete") {
+                    if let Some(summary) = obj
+                        .get("data")
+                        .and_then(|d| d.get("summaryContent"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !summary.is_empty() {
+                            buf.push_str("\n[compaction]\n");
+                            buf.push_str(summary);
+                            buf.push('\n');
+                            total_added += summary.len();
+                        }
+                    }
+                }
+            }
+        } else if line.contains("session.task_complete") {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("session.task_complete") {
+                    if let Some(summary) = obj
+                        .get("data")
+                        .and_then(|d| d.get("summary"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !summary.is_empty() {
+                            buf.push_str("\n[task]\n");
+                            buf.push_str(summary);
+                            buf.push('\n');
+                            total_added += summary.len();
+                        }
+                    }
+                }
+            }
+        } else if line.contains("\"user.message\"") {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("user.message") {
+                    if let Some(content) = obj
+                        .get("data")
+                        .and_then(|d| d.get("content"))
+                        .and_then(|v| v.as_str())
+                    {
+                        // Take first N chars — captures the user's question/topic
+                        let trimmed = content.trim();
+                        if !trimmed.is_empty() {
+                            let cap = trimmed.char_indices()
+                                .nth(USER_MSG_CAP)
+                                .map(|(i, _)| i)
+                                .unwrap_or(trimmed.len());
+                            buf.push_str("\n[user]\n");
+                            buf.push_str(&trimmed[..cap]);
+                            buf.push('\n');
+                            total_added += cap;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Escape tantivy query-parser-reserved characters so user input is always

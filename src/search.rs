@@ -203,9 +203,12 @@ struct CachedEmbedding {
 }
 
 /// Persistent embedding cache — JSON file on disk.
+/// Each session can have multiple embedding chunks (title, compaction summaries,
+/// task completions, user messages) so semantic search matches against any aspect.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct EmbeddingCache {
-    entries: HashMap<String, CachedEmbedding>,
+    /// session_id → list of embedding chunks
+    entries: HashMap<String, Vec<CachedEmbedding>>,
 }
 
 impl EmbeddingCache {
@@ -332,25 +335,52 @@ impl SemanticPlugin {
                 .cache
                 .entries
                 .get(session_id)
-                .map(|c| c.text_hash != text_hash)
+                .map(|chunks| {
+                    // Check if the first chunk's hash matches (base text identity)
+                    chunks.first().map(|c| c.text_hash != text_hash).unwrap_or(true)
+                })
                 .unwrap_or(true)
     }
 
     /// Embed one text and cache the result under `session_id`. Returns
-    /// true if a new embedding was produced and stored.
+    /// true if a new embedding was produced and stored. This replaces all
+    /// existing chunks for the session. Kept as library-public surface
+    /// alongside `embed_and_cache_multi`; the multi variant is the only
+    /// in-tree caller today.
+    #[allow(dead_code)]
     pub fn embed_and_cache(&mut self, session_id: &str, text: &str, text_hash: u64) -> bool {
         if let Some(vec) = self.embed(text) {
             self.cache.entries.insert(
                 session_id.to_string(),
-                CachedEmbedding {
+                vec![CachedEmbedding {
                     text_hash,
                     vector: vec,
-                },
+                }],
             );
             true
         } else {
             false
         }
+    }
+
+    /// Embed multiple text chunks for a session. Each chunk gets its own vector.
+    /// The first chunk's text_hash is used as the identity hash for change detection.
+    /// Returns the number of chunks successfully embedded.
+    pub fn embed_and_cache_multi(&mut self, session_id: &str, chunks: &[(String, u64)]) -> usize {
+        let mut cached = Vec::new();
+        for (text, hash) in chunks {
+            if let Some(vec) = self.embed(text) {
+                cached.push(CachedEmbedding {
+                    text_hash: *hash,
+                    vector: vec,
+                });
+            }
+        }
+        let count = cached.len();
+        if !cached.is_empty() {
+            self.cache.entries.insert(session_id.to_string(), cached);
+        }
+        count
     }
 
     /// Update indexing progress (visible to the UI via `shared_status`).
@@ -360,7 +390,7 @@ impl SemanticPlugin {
 
     /// Mark the plugin Ready with the current cached embedding count.
     pub fn mark_ready(&mut self) {
-        let count = self.cache.entries.len();
+        let count = self.cache.entries.values().map(|v| v.len()).sum::<usize>();
         self.set_status(SemanticStatus::Ready { count });
     }
 
@@ -581,7 +611,7 @@ impl SemanticPlugin {
 
             // Skip if already cached with same hash
             if let Some(cached) = self.cache.entries.get(&session.id) {
-                if cached.text_hash == text_hash {
+                if cached.first().map(|c| c.text_hash == text_hash).unwrap_or(false) {
                     continue;
                 }
             }
@@ -590,10 +620,10 @@ impl SemanticPlugin {
             if let Some(vec) = self.embed(&text) {
                 self.cache.entries.insert(
                     session.id.clone(),
-                    CachedEmbedding {
+                    vec![CachedEmbedding {
                         text_hash,
                         vector: vec,
-                    },
+                    }],
                 );
                 newly_embedded += 1;
 
@@ -607,7 +637,7 @@ impl SemanticPlugin {
             }
         }
 
-        let count = self.cache.entries.len();
+        let count = self.cache.entries.values().map(|v| v.len()).sum::<usize>();
         self.status = SemanticStatus::Ready { count };
 
         // Flush cache to disk (async-safe: write then rename would be better, but this works)
@@ -640,10 +670,13 @@ impl SemanticPlugin {
             .cache
             .entries
             .iter()
-            .filter_map(|(id, cached)| {
-                let sim = cosine_similarity(&query_vec, &cached.vector);
-                if sim > threshold {
-                    Some((id.clone(), sim))
+            .filter_map(|(id, chunks)| {
+                // Max similarity across all chunks for this session
+                let max_sim = chunks.iter()
+                    .map(|c| cosine_similarity(&query_vec, &c.vector))
+                    .fold(0.0f32, f32::max);
+                if max_sim > threshold {
+                    Some((id.clone(), max_sim))
                 } else {
                     None
                 }
@@ -707,7 +740,11 @@ impl SemanticPlugin {
     ) -> Vec<(String, String, f32)> {
         let vecs: Vec<(&String, &Vec<f32>)> = session_keys
             .iter()
-            .filter_map(|k| self.cache.entries.get(k).map(|c| (k, &c.vector)))
+            .filter_map(|k| {
+                self.cache.entries.get(k)
+                    .and_then(|chunks| chunks.first())
+                    .map(|c| (k, &c.vector))
+            })
             .collect();
 
         let mut result = Vec::new();

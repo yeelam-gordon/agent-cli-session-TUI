@@ -247,6 +247,8 @@ impl Supervisor {
                     scan_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::spawn(move || {
                         let scan_start = std::time::Instant::now();
+                        // Invalidate process cache so providers share one WMI query
+                        crate::process_info::invalidate_process_cache();
                         if let Err(e) = Self::scan_providers(&registry, &archive, &vm_clone, &tx) {
                             crate::log::warn(&format!("Scan error: {}", e));
                             let _ = tx.send(SupervisorEvent::Error(e.to_string()));
@@ -370,6 +372,8 @@ impl Supervisor {
             .collect();
 
         // ── Phase 1: paged, blocking — fast first paint ─────────────────────
+        // Invalidate process cache so a single WMI query is shared by all providers.
+        crate::process_info::invalidate_process_cache();
         let phase1_start = std::time::Instant::now();
         std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<Session>)>();

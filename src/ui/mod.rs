@@ -106,8 +106,32 @@ struct PendingTransition {
 struct GroupPrompt {
     /// The session key being assigned ("provider:session_id").
     session_key: String,
-    /// Current text input.
+    /// Current text input (filter / new-group name).
     input: String,
+    /// Index into the filtered suggestions list of the highlighted item.
+    /// `Enter` uses the highlighted suggestion when in range; otherwise the
+    /// raw `input` value (creating a new group).
+    cursor: usize,
+}
+
+/// Which group field has focus.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GroupEditField {
+    Name,
+    Description,
+}
+
+/// State for editing a group — immediately editable, no menu.
+#[derive(Debug, Clone)]
+struct GroupEditPrompt {
+    /// The original group name (before any edits).
+    original_name: String,
+    /// Which field is focused.
+    field: GroupEditField,
+    /// Current name input.
+    name_input: String,
+    /// Current description input.
+    desc_input: String,
 }
 
 /// State for ACP AI suggestion flow.
@@ -192,6 +216,8 @@ pub struct App {
     group_mgr: GroupManager,
     /// Active group-assignment prompt (None = not showing).
     group_prompt: Option<GroupPrompt>,
+    /// Active description-editing prompt (None = not showing).
+    group_edit: Option<GroupEditPrompt>,
     /// ACP AI suggestion state machine.
     acp_state: AcpState,
     /// ACP configuration (command, extra_args, prompt_template).
@@ -199,6 +225,33 @@ pub struct App {
     /// In Grouped view: maps visual row index → session index in self.sessions.
     /// None = header row (not selectable as session). Rebuilt each draw.
     grouped_row_map: Vec<Option<usize>>,
+    /// In Grouped view: maps visual row index → group name for header rows.
+    grouped_header_names: Vec<(usize, String)>,
+    /// In Grouped view: frozen ordering of group names captured the first time
+    /// the user enters the view since the last reset. Sort key is "max member
+    /// activity" (most recently touched group first), so on entry the user
+    /// sees what they're working on at the top — without re-shuffling on
+    /// every 2s scan refresh while they browse. Cleared when leaving the
+    /// view; refreshed by Shift+Tab cycling out and back in.
+    grouped_view_sort_order: Option<Vec<String>>,
+    /// Deferred selection restore: (provider, session_id) to find in grouped_row_map
+    /// during the next draw cycle. Set on data refresh in Grouped view.
+    pending_restore_selection: Option<(String, String)>,
+    /// Auto-AI suggestions: session_key ("provider:session_id") → suggestion.
+    /// Populated in the background after initial load completes (config gated).
+    /// Consumed by `y`/`n`/`e` from the Active view when the cursor is on a
+    /// session that has a pending suggestion.
+    auto_suggestions: std::collections::HashMap<String, AiSuggestion>,
+    /// Have we already kicked the auto-suggest run for this session?
+    auto_suggest_kicked: bool,
+    /// Session keys (`provider:session_id`) that have been sent to the AI in
+    /// any prior auto-suggest batch this TUI run. Used to chain follow-up
+    /// batches without re-asking the same top-30 every time.
+    auto_suggest_asked: std::collections::HashSet<String>,
+    /// True while the most recent ACP run was started by the auto-suggest path
+    /// (vs the manual `s` key). Differentiates how we treat the result/error
+    /// without surfacing a modal popup for an unattended background run.
+    acp_run_is_auto: bool,
 }
 
 impl App {
@@ -317,9 +370,17 @@ impl App {
             shortcut_map,
             group_mgr,
             group_prompt: None,
+            group_edit: None,
             acp_state: AcpState::Idle,
             acp_config,
             grouped_row_map: Vec::new(),
+            grouped_header_names: Vec::new(),
+            grouped_view_sort_order: None,
+            pending_restore_selection: None,
+            auto_suggestions: std::collections::HashMap::new(),
+            auto_suggest_kicked: false,
+            auto_suggest_asked: std::collections::HashSet::new(),
+            acp_run_is_auto: false,
         }
     }
 
@@ -343,6 +404,121 @@ impl App {
             self.filtered_indices
                 .get(self.selected_index)
                 .and_then(|&idx| self.current_view_sessions().get(idx))
+        }
+    }
+
+    /// Existing groups that match the current prompt input (case-insensitive
+    /// substring). Returns ALL matches sorted by descending member count
+    /// (stable: ties broken by name). The caller is responsible for
+    /// rendering only a window — cursor may point at any index.
+    fn filter_groups_for_prompt(&self, input: &str) -> Vec<(String, usize)> {
+        let all_groups = self.group_mgr.all_groups();
+        if input.trim().is_empty() {
+            all_groups
+        } else {
+            let q = input.to_lowercase();
+            all_groups
+                .into_iter()
+                .filter(|(name, _)| name.to_lowercase().contains(&q))
+                .collect()
+        }
+    }
+
+    /// Pending auto-suggestion for the currently selected session, if any.
+    /// Used to gate the `y`/`n`/`e` keys and to drive the dynamic title-bar hints.
+    fn pending_suggestion_for_selection(&self) -> Option<&AiSuggestion> {
+        let session = self.selected_session()?;
+        let key = format!("{}:{}", session.provider_name, session.provider_session_id);
+        self.auto_suggestions.get(&key)
+    }
+
+    /// Kick a background AI grouping run if eligible. Wraps the same path the
+    /// `s` key uses, but flagged as auto so a failure is logged silently
+    /// instead of opening a modal banner.
+    fn maybe_kick_auto_suggest(
+        &mut self,
+        cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>,
+    ) {
+        if self.auto_suggest_kicked {
+            return;
+        }
+        if !self.acp_config.auto_suggest {
+            return;
+        }
+        if !self.initial_load_complete {
+            return;
+        }
+        if matches!(self.acp_state, AcpState::Running { .. }) {
+            return;
+        }
+        // Snapshot once so we set the flag exactly when we attempt — even if
+        // prepare_prompt fails, we don't want to retry on every event tick.
+        self.auto_suggest_kicked = true;
+        let sem_ref = self.semantic.try_lock().ok();
+        let sem_plugin = sem_ref.as_deref();
+        match crate::acp::prepare_prompt(
+            &self.acp_config,
+            &self.sessions,
+            &self.group_mgr,
+            sem_plugin,
+            &self.auto_suggest_asked,
+        ) {
+            Ok((prompt, asked_keys)) => {
+                let count = asked_keys.len();
+                // Record what we just sent so the next chained batch picks
+                // up sessions that didn't fit in this one.
+                for k in &asked_keys {
+                    self.auto_suggest_asked.insert(k.clone());
+                }
+                self.acp_state = AcpState::Running {
+                    started: std::time::Instant::now(),
+                };
+                self.acp_run_is_auto = true;
+                self.status_message = format!("🤖 Auto-analyzing {} sessions in background...", count);
+                self.log_lines.push(format!(
+                    "AI auto-suggest: sending {} sessions to ACP agent (total asked so far: {})",
+                    count, self.auto_suggest_asked.len()
+                ));
+                crate::log::info(&format!(
+                    "AI auto-suggest KICKED: {} sessions (cumulative asked={})",
+                    count, self.auto_suggest_asked.len()
+                ));
+                let cfg = self.acp_config.clone();
+                let event_tx = cmd_tx.clone();
+                tokio::spawn(async move {
+                    let timeout_secs = cfg.timeout_secs;
+                    let timeout = tokio::time::Duration::from_secs(timeout_secs);
+                    let result = tokio::time::timeout(
+                        timeout,
+                        crate::acp::run_acp_suggest(cfg, prompt),
+                    )
+                    .await;
+                    let _ = match result {
+                        Ok(Ok(suggestions)) => {
+                            let json = serde_json::to_string(&suggestions).unwrap_or_default();
+                            event_tx.send(SupervisorCommand::AcpResult(json))
+                        }
+                        Ok(Err(e)) => event_tx.send(SupervisorCommand::AcpError(e)),
+                        Err(_) => {
+                            crate::log::warn(&format!(
+                                "AI auto-suggest TIMED OUT after {}s",
+                                timeout_secs
+                            ));
+                            event_tx.send(SupervisorCommand::AcpError(format!(
+                                "ACP agent timed out after {}s",
+                                timeout_secs
+                            )))
+                        }
+                    };
+                });
+            }
+            Err(e) => {
+                // Most common path: "No ungrouped sessions to analyze".
+                // Log silently — no banner.
+                self.log_lines
+                    .push(format!("AI auto-suggest skipped: {}", e));
+                crate::log::info(&format!("AI auto-suggest SKIPPED: {}", e));
+            }
         }
     }
 
@@ -563,6 +739,11 @@ impl App {
                             self.initial_load_complete = true;
                         }
 
+                        // Kick the auto AI grouping run once the first full
+                        // discovery is in. Idempotent — `maybe_kick_auto_suggest`
+                        // self-gates on `auto_suggest_kicked`.
+                        self.maybe_kick_auto_suggest(&cmd_tx);
+
                         // Always accumulate sessions so they're ready the moment
                         // initial load completes. But we gate *rendering* of the
                         // list/selection/detail on initial_load_complete to avoid
@@ -601,13 +782,18 @@ impl App {
                                 self.detail_scroll = 0;
                             } else if let Some((prev_provider, prev_id)) = &prev_selected_id {
                                 // User navigated → restore their position across refreshes.
-                                let view = self.current_view_sessions();
-                                if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
-                                    let s = &view[idx];
-                                    &s.provider_name == prev_provider && &s.provider_session_id == prev_id
-                                }) {
-                                    self.selected_index = pos;
-                                    self.list_state.select(Some(pos));
+                                if self.view_mode == ViewMode::Grouped {
+                                    // Defer to draw cycle when grouped_row_map is rebuilt
+                                    self.pending_restore_selection = Some((prev_provider.clone(), prev_id.clone()));
+                                } else {
+                                    let view = self.current_view_sessions();
+                                    if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
+                                        let s = &view[idx];
+                                        &s.provider_name == prev_provider && &s.provider_session_id == prev_id
+                                    }) {
+                                        self.selected_index = pos;
+                                        self.list_state.select(Some(pos));
+                                    }
                                 }
                             }
                         }
@@ -661,7 +847,10 @@ impl App {
                                             0
                                         } else {
                                             sem.count_needing_embedding(&all_sessions, |s| {
-                                                build_semantic_text(s, &registry)
+                                                build_semantic_chunks(s, &registry)
+                                                    .first()
+                                                    .map(|(t, _)| t.clone())
+                                                    .unwrap_or_default()
                                             })
                                         }
                                     }
@@ -707,8 +896,11 @@ impl App {
                                 let mut embedded_count = 0usize;
                                 let mut total_embed_ms: u128 = 0;
                                 for (i, session) in all_sessions.iter().enumerate() {
-                                    let text = build_semantic_text(session, &registry);
-                                    let text_hash = crate::search::hash_text(&text);
+                                    let chunks = build_semantic_chunks(session, &registry);
+                                    // Use first chunk's hash as identity
+                                    let identity_hash = chunks.first()
+                                        .map(|(t, _)| crate::search::hash_text(t))
+                                        .unwrap_or(0);
 
                                     // Short lock: skip-check.
                                     let needs = {
@@ -716,27 +908,24 @@ impl App {
                                             Ok(g) => g,
                                             Err(_) => return,
                                         };
-                                        sem.needs_embedding(&session.id, text_hash)
+                                        sem.needs_embedding(&session.id, identity_hash)
                                     };
 
                                     if needs {
-                                        // Longer lock: the actual embed + cache insert.
-                                        // Held for ~1-2s on CPU, then released so
-                                        // the UI's next draw tick + user searches
-                                        // get a turn before the next embed starts.
                                         let one_embed_start = std::time::Instant::now();
                                         let mut sem = match sem_clone.lock() {
                                             Ok(g) => g,
                                             Err(_) => return,
                                         };
-                                        if sem.embed_and_cache(&session.id, &text, text_hash) {
+                                        let chunk_pairs: Vec<(String, u64)> = chunks.iter()
+                                            .map(|(t, _)| (t.clone(), crate::search::hash_text(t)))
+                                            .collect();
+                                        let count = sem.embed_and_cache_multi(&session.id, &chunk_pairs);
+                                        if count > 0 {
                                             embedded_since_flush += 1;
                                             embedded_count += 1;
                                         }
                                         sem.update_progress(i + 1, total);
-                                        // Flush every 20 new embeddings so a
-                                        // mid-indexing process kill still leaves
-                                        // persisted progress.
                                         if embedded_since_flush >= 20 {
                                             sem.save_cache();
                                             embedded_since_flush = 0;
@@ -746,13 +935,12 @@ impl App {
                                             one_embed_start.elapsed().as_millis();
                                         total_embed_ms += one_embed_ms;
                                         crate::log::info(&format!(
-                                            "[idx] embed session={} text_len={} ({}ms)",
+                                            "[idx] embed session={} chunks={} ({}ms)",
                                             &session.id[..session.id.len().min(8)],
-                                            text.len(),
+                                            count,
                                             one_embed_ms
                                         ));
                                     } else {
-                                        // Still bump progress for skipped sessions.
                                         if let Ok(mut sem) = sem_clone.lock() {
                                             sem.update_progress(i + 1, total);
                                         }
@@ -865,26 +1053,157 @@ impl App {
                         self.log_lines.push(format!("ERROR: {}", e));
                     }
                     SupervisorEvent::AcpResult(json) => {
+                        let was_auto = self.acp_run_is_auto;
+                        self.acp_run_is_auto = false;
                         match serde_json::from_str::<Vec<AiSuggestion>>(&json) {
                             Ok(suggestions) if suggestions.is_empty() => {
                                 self.acp_state = AcpState::Idle;
-                                self.status_message = "AI: no strong grouping suggestions found".to_string();
+                                self.status_message =
+                                    "AI: no strong grouping suggestions found".to_string();
                             }
                             Ok(suggestions) => {
-                                let count = suggestions.len();
-                                self.acp_state = AcpState::Results { suggestions, cursor: 0 };
-                                self.status_message = format!("AI: {} suggestions ready — review with y/n/e", count);
+                                // Resolve AI session keys against the live
+                                // session list. Some agents echo a truncated
+                                // session id (e.g. `qwen:4b900c0e` instead of
+                                // `qwen:4b900c0e-...-full-uuid`) by mimicking
+                                // the example in the prompt template. We match
+                                // by exact-or-prefix and rewrite to the canonical
+                                // full key so build_session_item finds it.
+                                let live_keys: Vec<String> = self
+                                    .sessions
+                                    .iter()
+                                    .map(|s| {
+                                        format!("{}:{}", s.provider_name, s.provider_session_id)
+                                    })
+                                    .collect();
+                                let mut resolved: Vec<AiSuggestion> = Vec::new();
+                                let mut dropped = 0usize;
+                                for mut sg in suggestions {
+                                    let raw = sg.session.clone();
+                                    // Exact match wins; otherwise prefix match
+                                    // (handles truncated UUIDs).
+                                    let canonical = live_keys
+                                        .iter()
+                                        .find(|k| **k == raw)
+                                        .cloned()
+                                        .or_else(|| {
+                                            live_keys
+                                                .iter()
+                                                .find(|k| k.starts_with(&raw))
+                                                .cloned()
+                                        });
+                                    match canonical {
+                                        Some(full) => {
+                                            sg.session = full;
+                                            resolved.push(sg);
+                                        }
+                                        None => {
+                                            dropped += 1;
+                                            crate::log::info(&format!(
+                                                "AI suggestion dropped — no session matches '{}'",
+                                                raw
+                                            ));
+                                        }
+                                    }
+                                }
+                                let count = resolved.len();
+                                crate::log::info(&format!(
+                                    "AI auto-suggest RESOLVED: {} matched, {} dropped (auto={})",
+                                    count, dropped, was_auto
+                                ));
+                                if dropped > 0 {
+                                    self.log_lines.push(format!(
+                                        "AI: dropped {} suggestion(s) with unmatched session ids",
+                                        dropped
+                                    ));
+                                }
+                                for sg in &resolved {
+                                    self.auto_suggestions
+                                        .insert(sg.session.clone(), sg.clone());
+                                }
+                                if count == 0 {
+                                    self.acp_state = AcpState::Idle;
+                                    self.status_message =
+                                        "AI: no usable grouping suggestions returned".to_string();
+                                } else if was_auto {
+                                    // Background run: stay in normal view, no popup.
+                                    self.acp_state = AcpState::Idle;
+                                    self.status_message = format!(
+                                        "🤖 {} AI suggestions ready — y accept · n dismiss · e edit",
+                                        count
+                                    );
+                                } else {
+                                    // Manual `s`: legacy popup view, lets the
+                                    // user step through the whole batch.
+                                    self.acp_state = AcpState::Results {
+                                        suggestions: resolved,
+                                        cursor: 0,
+                                    };
+                                    self.status_message = format!(
+                                        "AI: {} suggestions ready — review with y/n/e",
+                                        count
+                                    );
+                                }
+
+                                // Auto-chain: if this was a background run AND
+                                // there are still ungrouped, undismissed,
+                                // un-asked sessions, kick another batch so we
+                                // gradually cover the entire ungrouped list.
+                                if was_auto {
+                                    let remaining = self.sessions.iter().filter(|s| {
+                                        let key = format!(
+                                            "{}:{}",
+                                            s.provider_name, s.provider_session_id
+                                        );
+                                        self.group_mgr.groups_for(&key).is_empty()
+                                            && !self.group_mgr.has_any_dismissal(&key)
+                                            && !self.auto_suggest_asked.contains(&key)
+                                    }).count();
+                                    crate::log::info(&format!(
+                                        "AI auto-suggest CHAIN-CHECK: {} ungrouped sessions remain un-asked",
+                                        remaining
+                                    ));
+                                    if remaining > 0 {
+                                        // Reset the once-flag so the next call
+                                        // can kick again. The skip set
+                                        // (auto_suggest_asked) ensures the
+                                        // next batch picks NEW sessions.
+                                        self.auto_suggest_kicked = false;
+                                        self.maybe_kick_auto_suggest(&cmd_tx);
+                                    }
+                                }
                             }
                             Err(e) => {
-                                self.acp_state = AcpState::Failed(format!("Parse error: {}", e));
-                                self.status_message = format!("⚠ AI response parse error: {}", e);
+                                if was_auto {
+                                    self.acp_state = AcpState::Idle;
+                                    self.log_lines.push(format!(
+                                        "AI auto-suggest parse error: {}",
+                                        e
+                                    ));
+                                } else {
+                                    self.acp_state =
+                                        AcpState::Failed(format!("Parse error: {}", e));
+                                    self.status_message =
+                                        format!("⚠ AI response parse error: {}", e);
+                                }
                             }
                         }
                     }
                     SupervisorEvent::AcpError(msg) => {
-                        self.acp_state = AcpState::Failed(msg.clone());
-                        self.status_message = format!("⚠ AI: {}", msg);
-                        self.log_lines.push(format!("ACP ERROR: {}", msg));
+                        let was_auto = self.acp_run_is_auto;
+                        self.acp_run_is_auto = false;
+                        if was_auto {
+                            // Background run: don't lock the screen behind a
+                            // modal — log + status line + return to idle.
+                            self.acp_state = AcpState::Idle;
+                            self.status_message = format!("⚠ AI auto-suggest: {}", msg);
+                            self.log_lines
+                                .push(format!("ACP auto-suggest error: {}", msg));
+                        } else {
+                            self.acp_state = AcpState::Failed(msg.clone());
+                            self.status_message = format!("⚠ AI: {}", msg);
+                            self.log_lines.push(format!("ACP ERROR: {}", msg));
+                        }
                     }
                 }
             }
@@ -968,32 +1287,128 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
         // ── Group assignment prompt intercepts all keys ──────────────
-        if let Some(ref mut prompt) = self.group_prompt {
+        if self.group_prompt.is_some() {
+            // Snapshot once — lets us call `self.filter_groups_for_prompt`
+            // without the borrow checker yelling about an outstanding mutable
+            // borrow into the prompt below.
+            let (input, cursor, session_key) = {
+                let p = self.group_prompt.as_ref().unwrap();
+                (p.input.clone(), p.cursor, p.session_key.clone())
+            };
             match key.code {
                 KeyCode::Esc => {
                     self.group_prompt = None;
                     return;
                 }
+                KeyCode::Backspace => {
+                    if let Some(p) = self.group_prompt.as_mut() {
+                        p.input.pop();
+                        p.cursor = 0;
+                    }
+                    return;
+                }
+                KeyCode::Char(c) => {
+                    if let Some(p) = self.group_prompt.as_mut() {
+                        p.input.push(c);
+                        p.cursor = 0;
+                    }
+                    return;
+                }
+                KeyCode::Up | KeyCode::Left => {
+                    if let Some(p) = self.group_prompt.as_mut() {
+                        if p.cursor > 0 {
+                            p.cursor -= 1;
+                        }
+                    }
+                    return;
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    let filtered_len = self.filter_groups_for_prompt(&input).len();
+                    if let Some(p) = self.group_prompt.as_mut() {
+                        if filtered_len > 0 && p.cursor + 1 < filtered_len {
+                            p.cursor += 1;
+                        }
+                    }
+                    return;
+                }
                 KeyCode::Enter => {
-                    let input = prompt.input.trim().to_string();
-                    if !input.is_empty() {
-                        let sk = prompt.session_key.clone();
-                        self.group_mgr.assign_human(&sk, &input);
+                    let filtered = self.filter_groups_for_prompt(&input);
+                    // Pick the highlighted suggestion when in range; otherwise
+                    // fall back to whatever the user typed (which may be a
+                    // brand-new group name).
+                    let chosen = if !filtered.is_empty() && cursor < filtered.len() {
+                        filtered[cursor].0.clone()
+                    } else {
+                        input.trim().to_string()
+                    };
+                    if !chosen.is_empty() {
+                        self.group_mgr.assign_human(&session_key, &chosen);
+                        self.auto_suggestions.remove(&session_key);
                         self.log_lines.push(format!(
                             "Assigned to group '{}': {}",
-                            input,
-                            crate::util::short_id(&sk, 16)
+                            chosen,
+                            crate::util::short_id(&session_key, 16)
                         ));
                     }
                     self.group_prompt = None;
                     return;
                 }
+                _ => return,
+            }
+        }
+
+        // ── Group edit intercepts all keys ───────────────────────────
+        if let Some(ref mut edit) = self.group_edit {
+            match key.code {
+                KeyCode::Esc => {
+                    // Discard and exit
+                    self.group_edit = None;
+                    return;
+                }
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                    // Switch between fields
+                    edit.field = match edit.field {
+                        GroupEditField::Name => GroupEditField::Description,
+                        GroupEditField::Description => GroupEditField::Name,
+                    };
+                    return;
+                }
+                KeyCode::Enter => {
+                    // Save all changes and exit
+                    let new_name = edit.name_input.trim().to_string();
+                    let old_name = edit.original_name.clone();
+                    let desc = edit.desc_input.trim().to_string();
+
+                    // Apply rename if changed
+                    let effective_name = if !new_name.is_empty() && new_name != old_name {
+                        self.group_mgr.rename_group(&old_name, &new_name);
+                        self.log_lines.push(format!("Renamed '{}' → '{}'", old_name, new_name));
+                        new_name
+                    } else {
+                        old_name
+                    };
+
+                    // Apply description if non-empty
+                    if !desc.is_empty() {
+                        self.group_mgr.set_group_description(&effective_name, &desc);
+                        self.log_lines.push(format!("Description for '{}': {}", effective_name, desc));
+                    }
+
+                    self.group_edit = None;
+                    return;
+                }
                 KeyCode::Backspace => {
-                    prompt.input.pop();
+                    match edit.field {
+                        GroupEditField::Name => { edit.name_input.pop(); }
+                        GroupEditField::Description => { edit.desc_input.pop(); }
+                    }
                     return;
                 }
                 KeyCode::Char(c) => {
-                    prompt.input.push(c);
+                    match edit.field {
+                        GroupEditField::Name => { edit.name_input.push(c); }
+                        GroupEditField::Description => { edit.desc_input.push(c); }
+                    }
                     return;
                 }
                 _ => return,
@@ -1063,6 +1478,7 @@ impl App {
                     self.group_prompt = Some(GroupPrompt {
                         session_key: sg.session.clone(),
                         input: sg.group.clone(),
+                        cursor: 0,
                     });
                     // Remove from suggestions list
                     let mut sgs = suggestions.clone();
@@ -1079,8 +1495,11 @@ impl App {
             }
         }
 
-        // ── ACP running: only Esc to cancel ──────────────────────────
-        if matches!(self.acp_state, AcpState::Running { .. }) {
+        // ── ACP running: input lock only applies to MANUAL runs ──────
+        // Manual `s` from Grouped view shows the popup and we want a clean
+        // wait-for-result UX. Auto-suggest, by contrast, must NOT lock the
+        // UI — the whole point is that it runs invisibly in the background.
+        if matches!(self.acp_state, AcpState::Running { .. }) && !self.acp_run_is_auto {
             if key.code == KeyCode::Esc {
                 self.acp_state = AcpState::Idle;
                 self.status_message = "AI suggestion cancelled".to_string();
@@ -1183,6 +1602,44 @@ impl App {
                     self.search_active = true;
                     self.search_query.clear();
                 }
+                KeyCode::Char('y') if self.pending_suggestion_for_selection().is_some() => {
+                    // Accept the inline AI suggestion for the selected session.
+                    if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                        self.group_mgr.assign_human(&sg.session, &sg.group);
+                        self.auto_suggestions.remove(&sg.session);
+                        self.log_lines.push(format!(
+                            "AI ✓ accepted {} → {} ({}%)",
+                            crate::util::short_id(&sg.session, 16),
+                            sg.group,
+                            (sg.score * 100.0) as u32
+                        ));
+                        self.status_message = format!("✓ Assigned to '{}'", sg.group);
+                    }
+                }
+                KeyCode::Char('n') if self.pending_suggestion_for_selection().is_some() => {
+                    // Dismiss the inline AI suggestion (won't re-suggest later).
+                    if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                        self.group_mgr.dismiss(&sg.session, &sg.group);
+                        self.auto_suggestions.remove(&sg.session);
+                        self.log_lines.push(format!(
+                            "AI ✗ dismissed '{}' for {}",
+                            sg.group,
+                            crate::util::short_id(&sg.session, 16)
+                        ));
+                        self.status_message = "✗ Dismissed suggestion".to_string();
+                    }
+                }
+                KeyCode::Char('e') if self.pending_suggestion_for_selection().is_some() => {
+                    // Edit: open the group prompt pre-filled with the suggestion.
+                    if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                        self.auto_suggestions.remove(&sg.session);
+                        self.group_prompt = Some(GroupPrompt {
+                            session_key: sg.session.clone(),
+                            input: sg.group.clone(),
+                            cursor: 0,
+                        });
+                    }
+                }
                 KeyCode::Char('n') => {
                     let key = self.default_provider.clone();
                     if self.provider_keys.contains(&key) {
@@ -1226,6 +1683,7 @@ impl App {
                         self.group_prompt = Some(GroupPrompt {
                             session_key,
                             input: String::new(),
+                            cursor: 0,
                         });
                     }
                 }
@@ -1248,16 +1706,44 @@ impl App {
                         }
                     }
                 }
+                KeyCode::Char('e') if matches!(self.view_mode, ViewMode::Grouped) => {
+                    // Edit group: immediately editable, no menu
+                    let sel = self.list_state.selected().unwrap_or(0);
+                    if let Some((_idx, group_name)) = self.grouped_header_names.iter().find(|(idx, _)| *idx == sel) {
+                        let desc = self.group_mgr.get_group_description(group_name)
+                            .unwrap_or_default();
+                        self.group_edit = Some(GroupEditPrompt {
+                            original_name: group_name.clone(),
+                            field: GroupEditField::Name,
+                            name_input: group_name.clone(),
+                            desc_input: desc,
+                        });
+                    }
+                }
                 KeyCode::Char('s') if matches!(self.view_mode, ViewMode::Grouped) => {
                     // AI suggest: prepare prompt and spawn ACP background task
                     // Try to get semantic similarities (non-blocking try_lock)
                     let sem_ref = self.semantic.try_lock().ok();
                     let sem_plugin = sem_ref.as_deref();
-                    match crate::acp::prepare_prompt(&self.acp_config, &self.sessions, &self.group_mgr, sem_plugin) {
-                        Ok((prompt, count)) => {
+                    // Manual `s` resets the ask-history so the user gets a
+                    // fresh batch starting from the top of the ungrouped list.
+                    self.auto_suggest_asked.clear();
+                    match crate::acp::prepare_prompt(
+                        &self.acp_config,
+                        &self.sessions,
+                        &self.group_mgr,
+                        sem_plugin,
+                        &self.auto_suggest_asked,
+                    ) {
+                        Ok((prompt, asked_keys)) => {
+                            let count = asked_keys.len();
+                            for k in &asked_keys {
+                                self.auto_suggest_asked.insert(k.clone());
+                            }
                             self.acp_state = AcpState::Running {
                                 started: std::time::Instant::now(),
                             };
+                            self.acp_run_is_auto = false;
                             self.status_message = format!("🤖 Analyzing {} sessions...", count);
                             self.log_lines.push(format!("AI: sending {} ungrouped sessions to ACP agent", count));
 
@@ -1265,7 +1751,8 @@ impl App {
                             let cfg = self.acp_config.clone();
                             let event_tx = cmd_tx.clone();
                             tokio::spawn(async move {
-                                let timeout = tokio::time::Duration::from_secs(60);
+                                let timeout_secs = cfg.timeout_secs;
+                                let timeout = tokio::time::Duration::from_secs(timeout_secs);
                                 let result = tokio::time::timeout(
                                     timeout,
                                     crate::acp::run_acp_suggest(cfg, prompt),
@@ -1279,9 +1766,14 @@ impl App {
                                         event_tx.send(SupervisorCommand::AcpError(e))
                                     }
                                     Err(_) => {
-                                        event_tx.send(SupervisorCommand::AcpError(
-                                            "ACP agent timed out after 60s".to_string()
-                                        ))
+                                        crate::log::warn(&format!(
+                                            "AI manual suggest TIMED OUT after {}s",
+                                            timeout_secs
+                                        ));
+                                        event_tx.send(SupervisorCommand::AcpError(format!(
+                                            "ACP agent timed out after {}s",
+                                            timeout_secs
+                                        )))
                                     }
                                 };
                             });
@@ -1384,6 +1876,13 @@ impl App {
                         ViewMode::Grouped => ViewMode::Hidden,
                         ViewMode::Hidden => ViewMode::Active,
                     };
+                    // Capture a stable group order on entering Grouped view;
+                    // clear it on leaving so the next entry recomputes fresh.
+                    if self.view_mode == ViewMode::Grouped {
+                        self.grouped_view_sort_order = Some(self.compute_group_sort_order());
+                    } else {
+                        self.grouped_view_sort_order = None;
+                    }
                     self.selected_index = 0;
                     self.list_state.select(Some(0));
                     self.search_query.clear();
@@ -1473,38 +1972,79 @@ impl App {
 
         // Group assignment prompt overlay (renders over status bar area)
         if let Some(ref prompt) = self.group_prompt {
-            let all_groups = self.group_mgr.all_groups();
-            let filtered: Vec<_> = if prompt.input.is_empty() {
-                all_groups.iter().take(5).collect()
-            } else {
-                let q = prompt.input.to_lowercase();
-                all_groups
-                    .iter()
-                    .filter(|(name, _)| name.to_lowercase().contains(&q))
-                    .take(5)
-                    .collect()
-            };
-            let hint = if filtered.is_empty() && !prompt.input.is_empty() {
-                format!(" (new group '{}' will be created)", prompt.input)
-            } else {
-                filtered
-                    .iter()
-                    .map(|(name, count)| format!(" {}({})", name, count))
-                    .collect::<Vec<_>>()
-                    .join(" │")
-            };
-            let prompt_text = Paragraph::new(Line::from(vec![
+            let filtered = self.filter_groups_for_prompt(&prompt.input);
+            let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(
                     " Group: ",
                     Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!("{}▏", prompt.input)),
-                Span::styled(hint, Style::default().fg(Color::DarkGray)),
-                Span::styled("  Esc: cancel", Style::default().fg(Color::DarkGray)),
-            ]))
-            .style(Style::default().bg(Color::Black).fg(Color::White));
+            ];
+            if filtered.is_empty() {
+                let new_hint = if prompt.input.trim().is_empty() {
+                    "  ←→ pick · ⏎ assign · Esc cancel".to_string()
+                } else {
+                    format!(
+                        "  (⏎ creates new group '{}') · Esc cancel",
+                        prompt.input
+                    )
+                };
+                spans.push(Span::styled(new_hint, Style::default().fg(Color::DarkGray)));
+            } else {
+                // Sliding window: show up to 5 pills centered around the cursor.
+                // Caller (filter_groups_for_prompt) returns the full filtered
+                // list now, so the cursor can navigate the entire group list,
+                // not just the first 5.
+                const WINDOW: usize = 5;
+                let total = filtered.len();
+                let cursor = prompt.cursor.min(total.saturating_sub(1));
+                // Center the window on the cursor when possible.
+                let half = WINDOW / 2;
+                let start = cursor.saturating_sub(half);
+                let end = (start + WINDOW).min(total);
+                // Re-anchor `start` so the window is full when at the right edge.
+                let start = end.saturating_sub(WINDOW);
+
+                if start > 0 {
+                    spans.push(Span::styled(
+                        format!("  «{} ", start),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                } else {
+                    spans.push(Span::raw("  "));
+                }
+                for (i, (name, count)) in filtered.iter().enumerate().take(end).skip(start) {
+                    if i > start {
+                        spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+                    }
+                    if i == cursor {
+                        spans.push(Span::styled(
+                            format!("▸ {} ({})", name, count),
+                            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            format!("{} ({})", name, count),
+                            Style::default().fg(Color::Gray),
+                        ));
+                    }
+                }
+                if end < total {
+                    spans.push(Span::styled(
+                        format!(" {}»", total - end),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!("   {}/{}  ←→ pick · ⏎ assign · Esc cancel", cursor + 1, total),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let prompt_text = Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(Color::Black).fg(Color::White));
             f.render_widget(prompt_text, chunks[3]);
         }
+
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
@@ -1523,17 +2063,41 @@ impl App {
                 Span::raw(" cancel"),
             ]));
             f.render_widget(title, area);
-        } else if let AcpState::Running { started } = &self.acp_state {
-            let elapsed = started.elapsed().as_secs();
-            let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let frame = spinner[(elapsed as usize) % spinner.len()];
+        } else if let Some(ref ge) = self.group_edit {
+            let field_label = match ge.field {
+                GroupEditField::Name => "Name",
+                GroupEditField::Description => "Description",
+            };
             let title = Paragraph::new(Line::from(vec![
-                Span::styled(" 🤖 AI Analyzing ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(format!("  {} {}s  ", frame, elapsed)),
-                Span::styled("Esc", hl),
+                Span::styled(" ✏ Edit Group ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("  [{}]  editing: {}  ", ge.original_name, field_label)),
+                Span::styled("↑↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" switch  "),
+                Span::styled("⏎", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" save  "),
+                Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::raw(" cancel"),
             ]));
             f.render_widget(title, area);
+        } else if let AcpState::Running { started } = &self.acp_state {
+            if !self.acp_run_is_auto {
+                // Manual `s` run — full takeover with cancel hint.
+                let elapsed = started.elapsed().as_secs();
+                let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let frame = spinner[(elapsed as usize) % spinner.len()];
+                let title = Paragraph::new(Line::from(vec![
+                    Span::styled(" 🤖 AI Analyzing ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(format!("  {} {}s  ", frame, elapsed)),
+                    Span::styled("Esc", hl),
+                    Span::raw(" cancel"),
+                ]));
+                f.render_widget(title, area);
+            } else {
+                // Auto-suggest run — DO NOT take over the title bar. Drop
+                // through to the normal per-view title so the user keeps
+                // navigating; the spinner shows in the status bar instead.
+                self.draw_normal_title_bar(f, area);
+            }
         } else if let AcpState::Results { suggestions, cursor } = &self.acp_state {
             let title = Paragraph::new(Line::from(vec![
                 Span::styled(" 🤖 AI Suggestions ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
@@ -1573,10 +2137,64 @@ impl App {
             ]));
             f.render_widget(title, area);
         } else {
-            match self.view_mode {
-                ViewMode::Active => {
+            self.draw_normal_title_bar(f, area);
+        }
+    }
+
+    /// Per-view title bar (Active / Grouped / Hidden) — also used as the
+    /// fall-through when an auto AI run is in flight, so the user keeps
+    /// their normal navigation hints instead of an opaque "AI Analyzing"
+    /// banner.
+    fn draw_normal_title_bar(&self, f: &mut Frame, area: Rect) {
+        let hl = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        match self.view_mode {
+            ViewMode::Active => {
+                let has_suggestion = self.pending_suggestion_for_selection().is_some();
+                if has_suggestion {
+                    // Cursor is on a session with a pending AI suggestion —
+                    // surface the y/n/e actions front-and-centre.
+                    let sg = self.pending_suggestion_for_selection().unwrap().clone();
+                    let pct = (sg.score * 100.0) as u32;
+                    let title = Paragraph::new(Line::from(vec![
+                        Span::styled(
+                            " 🤖 Suggestion ",
+                            Style::default().fg(Color::Black).bg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("  → {} ({}%)  ", sg.group, pct)),
+                        Span::styled("y", hl),
+                        Span::raw(" accept  "),
+                        Span::styled("n", hl),
+                        Span::raw(" dismiss  "),
+                        Span::styled("e", hl),
+                        Span::raw(" edit  "),
+                        Span::styled("⏎", hl),
+                        Span::raw(" open  "),
+                        Span::styled("/", hl),
+                        Span::raw("search  "),
+                        Span::styled("q", hl),
+                        Span::raw("uit"),
+                    ]));
+                    f.render_widget(title, area);
+                } else {
+                    let suggestion_count = self.auto_suggestions.len();
+                    let auto_running = matches!(self.acp_state, AcpState::Running { .. })
+                        && self.acp_run_is_auto;
+                    let header_label = if auto_running {
+                        let elapsed = if let AcpState::Running { started } = &self.acp_state {
+                            started.elapsed().as_secs()
+                        } else {
+                            0
+                        };
+                        let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                        let frame = spinner[(elapsed as usize) % spinner.len()];
+                        format!(" Agent Session Manager · 🤖 analyzing {} {}s ", frame, elapsed)
+                    } else if suggestion_count > 0 {
+                        format!(" Agent Session Manager · 🤖 {} ", suggestion_count)
+                    } else {
+                        " Agent Session Manager ".to_string()
+                    };
                     let mut spans = vec![
-                        Span::styled(" Agent Session Manager ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(header_label, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
                         Span::raw("  "),
                         Span::styled("⏎", hl),
                         Span::raw(" open  "),
@@ -1602,42 +2220,44 @@ impl App {
                     let title = Paragraph::new(Line::from(spans));
                     f.render_widget(title, area);
                 }
-                ViewMode::Grouped => {
-                    let title = Paragraph::new(Line::from(vec![
-                        Span::styled(" 📂 Grouped ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
-                        Span::raw("  "),
-                        Span::styled("⏎", hl),
-                        Span::raw(" open  "),
-                        Span::styled("g", hl),
-                        Span::raw("roup  "),
-                        Span::styled("u", hl),
-                        Span::raw("nassign  "),
-                        Span::styled("s", hl),
-                        Span::raw(" AI suggest  "),
-                        Span::styled("a", hl),
-                        Span::raw("rchive  "),
-                        Span::styled("/", hl),
-                        Span::raw("search  "),
-                        Span::styled("q", hl),
-                        Span::raw("uit"),
-                    ]));
-                    f.render_widget(title, area);
-                }
-                ViewMode::Hidden => {
-                    let title = Paragraph::new(Line::from(vec![
-                        Span::styled(" 📦 Archived ", Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                        Span::raw("  "),
-                        Span::styled("⏎", hl),
-                        Span::raw(" open  "),
-                        Span::styled("a", hl),
-                        Span::raw(" unarchive  "),
-                        Span::styled("/", hl),
-                        Span::raw("search  "),
-                        Span::styled("q", hl),
-                        Span::raw("uit"),
-                    ]));
-                    f.render_widget(title, area);
-                }
+            }
+            ViewMode::Grouped => {
+                let title = Paragraph::new(Line::from(vec![
+                    Span::styled(" 📂 Grouped ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("  "),
+                    Span::styled("⏎", hl),
+                    Span::raw(" open  "),
+                    Span::styled("g", hl),
+                    Span::raw("roup  "),
+                    Span::styled("u", hl),
+                    Span::raw("nassign  "),
+                    Span::styled("s", hl),
+                    Span::raw(" AI suggest  "),
+                    Span::styled("e", hl),
+                    Span::raw("dit group  "),
+                    Span::styled("a", hl),
+                    Span::raw("rchive  "),
+                    Span::styled("/", hl),
+                    Span::raw("search  "),
+                    Span::styled("q", hl),
+                    Span::raw("uit"),
+                ]));
+                f.render_widget(title, area);
+            }
+            ViewMode::Hidden => {
+                let title = Paragraph::new(Line::from(vec![
+                    Span::styled(" 📦 Archived ", Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::raw("  "),
+                    Span::styled("⏎", hl),
+                    Span::raw(" open  "),
+                    Span::styled("a", hl),
+                    Span::raw(" unarchive  "),
+                    Span::styled("/", hl),
+                    Span::raw("search  "),
+                    Span::styled("q", hl),
+                    Span::raw("uit"),
+                ]));
+                f.render_widget(title, area);
             }
         }
     }
@@ -1691,7 +2311,17 @@ impl App {
             format!("  {}", group_names.iter().map(|g| format!("[{}]", g)).collect::<Vec<_>>().join(" "))
         };
 
-        let age_line = Line::from(vec![
+        // Inline AI suggestion — shown whenever a pending auto-suggestion
+        // exists for this session, regardless of current group membership.
+        // This makes the "🤖 N" badge findable: the user can spot the blue
+        // arrow line directly in the list.
+        let suggestion = if show_badges {
+            self.auto_suggestions.get(&session_key)
+        } else {
+            None
+        };
+
+        let mut age_spans: Vec<Span<'static>> = vec![
             Span::raw("   "),
             Span::styled(
                 format!("{} · {}", s.state.label(), age),
@@ -1701,9 +2331,55 @@ impl App {
                 group_badge_str,
                 Style::default().fg(Color::Blue),
             ),
-        ]);
+        ];
+        if let Some(sg) = suggestion {
+            // "Shadow" rendering — visibly dimmer than the title but bright
+            // enough to read on dark terminals without italic (which not
+            // every terminal renders). Communicates "this group is tentative,
+            // not yet committed".
+            let new_marker = if sg.is_new { "✨ " } else { "" };
+            age_spans.push(Span::styled(
+                format!("  · ⟨{}{}⟩", new_marker, sg.group),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+        let age_line = Line::from(age_spans);
 
         ListItem::new(vec![line, age_line])
+    }
+
+    /// Compute the freeze-sort order for groups: sort by maximum member
+    /// activity (most recently touched group first), name ascending as a
+    /// stable tiebreak. Snapshotted on entry to grouped view; refreshed
+    /// implicitly when the user leaves and re-enters the view.
+    ///
+    /// updated_at is an ISO-8601 string; lexical comparison is chronological
+    /// for that format, so we compare as strings to avoid a parse step.
+    fn compute_group_sort_order(&self) -> Vec<String> {
+        use std::collections::HashMap;
+
+        let mut group_latest: HashMap<String, String> = HashMap::new();
+        for s in &self.sessions {
+            let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+            for g in self.group_mgr.groups_for(&key) {
+                let entry = group_latest.entry(g).or_default();
+                if s.updated_at > *entry {
+                    *entry = s.updated_at.clone();
+                }
+            }
+        }
+
+        // Include any group that exists in the manager but has no members yet,
+        // so newly-created empty groups still appear (sorted last by activity).
+        for g in self.group_mgr.all_groups().into_iter().map(|(n, _)| n) {
+            group_latest.entry(g).or_default();
+        }
+
+        let mut pairs: Vec<(String, String)> = group_latest.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        pairs.into_iter().map(|(n, _)| n).collect()
     }
 
     fn build_flat_list_items(&self) -> Vec<ListItem<'static>> {
@@ -1717,7 +2393,7 @@ impl App {
     fn build_grouped_list_items(&mut self) -> Vec<ListItem<'static>> {
         // Collect sessions by group. A session can appear under multiple groups.
         let sessions = self.current_view_sessions();
-        let mut grouped: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut grouped: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
         let mut ungrouped_indices: Vec<usize> = Vec::new();
 
         for &session_idx in &self.filtered_indices {
@@ -1733,12 +2409,40 @@ impl App {
             }
         }
 
+        // Determine iteration order. Prefer the frozen snapshot captured on
+        // entering the grouped view (most-recently-active group first); fall
+        // back to a fresh compute if the snapshot is missing.
+        let snapshot: Vec<String> = match &self.grouped_view_sort_order {
+            Some(order) => order.clone(),
+            None => self.compute_group_sort_order(),
+        };
+        // Build ordered list of (group_name, members), keeping only groups
+        // that have visible members AND respecting the snapshot order. Any
+        // groups in `grouped` but not in the snapshot (e.g. brand-new) are
+        // appended at the end, alphabetically.
+        let mut ordered: Vec<(String, Vec<usize>)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for name in &snapshot {
+            if let Some(members) = grouped.remove(name) {
+                ordered.push((name.clone(), members));
+                seen.insert(name.clone());
+            }
+        }
+        let mut leftover: Vec<(String, Vec<usize>)> = grouped.into_iter().collect();
+        leftover.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, members) in leftover {
+            if !seen.contains(&name) {
+                ordered.push((name, members));
+            }
+        }
+
         let mut items: Vec<ListItem<'static>> = Vec::new();
         let mut row_map: Vec<Option<usize>> = Vec::new();
+        let mut header_names: Vec<(usize, String)> = Vec::new();
         let mut visual_idx = 0usize;
 
         // Render each group with a header
-        for (group_name, session_indices) in &grouped {
+        for (group_name, session_indices) in &ordered {
             // Group header
             let header = Line::from(vec![
                 Span::styled(
@@ -1748,6 +2452,7 @@ impl App {
             ]);
             items.push(ListItem::new(vec![header]));
             row_map.push(None);
+            header_names.push((visual_idx, group_name.clone()));
             visual_idx += 1;
 
             // Sessions under this group (indented)
@@ -1844,6 +2549,23 @@ impl App {
         }
 
         self.grouped_row_map = row_map;
+        self.grouped_header_names = header_names;
+
+        // Resolve deferred selection restore after row_map is rebuilt
+        if let Some((ref prov, ref sid)) = self.pending_restore_selection.take() {
+            let sessions = self.current_view_sessions();
+            for (visual_idx, entry) in self.grouped_row_map.iter().enumerate() {
+                if let Some(session_idx) = entry {
+                    let s = &sessions[*session_idx];
+                    if s.provider_name == *prov && s.provider_session_id == *sid {
+                        self.selected_index = visual_idx;
+                        self.list_state.select(Some(visual_idx));
+                        break;
+                    }
+                }
+            }
+        }
+
         items
     }
 
@@ -1873,6 +2595,17 @@ impl App {
         };
         let view_count = self.current_view_sessions().len();
 
+        // In Grouped view, show grouped/total counts
+        let grouped_count = if self.view_mode == ViewMode::Grouped {
+            let sessions = self.current_view_sessions();
+            sessions.iter().filter(|s| {
+                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                !self.group_mgr.groups_for(&key).is_empty()
+            }).count()
+        } else {
+            0
+        };
+
         let title = if self.search_active {
             format!(" Search: {}▌ ", self.search_query)
         } else if !self.search_query.is_empty() {
@@ -1883,6 +2616,8 @@ impl App {
                 view_count,
                 self.search_query
             )
+        } else if self.view_mode == ViewMode::Grouped {
+            format!(" {} ({} grouped / {} total) ", view_label, grouped_count, view_count)
         } else {
             format!(" {} ({}) ", view_label, self.filtered_indices.len())
         };
@@ -1912,7 +2647,7 @@ impl App {
         cursor: usize,
     ) {
         // Compact: one line per suggestion — title → group (score%)
-        let items: Vec<ListItem> = suggestions
+        let mut items: Vec<ListItem> = suggestions
             .iter()
             .enumerate()
             .map(|(i, sg)| {
@@ -1957,6 +2692,12 @@ impl App {
             })
             .collect();
 
+        // Pad items to fill the entire visible area (prevents ghost artifacts from prior frames)
+        let inner_height = area.height.saturating_sub(2) as usize; // subtract border top+bottom
+        while items.len() < inner_height {
+            items.push(ListItem::new(Line::from("")));
+        }
+
         let mut list_state = ListState::default();
         list_state.select(Some(cursor));
 
@@ -1983,6 +2724,119 @@ impl App {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+
+        // When group edit is active, render the edit form in the detail pane
+        if let Some(ref ge) = self.group_edit {
+            let mut lines = vec![];
+            let name_focused = ge.field == GroupEditField::Name;
+            let desc_focused = ge.field == GroupEditField::Description;
+
+            lines.push(Line::from(""));
+
+            // Name field — always shows input, cursor on focused field
+            let name_label_style = if name_focused {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if name_focused { " ✎ " } else { "   " },
+                    name_label_style,
+                ),
+                Span::styled("Name: ", name_label_style),
+                Span::styled(
+                    if name_focused {
+                        format!("{}▏", ge.name_input)
+                    } else {
+                        ge.name_input.clone()
+                    },
+                    if name_focused {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ]));
+
+            lines.push(Line::from(""));
+
+            // Description field
+            let desc_label_style = if desc_focused {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let desc_display = if ge.desc_input.is_empty() && !desc_focused {
+                "(none)".to_string()
+            } else if desc_focused {
+                format!("{}▏", ge.desc_input)
+            } else {
+                ge.desc_input.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if desc_focused { " ✎ " } else { "   " },
+                    desc_label_style,
+                ),
+                Span::styled("Description: ", desc_label_style),
+                Span::styled(
+                    desc_display,
+                    if desc_focused {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ]));
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " ─────────────────────────────",
+                Style::default().fg(Color::DarkGray),
+            )));
+
+            // Show member sessions
+            let sessions = self.current_view_sessions();
+            let group_name = &ge.original_name;
+            let member_count = sessions.iter().filter(|s| {
+                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                self.group_mgr.groups_for(&key).contains(group_name)
+            }).count();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" Members: {} sessions", member_count),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            for s in sessions.iter() {
+                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                if self.group_mgr.groups_for(&key).contains(group_name) {
+                    let title_display = if s.title.is_empty() {
+                        crate::util::short_id(&s.provider_session_id, 8).to_string()
+                    } else {
+                        truncate_str_safe(&s.title, 40)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(format!("{} ", s.state.badge()), Style::default()),
+                        Span::styled(format!("{:<6} ", s.provider_name), Style::default().fg(Color::DarkGray)),
+                        Span::styled(title_display, Style::default().fg(Color::Gray)),
+                    ]));
+                }
+            }
+
+            let detail = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .title(" ✏ Edit Group "),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(detail, area);
+            return;
+        }
 
         // When AI suggestions are showing, render suggestion detail + session info
         if let AcpState::Results { ref suggestions, ref cursor } = self.acp_state {
@@ -2365,24 +3219,126 @@ impl App {
 /// surfaces the initial ask/setup; TAIL surfaces the most recent work. If the
 /// provider has no activity sources or they can't be read, the text degrades
 /// gracefully to title+summary+cwd+provider.
-fn build_semantic_text(session: &Session, _registry: &ProviderRegistry) -> String {
-    // IMPORTANT: this text drives the embedding cache hash. If it changes,
-    // the session gets re-embedded (load model → embed → unload, ~550MB churn).
-    // So we deliberately use ONLY stable per-session-identity signals here.
-    // Log head/tail used to be appended for richer semantics, but that made
-    // active sessions re-index every supervisor poll as their logs grew.
-    // Title+summary+cwd is enough for "find session by topic" search, and
-    // changes only when the provider re-summarizes (rare, not per log byte).
+/// Build multiple embedding chunks for a session. Each chunk is independently
+/// embedded so semantic search can match against any aspect (title, compaction
+/// summaries, task completions, early user messages).
+fn build_semantic_chunks(session: &Session, _registry: &ProviderRegistry) -> Vec<(String, String)> {
     let cwd_name = session
         .cwd
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    format!(
-        "search_document: {} | {} | cwd={} | provider={}",
-        session.title, session.summary, cwd_name, session.provider_name
-    )
+    let mut chunks = Vec::new();
+
+    // Chunk 1: base identity (always present)
+    chunks.push((
+        format!(
+            "search_document: {} | {} | cwd={} | provider={}",
+            session.title, session.summary, cwd_name, session.provider_name
+        ),
+        "base".to_string(),
+    ));
+
+    // Extract structured signals from events.jsonl
+    if let Some(ref dir) = session.state_dir {
+        let events_path = dir.join("events.jsonl");
+        if events_path.exists() {
+            let signals = extract_semantic_signals(&events_path);
+            for (label, text) in signals {
+                if !text.is_empty() {
+                    chunks.push((
+                        format!("search_document: {}", text),
+                        label,
+                    ));
+                }
+            }
+        }
+    }
+
+    chunks
+}
+
+/// Extract stable semantic signals from events.jsonl as separate chunks:
+/// - Last compaction summary (most recent context overview, ~500 chars)
+/// - Task_complete summaries (concatenated, last 5)
+/// - First 3 user messages (session's initial topic)
+fn extract_semantic_signals(path: &std::path::Path) -> Vec<(String, String)> {
+    use std::io::BufRead;
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let reader = std::io::BufReader::new(file);
+
+    let mut last_compaction = String::new();
+    let mut task_summaries = Vec::new();
+    let mut user_msgs = Vec::new();
+    const MAX_USER_MSGS: usize = 3;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if line.contains("session.compaction_complete") {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("session.compaction_complete") {
+                    if let Some(s) = obj.get("data").and_then(|d| d.get("summaryContent")).and_then(|v| v.as_str()) {
+                        if !s.is_empty() {
+                            // Keep only the last compaction (most recent overview)
+                            last_compaction = s.chars().take(800).collect();
+                        }
+                    }
+                }
+            }
+        } else if line.contains("session.task_complete") {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("session.task_complete") {
+                    if let Some(s) = obj.get("data").and_then(|d| d.get("summary")).and_then(|v| v.as_str()) {
+                        if !s.is_empty() {
+                            task_summaries.push(s.chars().take(200).collect::<String>());
+                        }
+                    }
+                }
+            }
+        } else if user_msgs.len() < MAX_USER_MSGS && line.contains("\"user.message\"") {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("user.message") {
+                    if let Some(c) = obj.get("data").and_then(|d| d.get("content")).and_then(|v| v.as_str()) {
+                        let trimmed = c.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with('<') {
+                            user_msgs.push(trimmed.chars().take(150).collect::<String>());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+
+    // Last compaction as its own chunk
+    if !last_compaction.is_empty() {
+        results.push(("compaction".to_string(), last_compaction));
+    }
+
+    // Task summaries combined as one chunk (last 5)
+    if !task_summaries.is_empty() {
+        let combined: String = task_summaries.iter().rev().take(5)
+            .cloned().collect::<Vec<_>>().join(" | ");
+        results.push(("tasks".to_string(), combined));
+    }
+
+    // User messages combined as one chunk
+    if !user_msgs.is_empty() {
+        let combined = user_msgs.join(" | ");
+        results.push(("user_msgs".to_string(), combined));
+    }
+
+    results
 }
 
 fn state_color(state: &crate::models::SessionState) -> Style {

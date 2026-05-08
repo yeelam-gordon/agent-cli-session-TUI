@@ -71,13 +71,20 @@ fn render_prompt(
     ungrouped: &[(&Session, String)],
     group_mgr: &GroupManager,
 ) -> String {
-    let all_groups = group_mgr.all_groups();
+    let all_groups = group_mgr.all_groups_with_descriptions();
     let groups_json = if all_groups.is_empty() {
         "[]".to_string()
     } else {
         let items: Vec<String> = all_groups
             .iter()
-            .map(|(name, count)| format!(r#"{{"name":"{}","count":{}}}"#, name, count))
+            .map(|(name, count, desc)| {
+                if let Some(d) = desc {
+                    let d_escaped = d.replace('"', r#"\""#);
+                    format!(r#"{{"name":"{}","count":{},"description":"{}"}}"#, name, count, d_escaped)
+                } else {
+                    format!(r#"{{"name":"{}","count":{}}}"#, name, count)
+                }
+            })
             .collect();
         format!("[{}]", items.join(","))
     };
@@ -115,24 +122,48 @@ fn render_prompt(
 /// Collect ungrouped sessions and build the prompt string.
 /// Includes semantic similarity hints if embeddings are available.
 /// Returns (prompt_text, session_count) or an error.
+/// Collect ungrouped sessions and build the prompt string.
+/// Includes semantic similarity hints if embeddings are available.
+/// Returns `(prompt_text, asked_keys)` on success.
+///
+/// `skip_keys` is a set of session keys (`provider:session_id`) that have
+/// already been asked in a previous batch — they are excluded so successive
+/// auto-suggest runs cover different sessions instead of re-asking the same
+/// top 30 every time.
 pub fn prepare_prompt(
     cfg: &AcpConfig,
     sessions: &[Session],
     group_mgr: &GroupManager,
     semantic: Option<&crate::search::SemanticPlugin>,
-) -> Result<(String, usize), String> {
+    skip_keys: &std::collections::HashSet<String>,
+) -> Result<(String, Vec<String>), String> {
     let template_path = resolve_template(cfg)
         .ok_or_else(|| "Prompt template not found (prompts/group-suggest.md)".to_string())?;
     let template = std::fs::read_to_string(&template_path)
         .map_err(|e| format!("Failed to read template: {}", e))?;
 
+    const BATCH_SIZE: usize = 30;
+
     let ungrouped: Vec<(&Session, String)> = sessions
         .iter()
         .filter(|s| {
             let key = format!("{}:{}", s.provider_name, s.provider_session_id);
-            group_mgr.groups_for(&key).is_empty()
+            // Skip already grouped sessions
+            if !group_mgr.groups_for(&key).is_empty() {
+                return false;
+            }
+            // Skip sessions the user previously dismissed from ALL groups
+            // (dismissed means "don't suggest for now")
+            if group_mgr.has_any_dismissal(&key) {
+                return false;
+            }
+            // Skip sessions already asked in a previous batch this run.
+            if skip_keys.contains(&key) {
+                return false;
+            }
+            true
         })
-        .take(30)
+        .take(BATCH_SIZE)
         .map(|s| {
             let key = format!("{}:{}", s.provider_name, s.provider_session_id);
             (s, key)
@@ -143,13 +174,12 @@ pub fn prepare_prompt(
         return Err("No ungrouped sessions to analyze".to_string());
     }
 
-    let count = ungrouped.len();
+    let asked_keys: Vec<String> = ungrouped.iter().map(|(_, k)| k.clone()).collect();
     let mut prompt = render_prompt(&template, &ungrouped, group_mgr);
 
     // Add semantic similarity hints if available
     if let Some(sem) = semantic {
-        let keys: Vec<String> = ungrouped.iter().map(|(_, k)| k.clone()).collect();
-        let pairs = sem.pairwise_similarities(&keys, 0.5);
+        let pairs = sem.pairwise_similarities(&asked_keys, 0.5);
         if !pairs.is_empty() {
             let sim_items: Vec<String> = pairs
                 .iter()
@@ -162,7 +192,7 @@ pub fn prepare_prompt(
         }
     }
 
-    Ok((prompt, count))
+    Ok((prompt, asked_keys))
 }
 
 /// Run the ACP agent subprocess: initialize → session/new → session/prompt.
@@ -225,25 +255,59 @@ fn run_acp_sync(
 
     crate::log::info(&format!("ACP: running {} -p ... -s --allow-all-tools --config-dir {:?}", cfg.command, tmp_cfg));
 
+    let start = std::time::Instant::now();
     let output = Command::new(&cfg.command)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .env_clear()
         .envs(clean_env)
         .output()
         .map_err(|e| format!("Failed to run '{}': {}", cfg.command, e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Command failed ({}): {}", output.status, &stderr.chars().take(200).collect::<String>()));
-    }
+    let elapsed = start.elapsed();
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    crate::log::info(&format!("ACP: response ({} chars): {}", stdout.len(), &stdout.chars().take(500).collect::<String>()));
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    crate::log::info(&format!(
+        "ACP: copilot exited (status={}, elapsed={:.1}s, stdout={}b, stderr={}b)",
+        output.status,
+        elapsed.as_secs_f64(),
+        stdout.len(),
+        stderr.len()
+    ));
 
-    parse_suggestions(&stdout)
+    if !stderr.is_empty() {
+        let stderr_preview: String = stderr.chars().take(800).collect();
+        crate::log::info(&format!("ACP: stderr preview: {}", stderr_preview));
+    }
+
+    if !output.status.success() {
+        return Err(format!(
+            "Command failed ({}, {:.1}s): stderr={}",
+            output.status,
+            elapsed.as_secs_f64(),
+            stderr.chars().take(400).collect::<String>()
+        ));
+    }
+
+    let stdout_preview: String = stdout.chars().take(800).collect();
+    crate::log::info(&format!("ACP: stdout preview ({} chars total): {}", stdout.len(), stdout_preview));
+
+    match parse_suggestions(&stdout) {
+        Ok(s) => {
+            crate::log::info(&format!("ACP: parsed {} suggestions", s.len()));
+            Ok(s)
+        }
+        Err(e) => {
+            crate::log::warn(&format!(
+                "ACP: parse FAILED — full stdout follows ({} chars): {}",
+                stdout.len(),
+                stdout
+            ));
+            Err(e)
+        }
+    }
 }
 
 /// Extract suggestions from ACP response text. Tolerant of markdown wrapping.

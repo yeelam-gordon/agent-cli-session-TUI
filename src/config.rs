@@ -82,23 +82,60 @@ pub struct AcpConfig {
     #[serde(default = "default_acp_command")]
     pub command: String,
     /// Extra args appended to the command (e.g., ["--model", "gpt-4o-mini"] for cost control).
-    #[serde(default)]
+    #[serde(default = "default_acp_extra_args")]
     pub extra_args: Vec<String>,
     /// Path to the prompt template file. Defaults to `<exe-dir>/prompts/group-suggest.md`.
     #[serde(default)]
     pub prompt_template: Option<PathBuf>,
+    /// If true, automatically run AI grouping for the top 30 ungrouped sessions
+    /// once initial discovery completes. Suggestions render inline in the
+    /// Active view and can be accepted with `y`, dismissed with `n`, or edited
+    /// with `e` while the cursor is on the session.
+    #[serde(default = "default_acp_auto_suggest")]
+    pub auto_suggest: bool,
+    /// Maximum seconds to wait for an ACP run to complete. If exceeded, the
+    /// run is cancelled and an error is logged. Default 180s — enough for a
+    /// 30-session prompt against a slow model. Bump higher if your model is
+    /// consistently slow; drop lower to detect hangs faster.
+    #[serde(default = "default_acp_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 fn default_acp_command() -> String {
     "copilot".into()
 }
 
+/// Default extra args for the ACP run.
+///
+/// `--effort low` is the right level for our task: structured JSON pattern-
+/// matching (assigning sessions to thematic groups). Empirically saves ~30%
+/// off run time vs default effort, with no observable quality drop. Users
+/// who want more reasoning can override `extra_args` in config.toml.
+fn default_acp_extra_args() -> Vec<String> {
+    vec!["--effort".into(), "low".into()]
+}
+
+/// Default for `auto_suggest`. Off by default so:
+/// (1) the TUI never spawns a `copilot` CLI without the user's awareness;
+/// (2) no API/quota cost is incurred for users who don't want AI grouping;
+/// (3) the feature requires `copilot` CLI auth, which not every user has set up.
+/// Users who want it opt in via `[acp] auto_suggest = true` in config.toml.
+fn default_acp_auto_suggest() -> bool {
+    false
+}
+
+fn default_acp_timeout_secs() -> u64 {
+    180
+}
+
 impl Default for AcpConfig {
     fn default() -> Self {
         Self {
             command: default_acp_command(),
-            extra_args: Vec::new(),
+            extra_args: default_acp_extra_args(),
             prompt_template: None,
+            auto_suggest: default_acp_auto_suggest(),
+            timeout_secs: default_acp_timeout_secs(),
         }
     }
 }

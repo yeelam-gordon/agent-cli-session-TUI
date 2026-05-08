@@ -1,10 +1,15 @@
 [package]
 name = "agent-session-tui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "TUI for managing agent CLI sessions (Copilot CLI, Claude Code, Codex, Qwen, Gemini)"
+description = "Terminal UI for managing AI agent CLI sessions — GitHub Copilot, Claude Code, OpenAI Codex, Qwen, Google Gemini"
 license = "MIT"
 repository = "https://github.com/yeelam-gordon/agent-cli-session-TUI"
+homepage = "https://github.com/yeelam-gordon/agent-cli-session-TUI"
+documentation = "https://github.com/yeelam-gordon/agent-cli-session-TUI#readme"
+readme = "README.md"
+keywords = ["tui", "agent", "cli", "copilot", "session-manager"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # TUI — crossterm backend only, no extras

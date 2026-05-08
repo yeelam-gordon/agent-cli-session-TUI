@@ -38,6 +38,9 @@ pub struct GroupStore {
     /// session_key → list of dismissed group suggestions.
     #[serde(default)]
     pub dismissed: HashMap<String, Vec<String>>,
+    /// group_name → human-readable description (what this group is about).
+    #[serde(default)]
+    pub descriptions: HashMap<String, String>,
 }
 
 fn default_version() -> u32 {
@@ -50,6 +53,7 @@ impl Default for GroupStore {
             version: 1,
             sessions: HashMap::new(),
             dismissed: HashMap::new(),
+            descriptions: HashMap::new(),
         }
     }
 }
@@ -127,9 +131,22 @@ impl GroupManager {
     /// Rename a group across all sessions.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn rename_group(&mut self, old_name: &str, new_name: &str) {
+        // Update session assignments
         for sg in self.store.sessions.values_mut() {
             if let Some(assignment) = sg.groups.remove(old_name) {
                 sg.groups.insert(new_name.to_string(), assignment);
+            }
+        }
+        // Move description
+        if let Some(desc) = self.store.descriptions.remove(old_name) {
+            self.store.descriptions.insert(new_name.to_string(), desc);
+        }
+        // Update dismissed entries
+        for dismissed_groups in self.store.dismissed.values_mut() {
+            for g in dismissed_groups.iter_mut() {
+                if g == old_name {
+                    *g = new_name.to_string();
+                }
             }
         }
         self.save();
@@ -146,7 +163,10 @@ impl GroupManager {
         self.save();
     }
 
-    /// All known group names, sorted by most recent session (caller provides ordering).
+    /// All known group names, sorted by descending member count.
+    /// Ties broken by ascending name so the order is stable across redraws
+    /// (otherwise the prompt strip "flips" two equal-count groups every
+    /// frame because HashMap iteration is non-deterministic).
     /// Returns (group_name, session_count).
     pub fn all_groups(&self) -> Vec<(String, usize)> {
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -156,7 +176,7 @@ impl GroupManager {
             }
         }
         let mut result: Vec<_> = counts.into_iter().collect();
-        result.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         result
     }
 
@@ -169,6 +189,14 @@ impl GroupManager {
             .is_some_and(|v| v.contains(&group.to_string()))
     }
 
+    /// Check if this session has ANY dismissals (skip it entirely in AI suggestions).
+    pub fn has_any_dismissal(&self, session_key: &str) -> bool {
+        self.store
+            .dismissed
+            .get(session_key)
+            .is_some_and(|v| !v.is_empty())
+    }
+
     /// Record a dismissed suggestion.
     pub fn dismiss(&mut self, session_key: &str, group: &str) {
         self.store
@@ -177,6 +205,37 @@ impl GroupManager {
             .or_default()
             .push(group.to_string());
         self.save();
+    }
+
+    /// Set description for a group.
+    pub fn set_group_description(&mut self, group: &str, desc: &str) {
+        self.store.descriptions.insert(group.to_string(), desc.to_string());
+        self.save();
+    }
+
+    /// Get description for a group, if any.
+    pub fn get_group_description(&self, group: &str) -> Option<String> {
+        self.store.descriptions.get(group).cloned()
+    }
+
+    /// All groups with their descriptions (for AI prompt).
+    /// Stable order: descending count, ties broken by ascending name.
+    pub fn all_groups_with_descriptions(&self) -> Vec<(String, usize, Option<String>)> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for sg in self.store.sessions.values() {
+            for name in sg.groups.keys() {
+                *counts.entry(name.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut result: Vec<_> = counts
+            .into_iter()
+            .map(|(name, count)| {
+                let desc = self.store.descriptions.get(&name).cloned();
+                (name, count, desc)
+            })
+            .collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        result
     }
 }
 

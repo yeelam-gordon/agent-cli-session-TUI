@@ -55,8 +55,11 @@ Press `Enter` on Running/Waiting to jump to its terminal tab. Press `Enter` on R
 | `Enter` (⏎) | Resume selected session — focuses the WT tab if Running, launches otherwise |
 | `n` | New session (launches default provider) |
 | `a` | Archive session (instantly hidden) |
+| `g` | Assign current session to a group (← → pick from existing, type to add new) |
+| `s` | Run AI grouping on the top ungrouped sessions (Grouped view) — see [AI Auto-Grouping](#ai-auto-grouping) |
+| `y` / `n` / `e` | Accept / dismiss / edit pending AI suggestion (cursor must be on a session with a 🤖 shadow) |
 | `/` | Search (type to filter, `↑`/`↓` to browse, `Enter` to resume, `Esc` to cancel) |
-| `Shift+Tab` | Toggle between active and archived view |
+| `Shift+Tab` | Cycle Active → Grouped → Hidden views |
 | `Tab` | Switch panel focus (works for all 5 providers) |
 | `PgUp`/`PgDn` | Scroll detail panel |
 | `Esc` | Cancel search |
@@ -128,6 +131,52 @@ Search uses a three-tier ranking system: **exact substring** → **fuzzy word** 
 - If the DLL is missing, search falls back gracefully to exact + fuzzy only
 
 The plugin lives in `semantic-plugin/` and is built separately. See [`CONTRIBUTING.md` § Semantic Search Plugin](CONTRIBUTING.md#semantic-search-plugin) for the exact `cargo build` and copy-DLL-next-to-exe steps.
+
+## AI Auto-Grouping
+
+Optional. Asks an AI agent (GitHub Copilot CLI by default) to suggest thematic groups for your ungrouped sessions. **Off by default** — opt in via `config.toml`.
+
+### What it does
+
+- Sends each ungrouped session's **title, summary, and updated_at timestamp** (never file contents) to the AI in batches of 30.
+- The AI proposes a group name + score for each session, or skips it.
+- Suggestions render inline as a dim `· ⟨group⟩` shadow under the session row in the Active view.
+- Press `y` to accept, `n` to dismiss, or `e` to edit the group name before saving.
+
+### Two modes
+
+| Mode | How to trigger | What happens |
+|------|----------------|--------------|
+| **Manual** | `s` in Grouped view | One batch, results open in a popup so you can step through y/n/e |
+| **Auto** | `auto_suggest = true` in config | Runs in the background after the initial session load. Chains batches automatically until every ungrouped session has been analyzed. No popup — suggestions appear inline as shadows. |
+
+### Requirements
+
+- `copilot` CLI installed on PATH and authenticated (`copilot login`)
+- `prompts/group-suggest.md` template next to the binary (shipped in the release zip)
+
+### Configuration
+
+```toml
+[acp]
+command = "copilot"
+extra_args = ["--effort", "low"]   # ~30% faster than default; quality unchanged for this task
+auto_suggest = false               # set to true for background auto-suggest
+timeout_secs = 180                 # bump if your model is slow
+# prompt_template = '~/.config/agent-session-tui/group-suggest.md'
+```
+
+### Cost & performance
+
+- ~25–45s per 30-session batch with `--effort low`
+- Each batch counts against your Copilot CLI usage quota
+- Auto-suggest chains batches: ~1 minute per 30 sessions until all are processed
+
+### Other group-view keys
+
+- `g` — assign the selected session to an existing group (← → to pick) or type a new one
+
+Groups are sorted by most-recent member activity, frozen on entry to the Grouped view to avoid jitter on the 2-second scan refresh. To refresh the order, leave and re-enter the view via `Shift+Tab`.
 
 ## Release Packages
 
