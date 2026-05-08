@@ -242,6 +242,10 @@ pub struct App {
     /// Consumed by `y`/`n`/`e` from the Active view when the cursor is on a
     /// session that has a pending suggestion.
     auto_suggestions: std::collections::HashMap<String, AiSuggestion>,
+    /// True if AI grouping (`s` key + auto-suggest) can run — we found the
+    /// prompts/group-suggest.md template at startup. When false, we hide the
+    /// `s` shortcut from the help bar and skip auto-suggest entirely.
+    acp_available: bool,
     /// Have we already kicked the auto-suggest run for this session?
     auto_suggest_kicked: bool,
     /// Session keys (`provider:session_id`) that have been sent to the AI in
@@ -334,6 +338,8 @@ impl App {
             initial_status_msg
         };
 
+        let acp_available = crate::acp::resolve_template(&acp_config).is_some();
+
         Self {
             sessions: Vec::new(),
             hidden_sessions: Vec::new(),
@@ -378,6 +384,7 @@ impl App {
             grouped_view_sort_order: None,
             pending_restore_selection: None,
             auto_suggestions: std::collections::HashMap::new(),
+            acp_available,
             auto_suggest_kicked: false,
             auto_suggest_asked: std::collections::HashSet::new(),
             acp_run_is_auto: false,
@@ -440,6 +447,10 @@ impl App {
         cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>,
     ) {
         if self.auto_suggest_kicked {
+            return;
+        }
+        if !self.acp_available {
+            crate::log::info("AI auto-suggest SKIPPED: prompts/group-suggest.md not found next to binary");
             return;
         }
         if !self.acp_config.auto_suggest {
@@ -1721,6 +1732,10 @@ impl App {
                     }
                 }
                 KeyCode::Char('s') if matches!(self.view_mode, ViewMode::Grouped) => {
+                    if !self.acp_available {
+                        self.status_message = "AI grouping not set up — see README → AI Auto-Suggest".to_string();
+                        return;
+                    }
                     // AI suggest: prepare prompt and spawn ACP background task
                     // Try to get semantic similarities (non-blocking try_lock)
                     let sem_ref = self.semantic.try_lock().ok();
@@ -2222,26 +2237,33 @@ impl App {
                 }
             }
             ViewMode::Grouped => {
-                let title = Paragraph::new(Line::from(vec![
-                    Span::styled(" 📂 Grouped ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::raw("  "),
-                    Span::styled("⏎", hl),
-                    Span::raw(" open  "),
-                    Span::styled("g", hl),
-                    Span::raw("roup  "),
-                    Span::styled("u", hl),
-                    Span::raw("nassign  "),
-                    Span::styled("s", hl),
-                    Span::raw(" AI suggest  "),
-                    Span::styled("e", hl),
-                    Span::raw("dit group  "),
-                    Span::styled("a", hl),
-                    Span::raw("rchive  "),
-                    Span::styled("/", hl),
-                    Span::raw("search  "),
-                    Span::styled("q", hl),
-                    Span::raw("uit"),
-                ]));
+                let title = Paragraph::new(Line::from({
+                    let mut spans = vec![
+                        Span::styled(" 📂 Grouped ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::raw("  "),
+                        Span::styled("⏎", hl),
+                        Span::raw(" open  "),
+                        Span::styled("g", hl),
+                        Span::raw("roup  "),
+                        Span::styled("u", hl),
+                        Span::raw("nassign  "),
+                    ];
+                    if self.acp_available {
+                        spans.push(Span::styled("s", hl));
+                        spans.push(Span::raw(" AI suggest  "));
+                    }
+                    spans.extend([
+                        Span::styled("e", hl),
+                        Span::raw("dit group  "),
+                        Span::styled("a", hl),
+                        Span::raw("rchive  "),
+                        Span::styled("/", hl),
+                        Span::raw("search  "),
+                        Span::styled("q", hl),
+                        Span::raw("uit"),
+                    ]);
+                    spans
+                }));
                 f.render_widget(title, area);
             }
             ViewMode::Hidden => {

@@ -42,9 +42,11 @@ const CACHE_TTL_SECS: u64 = 30;
 const WMI_BACKOFF_SECS: u64 = 300; // 5 minutes
 
 /// Known provider executables for the combined WMI fallback query.
+#[cfg(windows)]
 const KNOWN_EXECUTABLES: &[&str] = &["copilot", "claude", "codex", "qwen", "gemini", "kimi", "node", "agency"];
 
 /// WMI timeout in seconds. If WMI doesn't respond in this time, fall back to sysinfo.
+#[cfg(windows)]
 const WMI_TIMEOUT_SECS: u64 = 3;
 
 /// Invalidate the global process cache so the next `discover_processes` call
@@ -92,7 +94,9 @@ pub fn discover_processes(name_filter: &str) -> HashMap<u32, ProcessEntry> {
         if use_cached {
             guard.as_ref().unwrap().snapshot.clone()
         } else {
-            // Check WMI backoff state
+            // Check WMI backoff state — only meaningful on Windows where WMI
+            // is actually invoked. On non-Windows the variable would be unused.
+            #[cfg(windows)]
             let wmi_backed_off = guard.as_ref()
                 .and_then(|s| s.last_wmi_timeout)
                 .map(|t| t.elapsed().as_secs() < WMI_BACKOFF_SECS)
@@ -270,6 +274,7 @@ fn discover_wmi_with_timeout() -> Option<HashMap<u32, ProcessEntry>> {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn discover_wmi_with_timeout() -> Option<HashMap<u32, ProcessEntry>> {
     None
 }

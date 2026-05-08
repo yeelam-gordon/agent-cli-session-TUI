@@ -33,7 +33,7 @@ struct AiResponse {
 /// 1. `acp.prompt_template` from config (if set)
 /// 2. `<exe-dir>/prompts/group-suggest.md`
 /// 3. `<exe-dir>/../prompts/group-suggest.md` (dev layout)
-fn resolve_template(cfg: &AcpConfig) -> Option<PathBuf> {
+pub fn resolve_template(cfg: &AcpConfig) -> Option<PathBuf> {
     if let Some(ref p) = cfg.prompt_template {
         if p.exists() {
             return Some(p.clone());
@@ -137,8 +137,9 @@ pub fn prepare_prompt(
     semantic: Option<&crate::search::SemanticPlugin>,
     skip_keys: &std::collections::HashSet<String>,
 ) -> Result<(String, Vec<String>), String> {
-    let template_path = resolve_template(cfg)
-        .ok_or_else(|| "Prompt template not found (prompts/group-suggest.md)".to_string())?;
+    let template_path = resolve_template(cfg).ok_or_else(|| {
+        "AI grouping not set up — see README → AI Auto-Suggest. Missing prompts/group-suggest.md.".to_string()
+    })?;
     let template = std::fs::read_to_string(&template_path)
         .map_err(|e| format!("Failed to read template: {}", e))?;
 

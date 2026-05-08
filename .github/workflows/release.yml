@@ -73,6 +73,7 @@ jobs:
         mkdir dist
         cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
         cp -r providers dist/
+        cp -r prompts dist/
         python3 scripts/generate_config.py ${{ matrix.target }} config.toml.template dist/config.toml.example
         cp README.md dist/
         cp LICENSE dist/
@@ -155,6 +156,7 @@ jobs:
         cp target/${{ matrix.target }}/release/${{ matrix.core_artifact }} dist/
         cp semantic-plugin/target/${{ matrix.target }}/release/${{ matrix.dll_artifact }} dist/
         cp -r providers dist/
+        cp -r prompts dist/
         python3 scripts/generate_config.py ${{ matrix.target }} config.toml.template dist/config.toml.example
         cp README.md dist/
         cp LICENSE dist/
