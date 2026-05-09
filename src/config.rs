@@ -31,8 +31,15 @@ pub struct AppConfig {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     /// ACP (AI) configuration for group suggestions.
+    ///
+    /// Only `Some(_)` when the user has explicitly written an `[acp]` section
+    /// in their `config.toml`. When `None`, the AI grouping feature is
+    /// completely unavailable: the `s` shortcut is hidden from the menu,
+    /// background auto-suggest is skipped, and no `copilot` process is ever
+    /// spawned. This is an explicit opt-in — defaults alone do not turn the
+    /// feature on.
     #[serde(default)]
-    pub acp: AcpConfig,
+    pub acp: Option<AcpConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,7 +285,7 @@ impl Default for AppConfig {
             semantic_index_min_interval_ms: default_semantic_index_min_interval_ms(),
             log_max_lines: default_log_lines(),
             providers,
-            acp: AcpConfig::default(),
+            acp: None,
         }
     }
 }
@@ -337,6 +344,77 @@ impl AppConfig {
             std::fs::write(&path, text)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AcpConfig must be `None` when the user did not write an `[acp]`
+    /// section in their config.toml. This is the master gate for the
+    /// AI grouping feature — without an explicit section, `s` shortcut
+    /// stays hidden, auto-suggest is skipped, no copilot process spawns.
+    #[test]
+    fn acp_absent_yields_none() {
+        let toml_str = r#"
+            poll_interval_ms = 2000
+            log_max_lines = 500
+            tick_rate_ms = 1000
+            semantic_index_min_interval_ms = 60000
+            data_dir = "/tmp/test"
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
+        assert!(cfg.acp.is_none(), "expected acp=None when section omitted");
+    }
+
+    /// An empty `[acp]` section is sufficient to opt in: defaults fill
+    /// in all fields, and the user has clearly expressed intent.
+    #[test]
+    fn empty_acp_section_yields_some_with_defaults() {
+        let toml_str = r#"
+            poll_interval_ms = 2000
+            log_max_lines = 500
+            tick_rate_ms = 1000
+            semantic_index_min_interval_ms = 60000
+            data_dir = "/tmp/test"
+            [acp]
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
+        let acp = cfg.acp.expect("expected acp=Some when section present");
+        assert_eq!(acp.command, "copilot", "default command");
+        assert!(!acp.auto_suggest, "default auto_suggest=false");
+    }
+
+    /// Populated `[acp]` section round-trips correctly.
+    #[test]
+    fn populated_acp_section_parses_correctly() {
+        let toml_str = r#"
+            poll_interval_ms = 2000
+            log_max_lines = 500
+            tick_rate_ms = 1000
+            semantic_index_min_interval_ms = 60000
+            data_dir = "/tmp/test"
+            [acp]
+            command = "claude"
+            extra_args = ["--model", "sonnet"]
+            auto_suggest = true
+            timeout_secs = 240
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
+        let acp = cfg.acp.expect("acp set");
+        assert_eq!(acp.command, "claude");
+        assert_eq!(acp.extra_args, vec!["--model", "sonnet"]);
+        assert!(acp.auto_suggest);
+        assert_eq!(acp.timeout_secs, 240);
+    }
+
+    /// AppConfig::default() (the in-code fallback when no config.toml is
+    /// found) must NOT opt the user in — defaults stay opt-out.
+    #[test]
+    fn default_app_config_has_no_acp() {
+        let cfg = AppConfig::default();
+        assert!(cfg.acp.is_none(), "default AppConfig must not opt into AI");
     }
 }
 

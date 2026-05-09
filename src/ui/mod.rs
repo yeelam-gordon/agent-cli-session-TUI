@@ -270,7 +270,7 @@ impl App {
         tick_rate_ms: u64,
         semantic_index_min_interval_ms: u64,
         group_mgr: GroupManager,
-        acp_config: crate::config::AcpConfig,
+        acp_config: Option<crate::config::AcpConfig>,
     ) -> Self {
         let mut list_state = ListState::default();
         // No selection until all providers report in
@@ -338,7 +338,16 @@ impl App {
             initial_status_msg
         };
 
-        let acp_available = crate::acp::resolve_template(&acp_config).is_some();
+        // ACP is **explicit opt-in**: the feature is only available when the
+        // user has written an `[acp]` section in their config.toml AND the
+        // prompt template is findable next to the binary. Both conditions
+        // must hold; either alone is not enough. Without explicit opt-in the
+        // `s` shortcut is hidden, auto-suggest never kicks, and no copilot
+        // process is spawned.
+        let user_opted_in = acp_config.is_some();
+        let acp_config = acp_config.unwrap_or_default();
+        let acp_available = user_opted_in
+            && crate::acp::resolve_template(&acp_config).is_some();
 
         Self {
             sessions: Vec::new(),

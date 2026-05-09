@@ -32,50 +32,35 @@ log_max_lines = 500
 # No configuration needed. Drop the semantic_search_plugin library next to
 # the TUI binary (already included in the "-semantic" release zip).
 
-# ─── AI Auto-Grouping (ACP / Agent Client Protocol) ───
+# ─── AI Auto-Grouping (ACP / Agent Client Protocol) — OPT-IN ───
 # Lets the TUI ask an AI agent to suggest thematic groups for ungrouped
-# sessions. Press `s` in the Grouped view to run on demand, or set
-# `auto_suggest = true` to run automatically in the background after each
-# initial load. Suggestions render as a dim "· ⟨group⟩" shadow under the
-# session row in the Active view; press `y` to accept, `n` to dismiss, `e`
-# to edit the group name before saving.
+# sessions. The whole feature is **off by default**: when this entire
+# section is absent or commented out, the `s` shortcut is hidden, no
+# `copilot` process is ever spawned, and the AI feature is invisible.
 #
-# Requirements:
+# To turn it on: uncomment the [acp] block below. Press `s` in the Grouped
+# view to run on demand, or set `auto_suggest = true` for background runs.
+# Suggestions render as a dim "· ⟨group⟩" shadow under the session row in
+# the Active view; press `y` to accept, `n` to dismiss, `e` to edit.
+#
+# Requirements (only relevant once you uncomment):
 #   - `copilot` CLI installed on PATH and authenticated (`copilot login`)
 #   - The `prompts/group-suggest.md` template (shipped next to the exe)
 #
-# Costs (with default `--effort low` setting):
+# Costs (with `--effort low`):
 #   - ~30 sessions per batch, ~25-45s per batch on Copilot CLI
-#   - When `auto_suggest = true` the TUI chains batches until all ungrouped
-#     sessions have been analyzed, ~1 minute per 30-session batch
 #   - Counts against your Copilot CLI usage quota
 #
 # Privacy:
 #   - Only session titles, summaries, and updated_at timestamps are sent.
 #   - Full file contents and chat transcripts are NEVER included.
-[acp]
-# CLI command to invoke for the AI run. Almost always "copilot".
-command = "copilot"
-
-# Extra args passed to the CLI. `--effort low` is the right level for
-# structured-JSON pattern matching like grouping; saves ~30% time vs
-# default with no observable quality drop. Use `["--effort", "medium"]`
-# if you want richer reasoning at higher cost.
-extra_args = ["--effort", "low"]
-
-# OFF by default. Set to true to have the TUI automatically run AI
-# grouping in the background after the initial session load completes
-# and chain batches until all ungrouped sessions are processed.
-auto_suggest = false
-
-# Timeout for a single ACP run. With --effort low + 30 sessions, a typical
-# run finishes in 25-45s. Bump higher if your model is consistently slow,
-# drop lower to detect hangs faster.
-timeout_secs = 180
-
-# Path to the prompt template. If unset, the TUI looks for
-# `<exe-dir>/prompts/group-suggest.md` (shipped in the release zip).
-# prompt_template = '~/.config/agent-session-tui/group-suggest.md'
+#
+# [acp]
+# command = "copilot"
+# extra_args = ["--effort", "low"]
+# auto_suggest = false               # set true for background mode
+# timeout_secs = 180
+# # prompt_template = '~/.config/agent-session-tui/group-suggest.md'
 
 # ─── Copilot CLI ───
 [providers.copilot]
