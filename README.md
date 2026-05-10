@@ -1,7 +1,8 @@
 # Agent CLI Session TUI
 
 A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, **Kimi**, and extensible to others.
-<img width="2818" height="1608" alt="image" src="https://github.com/user-attachments/assets/28922190-474b-4019-be01-45d291954fe9" />
+
+![Agent CLI Session TUI demo](docs/agentTUI.gif)
 
 ## Pain Points Solved
 
