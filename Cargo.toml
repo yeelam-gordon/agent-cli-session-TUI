@@ -1,6 +1,6 @@
 [package]
 name = "agent-session-tui"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Terminal UI for managing AI agent CLI sessions — GitHub Copilot, Claude Code, OpenAI Codex, Qwen, Google Gemini"
 license = "MIT"
@@ -31,9 +31,15 @@ dirs = "6"
 anyhow = "1"
 unicode-width = "0.2"
 libloading = "0.9.0"
+uuid = { version = "1", default-features = false, features = ["v4", "fast-rng"] }
 
 # Full-text search over session logs (Lucene-like, MIT-licensed)
 tantivy = { version = "0.22", default-features = false, features = ["mmap", "stopwords"] }
+
+# Agent Client Protocol — JSON-RPC client over stdio. Currently unused at runtime
+# (we still use `-p` non-interactive mode in src/acp.rs); reserved for the v0.4
+# migration that will spawn the agent once and reuse the connection across
+# grouping batches.
 agent-client-protocol = "0.11.1"
 agent-client-protocol-tokio = "0.11.1"
 

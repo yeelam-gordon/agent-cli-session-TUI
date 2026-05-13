@@ -14,4 +14,9 @@ sessions.json
 semantic-plugin/target/
 semantic-plugin/Cargo.lock
 
+# Mock-data plugin — local-only demo extension (not for distribution).
+# Source, JSON data, and design notes all live here; the main binary's
+# `--mock-data` flag is a no-op unless mock_data.dll is dropped next to it.
+/mock-plugin/
+
 out/

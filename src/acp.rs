@@ -1,10 +1,11 @@
-//! ACP-based AI group suggestion engine.
+//! AI group suggestion engine (configured CLI in non-interactive `-p` mode).
 //!
-//! Uses the Agent Client Protocol (agentclientprotocol.com) to communicate
-//! with coding agents over JSON-RPC/stdio. The TUI acts as an ACP Client:
-//! spawns an agent subprocess, sends initialize → session/new → session/prompt,
-//! reads session/update notifications for the response, then parses the
-//! compact JSON for group suggestions.
+//! Spawns the user's configured CLI (default: `copilot`) as a one-shot
+//! subprocess via `-p <prompt>` and parses stdout. Despite the file/config
+//! name `acp` (kept stable for back-compat), this is **not** the Agent
+//! Client Protocol — we don't speak JSON-RPC to a long-lived agent. A real
+//! ACP migration could speed up chained auto-suggest batches by avoiding
+//! per-call startup overhead, but it isn't currently used.
 
 use std::path::PathBuf;
 
@@ -199,14 +200,21 @@ pub fn prepare_prompt(
 /// Run the ACP agent subprocess: initialize → session/new → session/prompt.
 /// Uses raw JSON-RPC over stdio (newline-delimited) — no SDK, proven to work
 /// with `copilot --acp --stdio` via direct pipe testing.
+///
+/// `session_id` is the UUID copilot will use for its new session (passed via
+/// `--resume=<UUID>` which copilot interprets as "start new with this UUID"
+/// when no session with that ID exists). Caller is responsible for archiving
+/// `copilot:<session_id>` BEFORE invoking this so the spawned session never
+/// surfaces in the user's active list.
 pub async fn run_acp_suggest(
     cfg: AcpConfig,
     prompt: String,
+    session_id: String,
 ) -> Result<Vec<AiSuggestion>, String> {
     // Use std::process (synchronous) inside spawn_blocking because
     // tokio::process async pipe reads hang on Windows for ACP stdio.
     let result = tokio::task::spawn_blocking(move || {
-        run_acp_sync(cfg, prompt)
+        run_acp_sync(cfg, prompt, session_id)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?;
@@ -214,47 +222,60 @@ pub async fn run_acp_suggest(
 }
 
 /// Synchronous AI suggestion flow — runs on a blocking thread.
-/// Uses `copilot -p "<prompt>" -s --allow-all-tools` for reliable one-shot
-/// prompt→response. The ACP stdio protocol has buffering issues on Windows
-/// that make interactive session/prompt unreliable.
+/// Uses `copilot -p "<prompt>" -s --resume=<uuid>` so the spawned session
+/// has a known-in-advance UUID; the caller pre-archives that UUID so the
+/// session never pollutes the active list. The ACP stdio protocol has
+/// buffering issues on Windows that make interactive session/prompt unreliable.
 fn run_acp_sync(
     cfg: AcpConfig,
     prompt: String,
+    session_id: String,
 ) -> Result<Vec<AiSuggestion>, String> {
     use std::process::{Command, Stdio};
 
     crate::log::info(&format!("ACP: spawning '{}' with -p mode", cfg.command));
     crate::log::info(&format!("ACP: prompt length = {} chars", prompt.len()));
 
-    // Build a clean env without COPILOT_* vars (avoid nesting detection)
+    // Build a clean env without COPILOT_* vars (avoid recursion when asTUI
+    // itself is running inside a Copilot CLI session).
     let clean_env: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| !k.starts_with("COPILOT_"))
         .collect();
 
-    // Create a temp config dir with empty MCP config to skip MCP server
-    // startup (~300s overhead). The AI grouping task doesn't need any MCP tools.
-    let tmp_cfg = std::env::temp_dir().join("agent-session-tui-acp-cfg");
-    let _ = std::fs::create_dir_all(&tmp_cfg);
-    let _ = std::fs::write(tmp_cfg.join("mcp-config.json"), "{}");
-
-    // Build args: -p "<prompt>" -s --allow-all-tools --config-dir <tmp>
+    // Build args. The grouping task is pure text-in / JSON-out; the model
+    // doesn't need any tools or MCP servers. We pass:
+    //   --available-tools=        empty allowlist → model has no tools
+    //                             → no permission prompts → safe for -p mode
+    //                             → no need for --allow-all-tools
+    //   --disable-builtin-mcps    skip github-mcp-server startup
+    //
+    // We deliberately do NOT pass `--config-dir` or override `COPILOT_HOME`.
+    // Whatever auth setup the user has configured for `copilot` is theirs to
+    // manage; we don't second-guess it.
     let mut args: Vec<String> = vec![
         "-p".to_string(),
         prompt,
         "-s".to_string(),
-        "--allow-all-tools".to_string(),
-        "--config-dir".to_string(),
-        tmp_cfg.to_string_lossy().to_string(),
+        "--available-tools=".to_string(),
+        "--disable-builtin-mcps".to_string(),
+        // Pre-assign the session UUID so the caller can archive
+        // `copilot:<session_id>` BEFORE we spawn — keeps these
+        // grouping-helper sessions out of the user's active list.
+        // `--resume=<UUID>` against a non-existent UUID means
+        // "start a NEW session with this UUID" per copilot --help.
+        format!("--resume={}", session_id),
     ];
-    // Add extra args (e.g., --model gpt-4o-mini for cost control)
-    // but filter out ACP-specific flags
     for arg in &cfg.extra_args {
+        // Filter out ACP-protocol flags that don't apply to -p mode.
         if arg != "--acp" && arg != "--stdio" {
             args.push(arg.clone());
         }
     }
 
-    crate::log::info(&format!("ACP: running {} -p ... -s --allow-all-tools --config-dir {:?}", cfg.command, tmp_cfg));
+    crate::log::info(&format!(
+        "ACP: running {} -p ... -s --available-tools= --disable-builtin-mcps (extra_args={:?})",
+        cfg.command, cfg.extra_args
+    ));
 
     let start = std::time::Instant::now();
     let output = Command::new(&cfg.command)

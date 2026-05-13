@@ -47,11 +47,16 @@ pub fn ranked_search(
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower.split_whitespace().collect();
 
-    // Tier 3: pre-compute semantic matches from cached embeddings
+    // Tier 3: pre-compute semantic matches from cached embeddings.
+    // Lowered threshold from 0.4 → 0.3: paraphrastic queries (user
+    // remembers the MEETING context, not the literal words in the
+    // session) often land in 0.3-0.4 similarity. The visible ✨ badge
+    // is still gated above, so noisy low-similarity matches won't
+    // pretend to be "smart" — they just contribute a small boost.
     let semantic_scores: HashMap<String, f32> = if query.len() >= 5 {
         semantic
             .filter(|s| s.is_ready())
-            .map(|s| s.search_cached(query, 0.4).into_iter().collect())
+            .map(|s| s.search_cached(query, 0.3).into_iter().collect())
             .unwrap_or_default()
     } else {
         HashMap::new()
@@ -65,9 +70,18 @@ pub fn ranked_search(
             let mut score = score_session(s, &query_lower, &query_words, log_score);
             let mut semantic_match = false;
 
-            // Tier 3: semantic boost from cached vectors (instant lookup)
+            // Tier 3: semantic boost from cached vectors (instant lookup).
+            //
+            // Boost formula deliberately generous: for long sessions where
+            // the matching content is buried mid-transcript and never makes
+            // it into the BM25 body index, semantic similarity is the
+            // ONLY signal — fuzzy + semantic must carry recall on its own.
+            // Floor 0.3, ceiling 800: sim 0.5 → +320, sim 0.6 → +480,
+            // sim 0.7 → +640. Caps at 800 to keep it from drowning
+            // legitimate title-exact matches (1000) but lets a strongly
+            // semantic-relevant session compete with title/summary matches.
             if let Some(&sim) = semantic_scores.get(&s.id) {
-                let boost = ((sim - 0.4) * 333.0).min(200.0) as u32;
+                let boost = ((sim - 0.3) * 1600.0).clamp(0.0, 800.0) as u32;
                 score = score.saturating_add(boost);
                 semantic_match = true;
             }
@@ -86,6 +100,146 @@ pub fn ranked_search(
     // Sort by score descending (highest relevance first)
     results.sort_by_key(|r| std::cmp::Reverse(r.score));
     results
+}
+
+/// Detailed score breakdown for a single session — used by `--search-bench`
+/// to explain WHY a session ranked where it did. Mirrors the logic in
+/// `score_session` but records each tier's contribution rather than just
+/// keeping the max.
+///
+/// Fields are the per-tier scores BEFORE the recency multiplier; `recency`
+/// holds the multiplier so the caller can present `final = best * recency`.
+#[derive(Debug, Clone, Default)]
+pub struct ScoreBreakdown {
+    /// Per-field tier scores. Field 0 = title, then session_id, summary,
+    /// cwd, provider_name (matches the array in `score_session`).
+    pub field_scores: [FieldTierScore; 5],
+    /// BM25 bonus from tantivy log index (post-clamp).
+    pub bm25_bonus: u32,
+    /// Raw BM25 score from tantivy (pre-clamp / pre-multiplier).
+    pub bm25_raw: f32,
+    /// Bonus from matching session state label ("running", etc.).
+    pub state_label_bonus: u32,
+    /// Cosine similarity from semantic plugin (0.0 if no match).
+    pub semantic_sim: f32,
+    /// Computed semantic boost added to score.
+    pub semantic_boost: u32,
+    /// Total best score BEFORE recency multiplier.
+    pub best_pre_recency: u32,
+    /// Recency multiplier applied to the final score.
+    pub recency: f32,
+    /// Final score AFTER recency multiplier.
+    pub final_score: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FieldTierScore {
+    pub label: &'static str,
+    pub base: u32,
+    /// Tier 1 exact-substring score (0 if not matched).
+    pub exact: u32,
+    /// Tier 2 all-words-in-field score (0 if not matched).
+    pub all_words: u32,
+    /// Tier 2b partial-words score (0 if not matched or gated out).
+    pub partial: u32,
+    /// Distinct query words that hit this field.
+    pub word_hits: u32,
+}
+
+/// Compute the same score as `score_session` but return a full per-tier
+/// breakdown for debugging / benchmarking.
+pub fn score_breakdown(
+    session: &Session,
+    query: &str,
+    query_words: &[&str],
+    log_score: Option<f32>,
+    semantic_sim: f32,
+) -> ScoreBreakdown {
+    let cwd_string = session.cwd.to_string_lossy().to_string();
+    let fields: [(&str, &str, u32); 5] = [
+        ("title", session.title.as_str(), 1000),
+        ("session_id", session.provider_session_id.as_str(), 800),
+        ("summary", session.summary.as_str(), 600),
+        ("cwd", cwd_string.as_str(), 400),
+        ("provider", session.provider_name.as_str(), 300),
+    ];
+
+    let mut concat_lower = String::new();
+    for (_, f, _) in &fields {
+        concat_lower.push(' ');
+        concat_lower.push_str(&f.to_lowercase());
+    }
+    let total_distinct_hits = query_words
+        .iter()
+        .filter(|w| w.len() >= 3 && concat_lower.contains(*w))
+        .count() as u32;
+    let tier2b_eligible = if query_words.len() == 1 {
+        true
+    } else {
+        total_distinct_hits >= 2
+    };
+
+    let mut bd = ScoreBreakdown::default();
+    let mut best_score = 0u32;
+
+    for (i, (label, field, base)) in fields.iter().enumerate() {
+        let field_lower = field.to_lowercase();
+        let mut fs = FieldTierScore {
+            label,
+            base: *base,
+            exact: 0,
+            all_words: 0,
+            partial: 0,
+            word_hits: 0,
+        };
+
+        if field_lower.contains(query) {
+            fs.exact = *base;
+            best_score = best_score.max(*base);
+        } else if query_words.len() > 1
+            && query_words.iter().all(|w| field_lower.contains(w))
+        {
+            fs.all_words = base / 2;
+            best_score = best_score.max(base / 2);
+        } else if tier2b_eligible {
+            let word_hits: u32 = query_words
+                .iter()
+                .filter(|w| w.len() >= 3 && field_lower.contains(*w))
+                .count() as u32;
+            fs.word_hits = word_hits;
+            if word_hits > 0 {
+                let partial_score = base / 4 + word_hits * 50;
+                fs.partial = partial_score;
+                best_score = best_score.max(partial_score);
+            }
+        }
+        bd.field_scores[i] = fs;
+    }
+
+    if let Some(bm25) = log_score {
+        bd.bm25_raw = bm25;
+        let bonus = (bm25 * 80.0).clamp(50.0, 1200.0) as u32;
+        bd.bm25_bonus = bonus;
+        best_score = best_score.max(bonus);
+    }
+
+    let label_lower = session.state.label().to_lowercase();
+    if label_lower.contains(query) || query_words.iter().any(|w| label_lower.contains(w)) {
+        bd.state_label_bonus = 200;
+        best_score = best_score.max(200);
+    }
+
+    bd.semantic_sim = semantic_sim;
+    if semantic_sim >= 0.3 {
+        let boost = ((semantic_sim - 0.3) * 1600.0).clamp(0.0, 800.0) as u32;
+        bd.semantic_boost = boost;
+        best_score = best_score.saturating_add(boost);
+    }
+
+    bd.best_pre_recency = best_score;
+    bd.recency = recency_multiplier(&session.updated_at);
+    bd.final_score = (best_score as f32 * bd.recency) as u32;
+    bd
 }
 
 /// Multiplier applied to the final score based on how old the session is.
@@ -127,6 +281,29 @@ fn score_session(
         (&session.provider_name, 300),
     ];
 
+    // Pre-compute distinct query-word hits ACROSS all fields combined.
+    // Used by tier 2b to gate single-common-word noise: a multi-word
+    // query whose only matching word is one common term (e.g., "march")
+    // shouldn't surface unrelated sessions. We require ≥2 distinct hits
+    // ANYWHERE in the session before partial-match scores fire.
+    let mut total_distinct_hits: u32 = 0;
+    if query_words.len() > 1 {
+        let mut concat_lower = String::new();
+        for (f, _) in &fields {
+            concat_lower.push(' ');
+            concat_lower.push_str(&f.to_lowercase());
+        }
+        total_distinct_hits = query_words
+            .iter()
+            .filter(|w| w.len() >= 3 && concat_lower.contains(*w))
+            .count() as u32;
+    }
+    let tier2b_eligible = if query_words.len() == 1 {
+        true
+    } else {
+        total_distinct_hits >= 2
+    };
+
     let mut best_score = 0u32;
 
     for (field, base_score) in &fields {
@@ -147,7 +324,13 @@ fn score_session(
             }
         }
 
-        // Tier 2b: any query word appears in the field (partial word match)
+        // Tier 2b: partial word match — gated by tier2b_eligible above so
+        // multi-word queries with only ONE distinct word matching anywhere
+        // in the session no longer score (kills "search 'iteration review
+        // march seana' matches every session containing 'march' in title").
+        if !tier2b_eligible {
+            continue;
+        }
         let word_hits: u32 = query_words
             .iter()
             .filter(|w| w.len() >= 3 && field_lower.contains(*w))
@@ -159,10 +342,13 @@ fn score_session(
     }
 
     // Tier 1c: log/transcript content — BM25 score from tantivy. Typical
-    // BM25 values are 0-10+; multiplier tuned so decent hits land between
-    // 50 and 350 (just below cwd base of 400, above provider_name base 300).
+    // BM25 values are 0-10+ for single hits; multi-word OR queries can
+    // produce 20-40+. Ceiling raised to 1200 (above title-exact 1000) so
+    // that strong multi-term BODY matches can dominate when the title
+    // doesn't mention the search terms — this is the recall case where
+    // a user remembers what the session was ABOUT, not what it was NAMED.
     if let Some(bm25) = log_score {
-        let bonus = (bm25 * 80.0).clamp(50.0, 350.0) as u32;
+        let bonus = (bm25 * 80.0).clamp(50.0, 1200.0) as u32;
         best_score = best_score.max(bonus);
     }
 
@@ -1072,5 +1258,89 @@ mod tests {
     fn semantic_plugin_defaults_unavailable() {
         let plugin = SemanticPlugin::new();
         assert_eq!(*plugin.status(), SemanticStatus::Unavailable);
+    }
+
+    // ── Regression tests (weak-search investigation 2026-05-13) ──────
+
+    /// Regression: 4-word query where only ONE word ("march") appears in
+    /// an unrelated session's title used to surface that session above
+    /// the real target. Tier 2b now requires ≥2 word hits when the query
+    /// has multiple words, eliminating "single-common-word" noise.
+    ///
+    /// User-visible symptom: searching "Iteration Review March Seana"
+    /// surfaced unrelated sessions whose only commonality was a single
+    /// word in their title.
+    #[test]
+    fn multi_word_query_single_hit_no_longer_scores() {
+        let sessions = vec![
+            // Noise: only "march" matches; should NOT score under tier 2b.
+            make_session("March release notes", "release planning", "copilot"),
+            // Real target: 3 of 4 words match in summary.
+            make_session(
+                "Build slides",
+                "Iteration review notes for March meeting",
+                "copilot",
+            ),
+        ];
+        let results = ranked_search(&sessions, "Iteration Review March Seana", None, None);
+        // The "March release notes" row must NOT surface — it only matches
+        // one word out of four (below the new min_hits=2 threshold).
+        let surfaced_titles: Vec<&str> = results
+            .iter()
+            .map(|r| sessions[r.index].title.as_str())
+            .collect();
+        assert!(
+            !surfaced_titles.contains(&"March release notes"),
+            "single-word-hit noise leaked: {:?}",
+            surfaced_titles
+        );
+        // The real target with 3 matching words MUST surface.
+        assert!(
+            surfaced_titles.contains(&"Build slides"),
+            "3-of-4-word match was filtered out: {:?}",
+            surfaced_titles
+        );
+    }
+
+    /// Regression: single-word queries must still score on a single hit.
+    /// The tightened tier 2b threshold is multi-word-only — a one-word
+    /// search like "/auth" must still return everything containing "auth".
+    #[test]
+    fn single_word_query_still_scores_on_one_hit() {
+        let sessions = vec![
+            make_session("Fix auth bug", "JWT refresh", "copilot"),
+        ];
+        let results = ranked_search(&sessions, "auth", None, None);
+        assert_eq!(results.len(), 1, "single-word query lost recall");
+        assert!(results[0].score > 0);
+    }
+
+    /// Regression: when a session's BODY (events.jsonl, indexed via
+    /// tantivy) matches many query terms but its title/summary don't,
+    /// the BM25 boost must dominate over title-tier scores. Previously
+    /// the BM25 bonus was capped at 350, below title-exact 1000, so
+    /// "session about X" queries never beat "session named X".
+    #[test]
+    fn strong_body_match_can_outrank_weak_title_match() {
+        let sessions = vec![
+            // Title contains "iteration" → tier 2b ≈ base/4 + 50.
+            make_session("iteration something", "", "copilot"),
+            // Title is unrelated; body has very strong BM25 (simulated 12.0).
+            make_session("Build slides", "", "copilot"),
+        ];
+        // Inject a strong body BM25 for the "Build slides" session.
+        let mut log_matches = std::collections::HashMap::new();
+        let body_match_id = sessions[1].id.clone();
+        log_matches.insert(body_match_id.clone(), 12.0_f32);
+        let results = ranked_search(&sessions, "iteration review", None, Some(&log_matches));
+        // The body-match session must rank #1.
+        assert_eq!(
+            sessions[results[0].index].id, body_match_id,
+            "strong body match did not outrank weak title match: {:?}",
+            results
+                .iter()
+                .map(|r| (sessions[r.index].title.clone(), r.score))
+                .collect::<Vec<_>>()
+        );
     }
 }

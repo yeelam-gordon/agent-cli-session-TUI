@@ -400,6 +400,53 @@ impl App {
         }
     }
 
+    /// Preload the TUI with a curated mock session list and disable any
+    /// background features that would conflict with a static demo (provider
+    /// scan, real AI grouping spawn, semantic indexing).
+    ///
+    /// Used only by the `--mock-data` startup path. The supervisor is also
+    /// skipped at the call-site, so no scan ever overwrites these sessions.
+    pub fn preload_demo_data(&mut self, sessions: Vec<Session>) {
+        self.sessions = sessions;
+        self.initial_load_complete = true;
+        // The `s` key (real AI grouping spawn) must never fire in mock mode —
+        // we'd spawn `copilot` against synthetic data. The y/n/e accept/dismiss/
+        // edit keys are gated on `pending_suggestion_for_selection()`, NOT on
+        // `acp_available`, so they still work against the pre-populated
+        // suggestions map. Inline-shadow rendering is similarly ungated.
+        self.acp_available = false;
+        self.list_state.select(Some(0));
+        self.apply_filter();
+        self.status_message =
+            "🎬 Mock data — for demos and screenshots".into();
+        self.log_lines
+            .push(format!("Mock mode: loaded {} sessions", self.sessions.len()));
+    }
+
+    /// Add pre-existing group assignments, used in `--mock-data` mode so the
+    /// Grouped view shows realistic distribution instead of an empty page.
+    /// Uses in-memory assignment (no disk write) so the demo never touches
+    /// the user's real groups.json.
+    pub fn preload_demo_groups(&mut self, assignments: Vec<(String, String)>) {
+        for (session_key, group) in assignments {
+            self.group_mgr.assign_in_memory(&session_key, &group);
+        }
+    }
+
+    /// Pre-populate AI auto-suggestions for the demo flow. In normal runs
+    /// these come from a real ACP batch; in `--mock-data` mode we hand-pick
+    /// a few so the inline `· 🤖 ⟨group⟩` shadow + y/n/e shortcuts work
+    /// without ever spawning copilot.
+    pub fn preload_demo_suggestions(
+        &mut self,
+        suggestions: std::collections::HashMap<String, crate::acp::AiSuggestion>,
+    ) {
+        self.auto_suggestions = suggestions;
+        // Mark as kicked so `maybe_kick_auto_suggest` doesn't try to start
+        // a real run on top.
+        self.auto_suggest_kicked = true;
+    }
+
     /// Get the list being displayed based on view mode.
     fn current_view_sessions(&self) -> &[Session] {
         match self.view_mode {
@@ -505,12 +552,28 @@ impl App {
                 ));
                 let cfg = self.acp_config.clone();
                 let event_tx = cmd_tx.clone();
+                // Pre-generate the UUID copilot will use for this grouping
+                // session and archive it BEFORE spawning so the session
+                // never surfaces in the user's active list. Race-free in
+                // practice: the supervisor processes ArchiveSession FIFO
+                // and the next periodic scan is poll_interval_ms away,
+                // while copilot's -p mode takes ~30s to write any session
+                // data — plenty of time for the archive cmd to land.
+                let acp_session_id = uuid::Uuid::new_v4().to_string();
+                let _ = cmd_tx.send(SupervisorCommand::ArchiveSession {
+                    provider_session_id: acp_session_id.clone(),
+                    provider_key: "copilot".to_string(),
+                });
+                crate::log::info(&format!(
+                    "AI auto-suggest: pre-archived copilot:{} (ACP session)",
+                    acp_session_id
+                ));
                 tokio::spawn(async move {
                     let timeout_secs = cfg.timeout_secs;
                     let timeout = tokio::time::Duration::from_secs(timeout_secs);
                     let result = tokio::time::timeout(
                         timeout,
-                        crate::acp::run_acp_suggest(cfg, prompt),
+                        crate::acp::run_acp_suggest(cfg, prompt, acp_session_id),
                     )
                     .await;
                     let _ = match result {
@@ -1011,7 +1074,14 @@ impl App {
                                     all_sessions.extend(self.hidden_sessions.iter().cloned());
                                     std::thread::spawn(move || {
                                         if let Err(e) = searcher.refresh(&all_sessions, &registry) {
-                                            crate::log::info(&format!("log index refresh failed: {}", e));
+                                            // Use {:#} to surface the full anyhow chain
+                                            // (e.g. "tantivy commit (chunk): IO error: ...").
+                                            // Without this, only the top-level context shows,
+                                            // making tantivy failures un-diagnosable.
+                                            crate::log::error(&format!(
+                                                "log index refresh failed: {:#}",
+                                                e
+                                            ));
                                         }
                                         running.store(false, Ordering::SeqCst);
                                     });
@@ -1165,33 +1235,13 @@ impl App {
                                     );
                                 }
 
-                                // Auto-chain: if this was a background run AND
-                                // there are still ungrouped, undismissed,
-                                // un-asked sessions, kick another batch so we
-                                // gradually cover the entire ungrouped list.
-                                if was_auto {
-                                    let remaining = self.sessions.iter().filter(|s| {
-                                        let key = format!(
-                                            "{}:{}",
-                                            s.provider_name, s.provider_session_id
-                                        );
-                                        self.group_mgr.groups_for(&key).is_empty()
-                                            && !self.group_mgr.has_any_dismissal(&key)
-                                            && !self.auto_suggest_asked.contains(&key)
-                                    }).count();
-                                    crate::log::info(&format!(
-                                        "AI auto-suggest CHAIN-CHECK: {} ungrouped sessions remain un-asked",
-                                        remaining
-                                    ));
-                                    if remaining > 0 {
-                                        // Reset the once-flag so the next call
-                                        // can kick again. The skip set
-                                        // (auto_suggest_asked) ensures the
-                                        // next batch picks NEW sessions.
-                                        self.auto_suggest_kicked = false;
-                                        self.maybe_kick_auto_suggest(&cmd_tx);
-                                    }
-                                }
+                                // Auto-suggest runs ONCE per session startup, not in
+                                // a chain. Earlier versions chained batches to cover
+                                // the entire ungrouped list, but that burned a
+                                // copilot session per 30 rows and made the user wait
+                                // through 5-10 batches for users with deep history.
+                                // One batch (top 30 by recency) is enough — the user
+                                // can press `s` for more on demand.
                             }
                             Err(e) => {
                                 if was_auto {
@@ -1585,6 +1635,51 @@ impl App {
                     self.search_query.pop();
                     self.apply_filter();
                 }
+                // While typing a search, if the highlighted row has a pending
+                // AI suggestion, allow y/n/e to act on it (rather than being
+                // appended to the query). This makes the demo flow:
+                //   /regression  →  arrow to a suggested row  →  press y.
+                // It only steals these chars when there is actually a
+                // suggestion to act on, so typing words like "yarn" still
+                // works in the common case.
+                KeyCode::Char('y') if self.pending_suggestion_for_selection().is_some() => {
+                    if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                        self.group_mgr.assign_human(&sg.session, &sg.group);
+                        self.auto_suggestions.remove(&sg.session);
+                        self.log_lines.push(format!(
+                            "AI ✓ accepted {} → {} ({}%)",
+                            crate::util::short_id(&sg.session, 16),
+                            sg.group,
+                            (sg.score * 100.0) as u32
+                        ));
+                        self.status_message = format!("✓ Assigned to '{}'", sg.group);
+                    }
+                }
+                KeyCode::Char('n') if self.pending_suggestion_for_selection().is_some() => {
+                    if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                        self.group_mgr.dismiss(&sg.session, &sg.group);
+                        self.auto_suggestions.remove(&sg.session);
+                        self.log_lines.push(format!(
+                            "AI ✗ dismissed '{}' for {}",
+                            sg.group,
+                            crate::util::short_id(&sg.session, 16)
+                        ));
+                        self.status_message = "✗ Dismissed suggestion".to_string();
+                    }
+                }
+                KeyCode::Char('e') if self.pending_suggestion_for_selection().is_some() => {
+                    if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                        self.auto_suggestions.remove(&sg.session);
+                        self.group_prompt = Some(GroupPrompt {
+                            session_key: sg.session.clone(),
+                            input: sg.group.clone(),
+                            cursor: 0,
+                        });
+                        // Pop out of search-typing so the group prompt is
+                        // not visually buried by the search title bar.
+                        self.search_active = false;
+                    }
+                }
                 KeyCode::Char(c) => {
                     self.search_query.push(c);
                     self.apply_filter();
@@ -1774,12 +1869,23 @@ impl App {
                             // Spawn background task with timeout
                             let cfg = self.acp_config.clone();
                             let event_tx = cmd_tx.clone();
+                            // Pre-archive the ACP session UUID before spawn
+                            // — see auto-suggest path for rationale.
+                            let acp_session_id = uuid::Uuid::new_v4().to_string();
+                            let _ = cmd_tx.send(SupervisorCommand::ArchiveSession {
+                                provider_session_id: acp_session_id.clone(),
+                                provider_key: "copilot".to_string(),
+                            });
+                            crate::log::info(&format!(
+                                "AI manual suggest: pre-archived copilot:{} (ACP session)",
+                                acp_session_id
+                            ));
                             tokio::spawn(async move {
                                 let timeout_secs = cfg.timeout_secs;
                                 let timeout = tokio::time::Duration::from_secs(timeout_secs);
                                 let result = tokio::time::timeout(
                                     timeout,
-                                    crate::acp::run_acp_suggest(cfg, prompt),
+                                    crate::acp::run_acp_suggest(cfg, prompt, acp_session_id),
                                 ).await;
                                 let _ = match result {
                                     Ok(Ok(suggestions)) => {
@@ -2147,19 +2253,44 @@ impl App {
             ]));
             f.render_widget(title, area);
         } else if self.search_active {
-            let title = Paragraph::new(Line::from(vec![
-                Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled("⏎", hl),
-                Span::raw(" open  "),
-                Span::styled("Tab", hl),
-                Span::raw(" detail  "),
-                Span::styled("↑↓", hl),
-                Span::raw(" nav  "),
-                Span::styled("Esc", hl),
-                Span::raw(" quit search"),
-            ]));
-            f.render_widget(title, area);
+            // If the highlighted row has a pending AI suggestion, surface
+            // the y/n/e actions in the title bar — same as normal mode —
+            // so the user knows they can act on it without leaving search.
+            if let Some(sg) = self.pending_suggestion_for_selection().cloned() {
+                let pct = (sg.score * 100.0) as u32;
+                let title = Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        " 🤖 Suggestion ",
+                        Style::default().fg(Color::Black).bg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("  → {} ({}%)  ", sg.group, pct)),
+                    Span::styled("y", hl),
+                    Span::raw(" accept  "),
+                    Span::styled("n", hl),
+                    Span::raw(" dismiss  "),
+                    Span::styled("e", hl),
+                    Span::raw(" edit  "),
+                    Span::styled("⏎", hl),
+                    Span::raw(" open  "),
+                    Span::styled("Esc", hl),
+                    Span::raw(" quit search"),
+                ]));
+                f.render_widget(title, area);
+            } else {
+                let title = Paragraph::new(Line::from(vec![
+                    Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw("  "),
+                    Span::styled("⏎", hl),
+                    Span::raw(" open  "),
+                    Span::styled("Tab", hl),
+                    Span::raw(" detail  "),
+                    Span::styled("↑↓", hl),
+                    Span::raw(" nav  "),
+                    Span::styled("Esc", hl),
+                    Span::raw(" quit search"),
+                ]));
+                f.render_widget(title, area);
+            }
         } else {
             self.draw_normal_title_bar(f, area);
         }

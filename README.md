@@ -1,19 +1,44 @@
 # Agent CLI Session TUI
 
-A terminal UI for managing agent CLI sessions — **Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, **Kimi**, and extensible to others.
+**Agent view for every CLI** — manage background agent sessions across **Copilot CLI**, **Claude Code**, **Codex CLI**, **Qwen CLI**, **Gemini CLI**, **Kimi**, and more, in a single terminal screen.
 
 ![Agent CLI Session TUI demo](docs/agentTUI.gif)
 
+> **Similar to `claude agents`, but cross-CLI.** Claude Code's [Agent view](https://code.claude.com/docs/en/agent-view) gives you one screen for parallel background Claude sessions — what's working, what needs input, what's done. This project gives you the same view across **all** your agent CLIs at once: Copilot CLI, Claude Code, Codex CLI, Qwen, Gemini, Kimi. Same idea — *parallel agents, one supervisor process, one screen* — applied beyond a single vendor.
+
 ## Pain Points Solved
 
-- **Where is my running agent?** — press `Enter` on any 🟡 Waiting or 🟢 Running session to instantly focus its terminal tab
-- **Too many tabs** — see all sessions in one view with clear status badges
-- **Which needs my input?** — 🟡 Waiting vs 🟢 Running vs 💤 Resumable at a glance
+- **Where is my running agent?** — press `Enter` on any 🟡 *Needs input* or 🟢 *Working* session to attach / focus its terminal tab
+- **Too many tabs** — see every background session in one view with clear status badges
+- **Which needs my input?** — 🟡 *Needs input* vs 🟢 *Working* vs 💤 *Resumable* at a glance
 - **Finding that one session** — `/` to search with tiered ranking: exact match → fuzzy word match → ✨ semantic similarity (optional). Now indexes head, tail, compaction summaries, and your own messages — names buried inside long conversations show up in results
 - **Hundreds of sessions piling up** — assign sessions to thematic groups with `g`, view by group via `Shift+Tab`. Optional [AI auto-suggest](#ai-auto-grouping) proposes groups for you
 - **Close without worry** — shut down any session anytime; all sessions are discoverable and resumable later
 - **Resume after reboot** — session summaries, last activity, full last response help you decide what to pick up
-- **One place for all agents** — manage Copilot, Claude, Codex, Qwen, Gemini sessions from a single TUI
+- **One place for all agents** — manage Copilot, Claude, Codex, Qwen, Gemini, Kimi sessions from a single agent-view-style TUI
+
+## Agent view, multiplied
+
+[Claude Code's Agent view](https://code.claude.com/docs/en/agent-view) (`claude agents`) introduced a clean idea: one screen for every background Claude session you've dispatched — grouped by *Working*, *Needs input*, *Completed* — with peek-and-reply and attach. This project applies that same idea **across every agent CLI you use**, and fills gaps that Claude's view doesn't cover.
+
+| Capability                                       | `claude agents` (verified against [docs](https://code.claude.com/docs/en/agent-view)) | This TUI |
+|--------------------------------------------------|------------------------------|----------|
+| Single screen for parallel agent sessions        | ✅ Claude only               | ✅ Copilot · Claude · Codex · Qwen · Gemini · Kimi |
+| Group by state (Working / Needs input / Completed) | ✅                         | ✅ (🟢 / 🟡 / 💤) |
+| Attach to a running session                      | ✅ inline transcript         | ✅ focuses the existing Windows Terminal tab |
+| Dispatch new sessions                            | ✅ from view                 | ✅ `n` per provider |
+| Background supervisor                            | ✅ Claude's supervisor       | ✅ tokio-based supervisor, parallel provider scans |
+| Pin / reorder / rename sessions                  | ✅                           | — (use thematic groups instead) |
+| Pull-request status dots                         | ✅                           | — |
+| Auto-generated row summaries                     | ✅ Haiku-class model         | ✅ extracted from each CLI's own metadata + last response (no extra model calls) |
+| **🔍 Content search across transcripts**         | ❌ filter only — by agent name (`a:`), state (`s:`), or PR number (`#`); no content search across transcripts | ✅ exact + fuzzy + optional semantic — searches titles, summaries, compaction summaries, AND your own messages buried in long transcripts |
+| **🏷️ Thematic groups (user-defined names)**     | ❌ groups only by state or by directory (`Ctrl+S`); within a group you can pin / reorder / rename | ✅ press `g` to assign any session to a named group (e.g., "auth-rewrite", "perf-investigation"); browse by group via `Shift+Tab` |
+| **🤖 AI-suggested thematic groups**              | ❌                           | ✅ optional ACP-driven auto-grouping — analyzes your sessions and proposes thematic clusters you can accept / edit / dismiss |
+| No vendor lock-in                                | —                            | ✅ data-only providers, read each CLI's own state |
+
+The bottom three rows matter most when you have hundreds of accumulated sessions across multiple CLIs. Claude's Agent view assumes you remember what you dispatched recently or know the PR number; this TUI assumes you have a year of sessions and need to find one by something you said inside it.
+
+If you've enjoyed `claude agents` and wished it covered your other agent CLIs too — Copilot CLI, Codex CLI, Qwen, Gemini, Kimi — and if you've ever needed to *find* a session by something you said three weeks ago rather than scrolling, this tool fills both gaps.
 
 ## Architecture
 
@@ -39,15 +64,15 @@ No internal database. Providers read directly from each CLI's own state director
 
 ### Session States
 
-At a glance, every session shows one of three states:
+At a glance, every session shows one of three states. The mapping mirrors Claude Code's [Agent view](https://code.claude.com/docs/en/agent-view) terminology so users familiar with `claude agents` feel at home:
 
-| Badge | State | Meaning |
-|-------|-------|---------|
-| 🟢 | **Running** | Agent is actively working |
-| 🟡 | **Waiting** | Agent finished — waiting for your input |
-| 💤 | **Resumable** | Session stopped — can be resumed anytime |
+| Badge | This TUI    | Equivalent in `claude agents` | Meaning |
+|-------|-------------|-------------------------------|---------|
+| 🟢    | **Running** | *Working*                     | Agent is actively running tools or generating a response |
+| 🟡    | **Waiting** | *Needs input*                 | Agent finished — waiting for your reply / permission |
+| 💤    | **Resumable** | *Completed / Stopped*       | Session is not currently running — can be attached / resumed anytime |
 
-Press `Enter` on Running/Waiting to jump to its terminal tab. Press `Enter` on Resumable to relaunch it.
+Press `Enter` on *Running*/*Waiting* to attach (focuses the existing terminal tab). Press `Enter` on *Resumable* to relaunch the session.
 
 ## Keybindings
 

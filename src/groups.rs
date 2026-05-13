@@ -102,6 +102,17 @@ impl GroupManager {
 
     /// Assign a session to a group (human).
     pub fn assign_human(&mut self, session_key: &str, group: &str) {
+        self.assign_inner(session_key, group, "human");
+        self.save();
+    }
+
+    /// In-memory assignment without persisting. Used by the `--mock-data`
+    /// demo flow so the synthetic groups never pollute the real groups.json.
+    pub fn assign_in_memory(&mut self, session_key: &str, group: &str) {
+        self.assign_inner(session_key, group, "human");
+    }
+
+    fn assign_inner(&mut self, session_key: &str, group: &str, source: &str) {
         let entry = self
             .store
             .sessions
@@ -110,11 +121,10 @@ impl GroupManager {
         entry.groups.insert(
             group.to_string(),
             GroupAssignment {
-                source: "human".to_string(),
+                source: source.to_string(),
                 score: None,
             },
         );
-        self.save();
     }
 
     /// Remove a session from a specific group.

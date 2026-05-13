@@ -7,6 +7,7 @@ pub mod groups;
 pub mod acp;
 pub mod log;
 pub mod log_search;
+pub mod mock;
 pub mod models;
 pub mod process_info;
 pub mod provider;

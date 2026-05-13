@@ -131,19 +131,52 @@ impl LogSearcher {
 
     /// Query the index and return `session_id` → BM25 score.
     /// Returns empty map on empty/invalid query — never panics.
+    ///
+    /// Search strategy: try strict AND first (high precision). If that
+    /// returns nothing, retry with OR semantics (recall) so a single
+    /// unknown term doesn't nuke the entire query. Without this, a query
+    /// like "Iteration Review March Seana" (where "Seana" appears nowhere)
+    /// returns zero log hits — even though three of the four words match
+    /// strongly in a real session.
     pub fn search(&self, query_str: &str) -> HashMap<String, f32> {
         let trimmed = query_str.trim();
         if trimmed.is_empty() {
             return HashMap::new();
         }
         let searcher = self.reader.searcher();
-        let mut query_parser = QueryParser::for_index(&self.index, vec![self.content_field]);
-        query_parser.set_conjunction_by_default();
+
+        // First pass: strict AND. High precision, may return zero.
+        let mut and_parser = QueryParser::for_index(&self.index, vec![self.content_field]);
+        and_parser.set_conjunction_by_default();
+        let and_results = self.run_parsed_query(&searcher, &and_parser, trimmed);
+        if !and_results.is_empty() {
+            return and_results;
+        }
+
+        // Fallback: OR semantics. BM25 ranks sessions matching MORE query
+        // terms higher, so the noise penalty is small. Only triggers when
+        // strict AND found nothing.
+        let or_parser = QueryParser::for_index(&self.index, vec![self.content_field]);
+        crate::log::info(&format!(
+            "log search: AND returned 0 for '{}', falling back to OR",
+            trimmed
+        ));
+        self.run_parsed_query(&searcher, &or_parser, trimmed)
+    }
+
+    /// Parse + execute a query with the given parser. Returns
+    /// session_id → score, or empty map on parse/search error.
+    fn run_parsed_query(
+        &self,
+        searcher: &tantivy::Searcher,
+        query_parser: &QueryParser,
+        trimmed: &str,
+    ) -> HashMap<String, f32> {
         let query = match query_parser.parse_query(trimmed) {
             Ok(q) => q,
             Err(_) => {
-                // Fall back to an escaped verbatim search — tantivy's query parser
-                // rejects certain punctuation ("foo:bar", stray quotes, etc.).
+                // Tantivy rejects certain punctuation ("foo:bar", stray
+                // quotes, etc.) — escape and retry.
                 let escaped = escape_query(trimmed);
                 match query_parser.parse_query(&escaped) {
                     Ok(q) => q,
