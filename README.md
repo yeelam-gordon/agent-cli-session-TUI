@@ -11,7 +11,7 @@ Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is s
 | What we add | |
 |---|---|
 | **Multi-CLI** | One screen for Copilot · Claude · Codex · Qwen · Gemini · Kimi |
-| **Sees standalone sessions** | Picks up any agent process started outside this TUI. `claude agents` only sees sessions it backgrounded — start `claude` in another terminal and it's invisible until re-backgrounded |
+| **Sees every session, not just backgrounded ones** | Plain `claude` and `claude agents` are two disjoint pools today — sessions you ran with `claude` (interactive) never appear in `claude agents`, past or future, unless you explicitly background them. This TUI reads each CLI's own session directory, so every session shows up regardless of how it was started |
 | **Content search** | Exact → fuzzy → optional semantic, across titles, summaries, and your own messages mid-transcript |
 | **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
 | **AI-suggested groups** | Optional ACP-driven auto-clustering of ungrouped sessions |
