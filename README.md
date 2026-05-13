@@ -4,6 +4,16 @@
 
 ![Agent CLI Session TUI demo](docs/agentTUI.gif)
 
+## Pain Points Solved
+
+- **Where is my running agent?** — `Enter` on any 🟡 *Needs input* / 🟢 *Working* session to attach / focus its terminal tab
+- **Too many tabs** — every background session in one view with clear status badges
+- **Which needs my input?** — 🟡 *Needs input* vs 🟢 *Working* vs 💤 *Resumable* at a glance
+- **Finding that one session** — `/` to search: exact → fuzzy → ✨ semantic. Indexes titles, summaries, compaction summaries, and your own messages
+- **Hundreds of sessions piling up** — `g` to assign to groups; `Shift+Tab` to view by group; optional [AI auto-suggest](#ai-auto-grouping)
+- **Close without worry** — shut down anytime; all sessions remain discoverable + resumable
+- **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
+
 ## Beyond `claude agents`
 
 Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is single-vendor and only shows sessions **it** dispatched. This TUI does more:
@@ -15,15 +25,6 @@ Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is s
 | **Content search** | Exact → fuzzy → optional semantic, across titles, summaries, and your own messages mid-transcript |
 | **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
 | **AI-suggested groups** | Optional ACP-driven auto-clustering of ungrouped sessions |
-
-## Pain Points Solved
-
-- **Where is my running agent?** — `Enter` on any 🟡 *Needs input* / 🟢 *Working* session to attach / focus its terminal tab
-- **Too many tabs** — every background session in one view with clear status badges
-- **Which needs my input?** — 🟡 *Needs input* vs 🟢 *Working* vs 💤 *Resumable* at a glance
-- **Finding that one session** — `/` to search: exact → fuzzy → ✨ semantic. Indexes titles, summaries, compaction summaries, and your own messages
-- **Hundreds of sessions piling up** — `g` to assign to groups; `Shift+Tab` to view by group; optional [AI auto-suggest](#ai-auto-grouping)
-- **Close without worry** — shut down anytime; all sessions remain discoverable + resumable
 - **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
 
 ## Architecture
