@@ -38,8 +38,25 @@ use tantivy::{
 use crate::models::{ActivitySource, Session};
 use crate::provider::ProviderRegistry;
 
-/// Bytes of each log file to index (from the tail).
-const TAIL_BYTES: u64 = 256 * 1024;
+/// Per-source byte budget when reading head from a large log file.
+///
+/// For most session activity, the most recent content is in the tail and
+/// the topic/intent is set in the head. We index a generous head slice so
+/// queries like "iteration review" or "townhall question" — whose terms
+/// usually appear in the first user message and a few follow-ups — match
+/// even when the conversation has grown large.
+const HEAD_BYTES: u64 = 1_500_000;
+
+/// Per-source byte budget when reading tail from a large log file.
+const TAIL_BYTES: u64 = 500_000;
+
+/// Per-session whole-file ceiling. Files at or below this size are indexed
+/// in full — no head/tail split, no structured-extract layer. Files above
+/// this size fall back to head + tail + structured extraction (Copilot).
+///
+/// 2 MB covers 93% of typical sessions on a heavy user's machine, so the
+/// vast majority get full-content indexing without any chunking heuristics.
+const WHOLE_FILE_THRESHOLD: u64 = 2 * 1024 * 1024;
 
 /// Writer heap budget. tantivy requires >= 15 MB.
 const WRITER_HEAP_BYTES: usize = 20 * 1024 * 1024;
@@ -145,22 +162,12 @@ impl LogSearcher {
         }
         let searcher = self.reader.searcher();
 
-        // First pass: strict AND. High precision, may return zero.
-        let mut and_parser = QueryParser::for_index(&self.index, vec![self.content_field]);
-        and_parser.set_conjunction_by_default();
-        let and_results = self.run_parsed_query(&searcher, &and_parser, trimmed);
-        if !and_results.is_empty() {
-            return and_results;
-        }
-
-        // Fallback: OR semantics. BM25 ranks sessions matching MORE query
-        // terms higher, so the noise penalty is small. Only triggers when
-        // strict AND found nothing.
+        // Default to OR semantics: BM25 naturally ranks docs matching more
+        // query terms higher (so docs with all N terms outrank docs with
+        // N-1 terms by a wide margin), but unlike strict AND we don't
+        // *exclude* otherwise-strong matches just because one rare term
+        // (e.g. a misspelled name) doesn't appear anywhere in the corpus.
         let or_parser = QueryParser::for_index(&self.index, vec![self.content_field]);
-        crate::log::info(&format!(
-            "log search: AND returned 0 for '{}', falling back to OR",
-            trimmed
-        ));
         self.run_parsed_query(&searcher, &or_parser, trimmed)
     }
 
@@ -356,37 +363,48 @@ fn source_path(src: &ActivitySource) -> &Path {
     }
 }
 
-/// Read the head (first N bytes), tail (last N bytes), AND all compaction
-/// summaries from an events file. Compaction summaries (`session.compaction_complete`
-/// → `data.summaryContent`) are the densest source of searchable context in
-/// long Copilot sessions — ~10KB each, containing structured overviews of
-/// everything discussed before the compaction point.
+/// Read the head (first 1.5 MB), tail (last 500 KB), AND all compaction
+/// summaries from an events file. For files ≤ 2 MB the whole file is
+/// read in a single pass — no head/tail split needed.
+///
+/// Compaction summaries (`session.compaction_complete` → `data.summaryContent`)
+/// are the densest source of searchable context in long Copilot sessions —
+/// ~10 KB each, containing structured overviews of everything discussed
+/// before the compaction point.
 fn read_tail(path: &Path) -> Option<String> {
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
 
-    if len <= TAIL_BYTES * 2 {
-        // Small file — read the whole thing
+    if len <= WHOLE_FILE_THRESHOLD {
+        // Small/medium file — read the whole thing. This is the universal
+        // win for sessions across all providers: anything ≤ 2 MB gets its
+        // full content indexed, mid-conversation messages included.
         let mut buf = String::with_capacity(len as usize);
         f.read_to_string(&mut buf).ok()?;
         return Some(buf);
     }
 
-    let mut buf = String::with_capacity((TAIL_BYTES * 3) as usize);
+    let mut buf = String::with_capacity((HEAD_BYTES + TAIL_BYTES + 1024) as usize);
 
-    // Read head
-    let mut head_bytes = vec![0u8; TAIL_BYTES as usize];
-    let head_read = f.read(&mut head_bytes).ok()?;
-    buf.push_str(&String::from_utf8_lossy(&head_bytes[..head_read]));
+    // Read head (first 1.5 MB — captures topic-setting first messages and
+    // early conversation context, where queries by topic usually match).
+    // Use a `take()` adapter + `read_to_end` to guarantee we get up to
+    // HEAD_BYTES bytes — a single `read()` may return short on some
+    // platforms even when more data is available.
+    let mut head_bytes = Vec::with_capacity(HEAD_BYTES as usize);
+    (&mut f).take(HEAD_BYTES).read_to_end(&mut head_bytes).ok()?;
+    buf.push_str(&String::from_utf8_lossy(&head_bytes));
     buf.push_str("\n...\n");
 
-    // Scan entire file for high-value structured events (only if JSONL)
+    // Scan entire file for high-value structured events (Copilot-format only;
+    // other providers' extractors fall through cleanly with no work done).
     drop(f);
     if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
         extract_structured_summaries(path, &mut buf);
     }
 
-    // Read tail
+    // Read tail (last 500 KB — captures recent activity and most recent
+    // task/turn state, for "what was I just working on" queries).
     let mut f = fs::File::open(path).ok()?;
     f.seek(SeekFrom::Start(len - TAIL_BYTES)).ok()?;
     buf.push_str("\n...\n");

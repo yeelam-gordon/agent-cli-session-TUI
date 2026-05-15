@@ -43,9 +43,12 @@ extract:
 
   title:
     from: metadata
-    path: summary
+    path: name
     transforms: [strip_newlines, trim, "truncate:60"]
     fallback:
+      - from: metadata
+        path: summary
+        transforms: [strip_newlines, trim, "truncate:60"]
       - from: events
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
