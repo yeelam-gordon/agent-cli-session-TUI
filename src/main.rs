@@ -10,6 +10,7 @@ mod models;
 mod process_info;
 mod provider;
 mod search;
+mod search_eval;
 mod supervisor;
 mod ui;
 mod util;
@@ -274,6 +275,26 @@ async fn main() -> Result<()> {
             .and_then(|i| args.get(i + 1).and_then(|s| s.parse().ok()))
             .unwrap_or(20);
         run_search_bench(&registry, &config, &query, expect_id.as_deref(), top_n)?;
+        return Ok(());
+    }
+    // -----------------------------------------------------------------------
+
+    // --- search-eval IR benchmark -------------------------------------------
+    // `--search-eval [--queries path/to/queries.toml] [--report out.json]`
+    // runs a labeled query set through the same pipeline and reports
+    // MRR / P@1 / Recall@K aggregated overall and per category. Default
+    // queries file is `eval/search-queries.toml` (gitignored) with fallback
+    // to `eval/search-queries.example.toml`.
+    if args.iter().any(|a| a == "--search-eval") {
+        let queries: Option<String> = args
+            .iter()
+            .position(|a| a == "--queries")
+            .and_then(|i| args.get(i + 1).cloned());
+        let report: Option<String> = args
+            .iter()
+            .position(|a| a == "--report")
+            .and_then(|i| args.get(i + 1).cloned());
+        search_eval::run_search_eval(&registry, &config, queries.as_deref(), report.as_deref())?;
         return Ok(());
     }
     // -----------------------------------------------------------------------

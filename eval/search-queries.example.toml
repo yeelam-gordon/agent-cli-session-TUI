@@ -1,0 +1,42 @@
+# Search evaluation queries — EXAMPLE
+#
+# Copy this file to `eval/search-queries.toml` and replace with real queries
+# from your own session history. `eval/search-queries.toml` is gitignored
+# so private query text + real session ids stay local.
+#
+# Each [[query]] entry needs:
+#   text     = the query string you'd type in the TUI
+#   target   = the expected session id (UUID for Copilot, hash for Claude, etc.)
+#   category = bucket for per-category aggregation
+#   notes    = optional human note, not used in scoring
+#
+# Suggested categories — keep coverage balanced across these so the report
+# tells you where strengths and weaknesses live:
+#
+#   exact-title         query is verbatim (or near-verbatim) of the title
+#   partial-recall      most words right, some missing or out of order
+#   typo                misspelled or phonetic spelling
+#   semantic-only       target uses different vocabulary; semantic only
+#   keyword             tool/library name lookup (e.g. "ratatui mouse")
+#   person-name         queries with a teammate's name
+#   time-fuzzy          "last week", "this morning", etc.
+#
+# Run with:
+#   agent-session-tui --search-eval
+#   agent-session-tui --search-eval --report eval/runs/<sha>.json
+
+[[query]]
+text     = "rust tantivy index threshold"
+target   = "00000000-0000-0000-0000-000000000000"
+category = "keyword"
+notes    = "Replace target with a real session id from your own data."
+
+[[query]]
+text     = "memo summarizer prototype"
+target   = "00000000-0000-0000-0000-000000000001"
+category = "exact-title"
+
+[[query]]
+text     = "yaml provider config refactor"
+target   = "00000000-0000-0000-0000-000000000002"
+category = "partial-recall"

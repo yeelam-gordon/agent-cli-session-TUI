@@ -12,6 +12,7 @@ pub mod models;
 pub mod process_info;
 pub mod provider;
 pub mod search;
+pub mod search_eval;
 pub mod supervisor;
 pub mod testing;
 pub mod ui;

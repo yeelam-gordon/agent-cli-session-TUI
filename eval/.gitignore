@@ -1,0 +1,6 @@
+# Private query set with real session ids and topic words.
+# Generated from eval/search-queries.example.toml — replaced with real data.
+search-queries.toml
+
+# Per-run JSON reports — large, noisy in diffs, regenerate on demand.
+runs/

@@ -518,3 +518,86 @@ fn escape_query(q: &str) -> String {
     }
     out
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Regression for `WHOLE_FILE_THRESHOLD` (raised 512 KB → 2 MB in commit
+    /// 50d1a4d). A small file must be returned in full, not head/tail-split.
+    #[test]
+    fn read_tail_returns_whole_small_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("small.jsonl");
+        let body = "first line\nsecond line\n".repeat(100);
+        std::fs::write(&path, &body).unwrap();
+        let out = read_tail(&path).expect("read_tail should succeed");
+        assert_eq!(out, body, "small file must be returned verbatim");
+    }
+
+    /// Regression for the short-read bug fixed in 50d1a4d. Previously the
+    /// big-file branch used `f.read(&mut head_bytes)` which is permitted to
+    /// return fewer bytes than requested. Now it uses `take().read_to_end()`,
+    /// which loops until EOF or the cap. We verify head + tail contain the
+    /// expected markers placed at known offsets in a 3 MB file.
+    #[test]
+    fn read_tail_big_file_captures_head_and_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // ~3 MB total: HEAD_TOKEN near start, filler, TAIL_TOKEN near end.
+        write!(f, "HEAD_TOKEN_AT_START\n").unwrap();
+        let filler = "x".repeat(3 * 1024 * 1024);
+        f.write_all(filler.as_bytes()).unwrap();
+        write!(f, "\nTAIL_TOKEN_AT_END\n").unwrap();
+        drop(f);
+        let out = read_tail(&path).expect("read_tail should succeed");
+        assert!(
+            out.contains("HEAD_TOKEN_AT_START"),
+            "head slice must include the start marker"
+        );
+        assert!(
+            out.contains("TAIL_TOKEN_AT_END"),
+            "tail slice must include the end marker"
+        );
+        // Sanity: head + tail strictly smaller than the whole file (skipped middle).
+        assert!(
+            (out.len() as u64) < (HEAD_BYTES + TAIL_BYTES + 1024 + 1024),
+            "big-file branch must NOT return the whole file"
+        );
+    }
+
+    /// Regression for the AND-default-killed-recall bug (50d1a4d). When the
+    /// query contains a term not present in any indexed document, the search
+    /// must still return matches on the other terms — not silently drop them.
+    #[test]
+    fn search_uses_or_semantics_so_missing_term_does_not_kill_recall() {
+        let tmp = tempfile::tempdir().unwrap();
+        let searcher = LogSearcher::open_or_create(tmp.path()).expect("open index");
+        // Hand-add one doc via the searcher's own writer mutex — opening a
+        // second writer on the same Index would deadlock on tantivy's lock.
+        {
+            let mut writer = searcher.writer.lock().unwrap();
+            let mut doc = TantivyDocument::default();
+            doc.add_text(searcher.session_id_field, "session-1");
+            doc.add_text(
+                searcher.content_field,
+                "alpha beta gamma delta epsilon zeta",
+            );
+            writer.add_document(doc).expect("add doc");
+            writer.commit().expect("commit");
+        }
+        searcher.reader.reload().expect("reload");
+
+        // Two of three terms exist; "xyzzy" does not appear anywhere.
+        // Strict AND would return 0; OR-default must still find session-1.
+        let hits = searcher.search("alpha beta xyzzy");
+        assert!(
+            hits.contains_key("session-1"),
+            "OR-default must surface docs matching ≥1 query term, got hits: {:?}",
+            hits
+        );
+    }
+}
