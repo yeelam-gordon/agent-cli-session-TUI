@@ -1024,16 +1024,23 @@ pub struct RrfScoreBreakdown {
 /// so each adjustment shows up in diffs and is bench-comparable.
 // Tuning constants — values established by `--search-eval` against the
 // real query set. Trials documented in eval/runs/rrf-v{1..4}.json:
-//   v1 (k=60, title=2.0): MRR 0.775, P@1 66.7%   ← CURRENT / BEST
+//   v1 (k=60, title=2.0): MRR 0.775, P@1 66.7%   ← but caught keyword regression
 //   v2 (k=60, title=3.0): MRR 0.741, P@1 60.0%   ← over-weights title
 //   v3 (k=10, title=2.0): MRR 0.750, P@1 63.3%   ← top-rank too dominant
 //   v4 (k=60, title=1.5): MRR 0.697, P@1 53.3%   ← under-weights title
+//   v5 (v1 + EXACT_TITLE_BOOST L0 shortcut): CURRENT — fixes keyword regression
 const RRF_K: f32 = 60.0;
 const RRF_W_TITLE: f32 = 2.0;
 const RRF_W_BM25: f32 = 1.0;
 const RRF_W_SEM: f32 = 1.0;
 const RRF_SEM_THRESHOLD: f32 = 0.3;
 const RRF_STATE_TIE: u32 = 100;
+/// Bonus when the query appears verbatim as a substring of the session's
+/// title. Much larger than any plausible base RRF * 1e6 score (top is ~3
+/// layers × 1/(60+1) × 1.0 × 1e6 ≈ 49000 in practice) so a verbatim title
+/// match always wins. The user-perceived rule is: "if you can recall the
+/// title's actual words, the system must reward that, not punish it."
+const EXACT_TITLE_BOOST: u32 = 2_000_000;
 
 /// Compute only the best lexical tier score for a session (same formula as
 /// the field-tier portion of `score_breakdown`, ignoring BM25 / semantic /
@@ -1189,7 +1196,23 @@ pub fn ranked_search_rrf(
             // keep a floor of 0.7 so recency only nudges, never dominates.
             let recency = recency_multiplier(&s.updated_at);
             let softened = 0.7 + 0.3 * recency;
-            let base_final = (rrf * softened * 1_000_000.0) as u32;
+            let mut base_final = (rrf * softened * 1_000_000.0) as u32;
+
+            // **Exact-title-substring shortcut (L0).** If the entire query
+            // appears verbatim in this session's title, the user typed
+            // (or nearly typed) the title — they MUST get rank 1.
+            // Without this, RRF rank-1-in-lexical contributes only
+            // ~0.033 (= 2.0 / 61), which can be beaten by mediocre
+            // competitors that appear in BM25 + semantic.
+            //
+            // The "user remembers the word correctly" must never be
+            // penalized vs. the "user remembers a related word" path.
+            // This regression was caught by the eval harness on the
+            // "vs toolset" query and is regression-tested below.
+            let title_lower = s.title.to_lowercase();
+            if !query_lower.is_empty() && title_lower.contains(&query_lower) {
+                base_final = base_final.saturating_add(EXACT_TITLE_BOOST);
+            }
 
             // State-label match is a small additive tie-breaker — not a
             // full RRF layer (a state-word query is rare and a state match
@@ -1244,6 +1267,56 @@ mod tests {
     use super::*;
     use crate::models::*;
     use std::path::PathBuf;
+
+    /// Regression: a session whose title contains the query verbatim must
+    /// rank #1 in RRF, even when a competing session has stronger BM25 +
+    /// semantic signals. Caught by the eval harness on "vs toolset", where
+    /// the RRF rank-1-in-lexical contribution (~0.033) was beaten by a
+    /// competitor that won BM25 + semantic.
+    /// "User remembering the actual word must not be penalized." — user
+    /// feedback that drove the EXACT_TITLE_BOOST L0 shortcut.
+    #[test]
+    fn rrf_exact_title_substring_locks_to_rank_one() {
+        let mut target = make_session("VS Toolset Resolver", "fix C++ toolset", "copilot");
+        target.id = "target".into();
+        let mut competitor = make_session(
+            "Some Other Session",
+            "discusses vs toolset versions in detail",
+            "copilot",
+        );
+        competitor.id = "competitor".into();
+        let sessions = vec![target.clone(), competitor.clone()];
+
+        // Give the competitor much higher BM25 + semantic so additive
+        // RRF would put it first. The exact-title boost on `target` must
+        // override that.
+        let mut bm25 = std::collections::HashMap::new();
+        bm25.insert("target".to_string(), 1.0);
+        bm25.insert("competitor".to_string(), 20.0);
+        let mut sem = std::collections::HashMap::new();
+        sem.insert("target".to_string(), 0.30);
+        sem.insert("competitor".to_string(), 0.80);
+
+        let ranked = ranked_search_rrf(&sessions, "vs toolset", &bm25, &sem);
+        assert!(!ranked.is_empty(), "RRF returned no results");
+        let top_id = &sessions[ranked[0].0].id;
+        assert_eq!(
+            top_id, "target",
+            "exact-title substring match must lock to rank 1; got top={:?}",
+            top_id
+        );
+    }
+
+    /// The boost must NOT fire when the query is empty (would otherwise
+    /// match every session via `"".contains_in(title)`).
+    #[test]
+    fn rrf_empty_query_returns_no_results() {
+        let s = make_session("Anything", "anything", "copilot");
+        let bm25 = std::collections::HashMap::new();
+        let sem = std::collections::HashMap::new();
+        let ranked = ranked_search_rrf(&[s], "", &bm25, &sem);
+        assert!(ranked.is_empty(), "empty query must yield zero results");
+    }
 
     fn make_session(title: &str, summary: &str, provider: &str) -> Session {
         Session {
