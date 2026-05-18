@@ -968,11 +968,355 @@ impl SearchResult {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+//  Reciprocal Rank Fusion (RRF) — experimental hybrid scoring on this branch
+// ──────────────────────────────────────────────────────────────────────────
+//
+// Rationale: the additive `score_breakdown` above suffers from score-scale
+// incompatibility — title-tier returns 0–1000, BM25 0–25 (clamped 50–1200),
+// semantic 0–1 (scaled to 0–800). The downstream max/saturating_add ops
+// produce a single number, but the magnitudes never balance cleanly: a tiny
+// fuzzy or semantic signal is either crushed to the BM25 floor or drowned
+// by a title-tier mismatch.
+//
+// RRF sidesteps this: each layer (lexical, BM25, semantic) ranks its own
+// candidates by raw score, and final ranking comes from the WEIGHTED SUM
+// of reciprocal ranks across layers. Score magnitudes never enter the
+// fusion. A doc that ranks #1 in any layer is guaranteed to be a strong
+// candidate; a doc that ranks high in multiple layers wins decisively.
+//
+// Following critique pre-implementation:
+//   - Only docs with positive signal enter a layer (no zero-score ranks).
+//   - Title layer is WEIGHTED 2× (the strongest single-layer winner here).
+//   - Recency softened: `rrf * (0.7 + 0.3 * recency)` — not pure multiplication.
+//   - State-label match is a small additive tie-breaker, not a 4th layer.
+//   - Fuzzy/typo layer is deliberately NOT included in this first pass:
+//     measure the pure-RRF result first, add fuzzy as L4 only if needed.
+
+/// Per-layer rank + score for a single session under RRF scoring. Used by
+/// the `--search-bench` / `--search-eval` diagnostic paths to explain why
+/// a session ranked where it did.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Fields read by future --search-bench --rrf diagnostic output.
+pub struct RrfScoreBreakdown {
+    /// Discretized final score (RRF × softened recency × 1e6, plus tie
+    /// breakers). Sort by this descending to get the ranking.
+    pub final_score: u32,
+    /// Raw RRF score (sum of weighted reciprocal ranks).
+    pub rrf_raw: f32,
+    /// Standard recency multiplier (same function as additive scoring).
+    pub recency: f32,
+    /// Rank in the lexical layer (None if no positive lexical match).
+    pub title_rank: Option<usize>,
+    /// Rank in the BM25 log-index layer (None if no BM25 hit).
+    pub bm25_rank: Option<usize>,
+    /// Rank in the semantic layer (None if sim < 0.3).
+    pub semantic_rank: Option<usize>,
+    /// Best per-field tier score (the existing 0–1000 magnitude) for diag.
+    pub title_score: u32,
+    /// Raw BM25 score from tantivy.
+    pub bm25_raw: f32,
+    /// Raw cosine similarity from the semantic plugin.
+    pub semantic_sim: f32,
+}
+
+/// RRF tuning constants. Documented as constants (not magic numbers in code)
+/// so each adjustment shows up in diffs and is bench-comparable.
+// Tuning constants — values established by `--search-eval` against the
+// real query set. Trials documented in eval/runs/rrf-v{1..4}.json:
+//   v1 (k=60, title=2.0): MRR 0.775, P@1 66.7%   ← but caught keyword regression
+//   v2 (k=60, title=3.0): MRR 0.741, P@1 60.0%   ← over-weights title
+//   v3 (k=10, title=2.0): MRR 0.750, P@1 63.3%   ← top-rank too dominant
+//   v4 (k=60, title=1.5): MRR 0.697, P@1 53.3%   ← under-weights title
+//   v5 (v1 + EXACT_TITLE_BOOST L0 shortcut): CURRENT — fixes keyword regression
+const RRF_K: f32 = 60.0;
+const RRF_W_TITLE: f32 = 2.0;
+const RRF_W_BM25: f32 = 1.0;
+const RRF_W_SEM: f32 = 1.0;
+const RRF_SEM_THRESHOLD: f32 = 0.3;
+const RRF_STATE_TIE: u32 = 100;
+/// Bonus when the query appears verbatim as a substring of the session's
+/// title. Much larger than any plausible base RRF * 1e6 score (top is ~3
+/// layers × 1/(60+1) × 1.0 × 1e6 ≈ 49000 in practice) so a verbatim title
+/// match always wins. The user-perceived rule is: "if you can recall the
+/// title's actual words, the system must reward that, not punish it."
+const EXACT_TITLE_BOOST: u32 = 2_000_000;
+
+/// Compute only the best lexical tier score for a session (same formula as
+/// the field-tier portion of `score_breakdown`, ignoring BM25 / semantic /
+/// state / recency). Used to rank sessions in the RRF lexical layer.
+fn best_lexical_tier_score(session: &Session, query: &str, query_words: &[&str]) -> u32 {
+    let cwd_string = session.cwd.to_string_lossy().to_string();
+    let fields: [(&str, u32); 5] = [
+        (session.title.as_str(), 1000),
+        (session.provider_session_id.as_str(), 800),
+        (session.summary.as_str(), 600),
+        (cwd_string.as_str(), 400),
+        (session.provider_name.as_str(), 300),
+    ];
+
+    let mut concat_lower = String::new();
+    for (f, _) in &fields {
+        concat_lower.push(' ');
+        concat_lower.push_str(&f.to_lowercase());
+    }
+    let total_distinct_hits = query_words
+        .iter()
+        .filter(|w| w.len() >= 3 && concat_lower.contains(*w))
+        .count() as u32;
+    let tier2b_eligible = if query_words.len() == 1 {
+        true
+    } else {
+        total_distinct_hits >= 2
+    };
+
+    let mut best: u32 = 0;
+    for (field, base) in fields.iter() {
+        let field_lower = field.to_lowercase();
+        if field_lower.contains(query) {
+            best = best.max(*base);
+        } else if query_words.len() > 1 && query_words.iter().all(|w| field_lower.contains(w)) {
+            best = best.max(base / 2);
+        } else if tier2b_eligible {
+            let word_hits: u32 = query_words
+                .iter()
+                .filter(|w| w.len() >= 3 && field_lower.contains(*w))
+                .count() as u32;
+            if word_hits > 0 {
+                best = best.max(base / 4 + word_hits * 50);
+            }
+        }
+    }
+    best
+}
+
+/// Rank sessions via RRF over (lexical, BM25, semantic) layers.
+///
+/// Returns sessions in descending order of RRF-final-score, paired with a
+/// breakdown for diagnostic output. Sessions with zero signal in every
+/// layer are excluded entirely (they cannot rank — they have no anchor).
+pub fn ranked_search_rrf(
+    sessions: &[Session],
+    query: &str,
+    log_matches: &std::collections::HashMap<String, f32>,
+    sem_scores: &std::collections::HashMap<String, f32>,
+) -> Vec<(usize, RrfScoreBreakdown)> {
+    if query.is_empty() || sessions.is_empty() {
+        return Vec::new();
+    }
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Build per-layer scored lists. Each entry: (session_index, raw_score).
+    // Only docs with a real positive signal enter a layer — that prevents
+    // RRF from credit-assigning "rank 700 of 700" to docs that don't even
+    // have a hit, which would otherwise let recency / tie-breakers
+    // dominate irrelevant results.
+
+    let mut lex: Vec<(usize, u32)> = sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let score = best_lexical_tier_score(s, &query_lower, &query_words);
+            if score > 0 { Some((i, score)) } else { None }
+        })
+        .collect();
+    lex.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut bm25: Vec<(usize, f32)> = sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            log_matches
+                .get(&s.id)
+                .copied()
+                .filter(|v| *v > 0.0)
+                .map(|v| (i, v))
+        })
+        .collect();
+    bm25.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut sem: Vec<(usize, f32)> = sessions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            sem_scores
+                .get(&s.id)
+                .copied()
+                .filter(|v| *v >= RRF_SEM_THRESHOLD)
+                .map(|v| (i, v))
+        })
+        .collect();
+    sem.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Build session_idx → rank maps (rank is 1-based to match the RRF paper).
+    let lex_ranks: std::collections::HashMap<usize, usize> = lex
+        .iter()
+        .enumerate()
+        .map(|(rank, (idx, _))| (*idx, rank + 1))
+        .collect();
+    let bm25_ranks: std::collections::HashMap<usize, usize> = bm25
+        .iter()
+        .enumerate()
+        .map(|(rank, (idx, _))| (*idx, rank + 1))
+        .collect();
+    let sem_ranks: std::collections::HashMap<usize, usize> = sem
+        .iter()
+        .enumerate()
+        .map(|(rank, (idx, _))| (*idx, rank + 1))
+        .collect();
+
+    // Union of candidates — any session that appears in any layer.
+    let mut all: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    all.extend(lex_ranks.keys());
+    all.extend(bm25_ranks.keys());
+    all.extend(sem_ranks.keys());
+
+    let mut scored: Vec<(usize, RrfScoreBreakdown)> = all
+        .into_iter()
+        .map(|idx| {
+            let s = &sessions[idx];
+            let title_rank = lex_ranks.get(&idx).copied();
+            let bm25_rank = bm25_ranks.get(&idx).copied();
+            let semantic_rank = sem_ranks.get(&idx).copied();
+
+            let mut rrf: f32 = 0.0;
+            if let Some(r) = title_rank {
+                rrf += RRF_W_TITLE / (RRF_K + r as f32);
+            }
+            if let Some(r) = bm25_rank {
+                rrf += RRF_W_BM25 / (RRF_K + r as f32);
+            }
+            if let Some(r) = semantic_rank {
+                rrf += RRF_W_SEM / (RRF_K + r as f32);
+            }
+
+            // Recency softened: pure multiplication crushes RRF (values are
+            // already in the 0.01–0.06 range) when a session is old. We
+            // keep a floor of 0.7 so recency only nudges, never dominates.
+            let recency = recency_multiplier(&s.updated_at);
+            let softened = 0.7 + 0.3 * recency;
+            let mut base_final = (rrf * softened * 1_000_000.0) as u32;
+
+            // **Exact-title-substring shortcut (L0).** If the entire query
+            // appears verbatim in this session's title, the user typed
+            // (or nearly typed) the title — they MUST get rank 1.
+            // Without this, RRF rank-1-in-lexical contributes only
+            // ~0.033 (= 2.0 / 61), which can be beaten by mediocre
+            // competitors that appear in BM25 + semantic.
+            //
+            // The "user remembers the word correctly" must never be
+            // penalized vs. the "user remembers a related word" path.
+            // This regression was caught by the eval harness on the
+            // "vs toolset" query and is regression-tested below.
+            let title_lower = s.title.to_lowercase();
+            if !query_lower.is_empty() && title_lower.contains(&query_lower) {
+                base_final = base_final.saturating_add(EXACT_TITLE_BOOST);
+            }
+
+            // State-label match is a small additive tie-breaker — not a
+            // full RRF layer (a state-word query is rare and a state match
+            // is too coarse to deserve equal weight with content layers).
+            let label_lower = s.state.label().to_lowercase();
+            let state_match = label_lower.contains(&query_lower)
+                || query_words.iter().any(|w| label_lower.contains(w));
+            let final_score = if state_match {
+                base_final.saturating_add(RRF_STATE_TIE)
+            } else {
+                base_final
+            };
+
+            // Diagnostic snapshot of raw per-layer signals.
+            let title_score = lex
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, score)| *score)
+                .unwrap_or(0);
+            let bm25_raw = log_matches.get(&s.id).copied().unwrap_or(0.0);
+            let semantic_sim = sem_scores.get(&s.id).copied().unwrap_or(0.0);
+
+            (
+                idx,
+                RrfScoreBreakdown {
+                    final_score,
+                    rrf_raw: rrf,
+                    recency,
+                    title_rank,
+                    bm25_rank,
+                    semantic_rank,
+                    title_score,
+                    bm25_raw,
+                    semantic_sim,
+                },
+            )
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.1.final_score
+            .cmp(&a.1.final_score)
+            // Deterministic tie-break: lexical score first, then session id.
+            .then_with(|| b.1.title_score.cmp(&a.1.title_score))
+            .then_with(|| sessions[a.0].id.cmp(&sessions[b.0].id))
+    });
+    scored
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::*;
     use std::path::PathBuf;
+
+    /// Regression: a session whose title contains the query verbatim must
+    /// rank #1 in RRF, even when a competing session has stronger BM25 +
+    /// semantic signals. Caught by the eval harness on "vs toolset", where
+    /// the RRF rank-1-in-lexical contribution (~0.033) was beaten by a
+    /// competitor that won BM25 + semantic.
+    /// "User remembering the actual word must not be penalized." — user
+    /// feedback that drove the EXACT_TITLE_BOOST L0 shortcut.
+    #[test]
+    fn rrf_exact_title_substring_locks_to_rank_one() {
+        let mut target = make_session("VS Toolset Resolver", "fix C++ toolset", "copilot");
+        target.id = "target".into();
+        let mut competitor = make_session(
+            "Some Other Session",
+            "discusses vs toolset versions in detail",
+            "copilot",
+        );
+        competitor.id = "competitor".into();
+        let sessions = vec![target.clone(), competitor.clone()];
+
+        // Give the competitor much higher BM25 + semantic so additive
+        // RRF would put it first. The exact-title boost on `target` must
+        // override that.
+        let mut bm25 = std::collections::HashMap::new();
+        bm25.insert("target".to_string(), 1.0);
+        bm25.insert("competitor".to_string(), 20.0);
+        let mut sem = std::collections::HashMap::new();
+        sem.insert("target".to_string(), 0.30);
+        sem.insert("competitor".to_string(), 0.80);
+
+        let ranked = ranked_search_rrf(&sessions, "vs toolset", &bm25, &sem);
+        assert!(!ranked.is_empty(), "RRF returned no results");
+        let top_id = &sessions[ranked[0].0].id;
+        assert_eq!(
+            top_id, "target",
+            "exact-title substring match must lock to rank 1; got top={:?}",
+            top_id
+        );
+    }
+
+    /// The boost must NOT fire when the query is empty (would otherwise
+    /// match every session via `"".contains_in(title)`).
+    #[test]
+    fn rrf_empty_query_returns_no_results() {
+        let s = make_session("Anything", "anything", "copilot");
+        let bm25 = std::collections::HashMap::new();
+        let sem = std::collections::HashMap::new();
+        let ranked = ranked_search_rrf(&[s], "", &bm25, &sem);
+        assert!(ranked.is_empty(), "empty query must yield zero results");
+    }
 
     fn make_session(title: &str, summary: &str, provider: &str) -> Session {
         Session {
