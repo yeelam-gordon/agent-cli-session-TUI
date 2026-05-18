@@ -294,7 +294,8 @@ async fn main() -> Result<()> {
             .iter()
             .position(|a| a == "--report")
             .and_then(|i| args.get(i + 1).cloned());
-        search_eval::run_search_eval(&registry, &config, queries.as_deref(), report.as_deref())?;
+        let use_rrf = args.iter().any(|a| a == "--rrf");
+        search_eval::run_search_eval(&registry, &config, queries.as_deref(), report.as_deref(), use_rrf)?;
         return Ok(());
     }
     // -----------------------------------------------------------------------
