@@ -156,11 +156,10 @@ pub fn run_search_eval(
     config: &AppConfig,
     queries_path: Option<&str>,
     report_path: Option<&str>,
-    use_rrf: bool,
 ) -> Result<()> {
     let qpath = resolve_queries_path(queries_path)?;
     println!("Eval queries: {}", qpath.display());
-    println!("Scorer: {}", if use_rrf { "RRF (experimental)" } else { "additive (default)" });
+    println!("Scorer: RRF (default)");
 
     let toml_text = std::fs::read_to_string(&qpath)
         .with_context(|| format!("reading {}", qpath.display()))?;
@@ -217,7 +216,7 @@ pub fn run_search_eval(
     // Run each query through the same ranking pipeline as the live TUI.
     let mut results: Vec<QueryResult> = Vec::with_capacity(qfile.queries.len());
     for q in &qfile.queries {
-        let result = score_one_query(&all_sessions, &searcher, &mut sem, sem_ready, q, use_rrf);
+        let result = score_one_query(&all_sessions, &searcher, &mut sem, sem_ready, q);
         results.push(result);
     }
 
@@ -264,13 +263,13 @@ pub fn run_search_eval(
 }
 
 /// Run a single query end-to-end and locate the target's rank.
+/// Uses the RRF pipeline — same as the live TUI's `ranked_search_default`.
 fn score_one_query(
     all_sessions: &[models::Session],
     searcher: &log_search::LogSearcher,
     sem: &mut search::SemanticPlugin,
     sem_ready: bool,
     q: &QuerySpec,
-    use_rrf: bool,
 ) -> QueryResult {
     let log_matches = searcher.search(&q.text);
     let sem_scores: HashMap<String, f32> = if sem_ready && q.text.len() >= 5 {
@@ -279,41 +278,15 @@ fn score_one_query(
         HashMap::new()
     };
 
-    let (rank, top1_title) = if use_rrf {
-        let scored = search::ranked_search_rrf(all_sessions, &q.text, &log_matches, &sem_scores);
-        let rank = scored
-            .iter()
-            .position(|(i, _)| all_sessions[*i].provider_session_id == q.target)
-            .map(|p| p + 1);
-        let top1_title = scored
-            .first()
-            .map(|(i, _)| crate::util::truncate_str_safe(&all_sessions[*i].title, 60))
-            .unwrap_or_default();
-        (rank, top1_title)
-    } else {
-        let query_lower = q.text.to_lowercase();
-        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-        let mut scored: Vec<(usize, search::ScoreBreakdown)> = all_sessions
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let log_score = log_matches.get(&s.id).copied();
-                let sem = sem_scores.get(&s.id).copied().unwrap_or(0.0);
-                let bd = search::score_breakdown(s, &query_lower, &query_words, log_score, sem);
-                (i, bd)
-            })
-            .collect();
-        scored.sort_by_key(|(_, bd)| std::cmp::Reverse(bd.final_score));
-        let rank = scored
-            .iter()
-            .position(|(i, _)| all_sessions[*i].provider_session_id == q.target)
-            .map(|p| p + 1);
-        let top1_title = scored
-            .first()
-            .map(|(i, _)| crate::util::truncate_str_safe(&all_sessions[*i].title, 60))
-            .unwrap_or_default();
-        (rank, top1_title)
-    };
+    let scored = search::ranked_search_rrf(all_sessions, &q.text, &log_matches, &sem_scores);
+    let rank = scored
+        .iter()
+        .position(|(i, _)| all_sessions[*i].provider_session_id == q.target)
+        .map(|p| p + 1);
+    let top1_title = scored
+        .first()
+        .map(|(i, _)| crate::util::truncate_str_safe(&all_sessions[*i].title, 60))
+        .unwrap_or_default();
 
     let reciprocal_rank = rank.map(|r| 1.0 / r as f32).unwrap_or(0.0);
 

@@ -15,6 +15,10 @@ use crate::models::Session;
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub index: usize,
+    /// Final rank score from the live ranker. Unused by the TUI itself
+    /// (which only consumes `.index`) but kept on the public struct for
+    /// callers / tests that want to inspect ordering.
+    #[allow(dead_code)]
     pub score: u32,
     /// Whether this result got a semantic similarity boost.
     pub semantic_match: bool,
@@ -32,6 +36,14 @@ pub struct SearchResult {
 /// A recency multiplier is applied to every session's final score so that
 /// "resume what I was working on last week" naturally outranks a year-old hit
 /// of similar match quality.
+/// **LEGACY — additive scoring path.** No longer called from the live TUI
+/// (RRF via `ranked_search_default` is the default since the v0.4 merge).
+/// Kept here because its unit-test suite documents the expected ranking
+/// semantics across tiers and the `--search-bench` diagnostic tool still
+/// uses `score_breakdown` (defined below) to explain per-session score
+/// composition. Slated for removal once `--search-bench` is migrated to
+/// emit per-layer RRF rank breakdowns instead.
+#[allow(dead_code)]
 pub fn ranked_search(
     sessions: &[Session],
     query: &str,
@@ -267,6 +279,9 @@ fn recency_multiplier(updated_at: &str) -> f32 {
 
 /// Score a single session against a query. `log_score` is the tantivy BM25
 /// score from the full-text log index, if the session matched.
+/// **LEGACY** — additive per-session score, used only by `ranked_search`
+/// above. Slated for removal alongside it.
+#[allow(dead_code)]
 fn score_session(
     session: &Session,
     query: &str,
@@ -1260,6 +1275,56 @@ pub fn ranked_search_rrf(
             .then_with(|| sessions[a.0].id.cmp(&sessions[b.0].id))
     });
     scored
+}
+
+/// Live-TUI entry point. Wraps `ranked_search_rrf` with the same signature
+/// as the legacy `ranked_search` so callers don't need to know the
+/// fusion details.
+///
+/// Builds the semantic scores from the (optional) plugin, takes BM25
+/// results from the (optional) log index, then runs RRF. Returns
+/// `SearchResult`s in descending rank order with `semantic_match=true`
+/// for any session that contributed via the semantic layer.
+///
+/// This is the function the live TUI uses. The legacy `ranked_search`
+/// remains for unit tests that pin specific additive-score behavior.
+pub fn ranked_search_default(
+    sessions: &[Session],
+    query: &str,
+    semantic: Option<&SemanticPlugin>,
+    log_matches: Option<&std::collections::HashMap<String, f32>>,
+) -> Vec<SearchResult> {
+    if query.is_empty() {
+        return (0..sessions.len())
+            .map(|i| SearchResult { index: i, score: 0, semantic_match: false })
+            .collect();
+    }
+
+    // Semantic scores: query the plugin's cache when query is long enough,
+    // mirroring the threshold gate from `ranked_search` so live-TUI behavior
+    // around short queries stays consistent.
+    let sem_scores: std::collections::HashMap<String, f32> = if query.len() >= 5 {
+        semantic
+            .filter(|s| s.is_ready())
+            .map(|s| s.search_cached(query, 0.0).into_iter().collect())
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Empty log_matches map when caller didn't run the log index.
+    let empty_log_matches = std::collections::HashMap::new();
+    let log_matches = log_matches.unwrap_or(&empty_log_matches);
+
+    let scored = ranked_search_rrf(sessions, query, log_matches, &sem_scores);
+    scored
+        .into_iter()
+        .map(|(idx, bd)| SearchResult {
+            index: idx,
+            score: bd.final_score,
+            semantic_match: bd.semantic_rank.is_some(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

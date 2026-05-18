@@ -641,7 +641,7 @@ impl App {
                 .map(|ls| ls.search(&query))
                 .unwrap_or_default();
             let log_ref = if log_matches.is_empty() { None } else { Some(&log_matches) };
-            let results = crate::search::ranked_search(view, &query, sem_ref, log_ref);
+            let results = crate::search::ranked_search_default(view, &query, sem_ref, log_ref);
             // Only update semantic matches if we actually ran semantic search
             if sem_ref.is_some() {
                 self.semantic_matches.clear();

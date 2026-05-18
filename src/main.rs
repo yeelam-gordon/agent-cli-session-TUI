@@ -281,10 +281,10 @@ async fn main() -> Result<()> {
 
     // --- search-eval IR benchmark -------------------------------------------
     // `--search-eval [--queries path/to/queries.toml] [--report out.json]`
-    // runs a labeled query set through the same pipeline and reports
-    // MRR / P@1 / Recall@K aggregated overall and per category. Default
-    // queries file is `eval/search-queries.toml` (gitignored) with fallback
-    // to `eval/search-queries.example.toml`.
+    // runs a labeled query set through the same pipeline as the live TUI
+    // (now RRF) and reports MRR / P@1 / Recall@K aggregated overall and per
+    // category. Default queries file is `eval/search-queries.toml`
+    // (gitignored) with fallback to `eval/search-queries.example.toml`.
     if args.iter().any(|a| a == "--search-eval") {
         let queries: Option<String> = args
             .iter()
@@ -294,8 +294,7 @@ async fn main() -> Result<()> {
             .iter()
             .position(|a| a == "--report")
             .and_then(|i| args.get(i + 1).cloned());
-        let use_rrf = args.iter().any(|a| a == "--rrf");
-        search_eval::run_search_eval(&registry, &config, queries.as_deref(), report.as_deref(), use_rrf)?;
+        search_eval::run_search_eval(&registry, &config, queries.as_deref(), report.as_deref())?;
         return Ok(());
     }
     // -----------------------------------------------------------------------
