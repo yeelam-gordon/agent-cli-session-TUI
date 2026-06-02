@@ -27,6 +27,19 @@ Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is s
 | **AI-suggested groups** | Optional ACP-driven auto-clustering of ungrouped sessions |
 - **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
 
+## Beyond Intelligent Terminal
+
+[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) is an experimental fork of Windows Terminal with native agent integration — the *terminal* that hosts your agent CLI. This TUI is the *cross-CLI switchboard* for everything those agents leave behind.
+
+| What we add | |
+|---|---|
+| **Cross-CLI, not single-host** | Intelligent Terminal hosts one agent per pane. This TUI surfaces every session from every provider — Copilot, Claude, Codex, Qwen, Gemini, Kimi — in one list |
+| **Hybrid content search** | BM25 + semantic embeddings + lexical, fused via RRF. Find a session by typo, paraphrase, or half-remembered phrase across every provider at once |
+| **Thematic groups across providers** | Group sessions by project or theme regardless of which CLI ran them; optional AI-suggested clustering |
+| **Runs anywhere** | Pure ratatui TUI — works inside Intelligent Terminal, Windows Terminal, tmux, or any plain terminal on Windows / Linux / macOS |
+
+Use them together: Intelligent Terminal for the conversation, this TUI for the catalog.
+
 ## Architecture
 
 ```
@@ -287,20 +300,6 @@ cargo test --test codex_lifecycle_test -- --nocapture
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to get started — adding providers, building the semantic plugin, and code standards.
 
 For project internals, design decisions, and AI agent context, see [`AGENTS.md`](AGENTS.md).
-
-## Beyond Intelligent Terminal
-
-[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) is an experimental fork of Windows Terminal with native agent integration — the *terminal* that hosts your agent CLI. This TUI is the *cross-CLI switchboard* for everything those agents leave behind.
-
-| What we add | |
-|---|---|
-| **Cross-CLI, not single-host** | Intelligent Terminal hosts one agent per pane. This TUI surfaces every session from every provider — Copilot, Claude, Codex, Qwen, Gemini, Kimi — in one list |
-| **Lives past the terminal** | Close every window, reboot, come back tomorrow — every session is still there, still resumable, still searchable |
-| **Hybrid content search** | BM25 + semantic embeddings + lexical, fused via RRF. Find a session by typo, paraphrase, or half-remembered phrase across every provider at once |
-| **Thematic groups across providers** | Group sessions by project or theme regardless of which CLI ran them; optional AI-suggested clustering |
-| **Runs anywhere** | Pure ratatui TUI — works inside Intelligent Terminal, Windows Terminal, tmux, or any plain terminal on Windows / Linux / macOS |
-
-Use them together: Intelligent Terminal for the conversation, this TUI for the catalog.
 
 ## License
 
