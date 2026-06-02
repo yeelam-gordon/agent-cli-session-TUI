@@ -9,7 +9,7 @@
 - **Where is my running agent?** — `Enter` on any 🟡 *Needs input* / 🟢 *Working* session to attach / focus its terminal tab
 - **Too many tabs** — every background session in one view with clear status badges
 - **Which needs my input?** — 🟡 *Needs input* vs 🟢 *Working* vs 💤 *Resumable* at a glance
-- **Finding that one session** — `/` to search: exact → fuzzy → ✨ semantic. Indexes titles, summaries, compaction summaries, and your own messages
+- **Finding that one session** — `/` to search. Hybrid ranking fuses keyword (BM25) + semantic embeddings + lexical scoring via Reciprocal Rank Fusion, so typos, paraphrases, and half-remembered phrases all land the right session. Indexes titles, summaries, compaction summaries, and your own messages
 - **Hundreds of sessions piling up** — `g` to assign to groups; `Shift+Tab` to view by group; optional [AI auto-suggest](#ai-auto-grouping)
 - **Close without worry** — shut down anytime; all sessions remain discoverable + resumable
 - **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
@@ -22,7 +22,7 @@ Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is s
 |---|---|
 | **Multi-CLI** | One screen for Copilot · Claude · Codex · Qwen · Gemini · Kimi |
 | **Sees every session, not just backgrounded ones** | Plain `claude` and `claude agents` are two disjoint pools today — sessions you ran with `claude` (interactive) never appear in `claude agents`, past or future, unless you explicitly background them. This TUI reads each CLI's own session directory, so every session shows up regardless of how it was started |
-| **Content search** | Exact → fuzzy → optional semantic, across titles, summaries, and your own messages mid-transcript |
+| **Hybrid content search** | BM25 keyword + semantic embeddings + lexical scoring fused via Reciprocal Rank Fusion. Tolerates typos and paraphrases without penalizing exact matches. Searches titles, summaries, and your own messages mid-transcript |
 | **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
 | **AI-suggested groups** | Optional ACP-driven auto-clustering of ungrouped sessions |
 - **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
@@ -33,7 +33,7 @@ Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is s
 ┌─────────────────────────────────────────────────────────────┐
 │ TUI (ratatui + crossterm)                                   │
 │  Session List  │  Session Detail  │  Activity Log           │
-│  Search (exact → fuzzy → semantic)  │  Tab Focus            │
+│  Hybrid RRF Search (BM25 + semantic + lexical) · Tab Focus │
 ├─────────────────────────────────────────────────────────────┤
 │ SessionViewModel (incremental merge, phased loading)        │
 │ Supervisor (tokio — parallel provider scans, non-blocking)  │
@@ -136,16 +136,49 @@ Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI comma
 
 Config search order: next to exe → `%APPDATA%/agent-session-tui/config.toml` → built-in defaults.
 
-## Semantic Search
+## Search
 
-Search uses a three-tier ranking system: **exact substring** → **fuzzy word** → **semantic similarity**. The semantic tier is an optional DLL plugin (`semantic_search.dll` / `.so` / `.dylib`) that adds meaning-aware matching using cached embeddings.
+Search is a hybrid ranker. Three independent signals score every session, then **Reciprocal Rank Fusion** (RRF) combines their ranked lists into a single ordering:
 
-- Results with a semantic boost show a ✨ indicator in the search list
-- Embeddings are pre-computed and cached per session — no embedding during search
-- Status bar shows 🧠 when the semantic plugin is loaded and ready
-- If the DLL is missing, search falls back gracefully to exact + fuzzy only
+| Signal | What it catches |
+|--------|-----------------|
+| **BM25** (Tantivy full-text index) | Exact keywords, multi-word phrases, weighted titles |
+| **Semantic** (cached embeddings, optional DLL) | Paraphrases — "improve grammar" finds "Polish English Writing" |
+| **Lexical** (substring + fuzzy) | Typos and partial recall — "iteation revew" still finds "Iteration Review" |
 
-The plugin lives in `semantic-plugin/` and is built separately. See [`CONTRIBUTING.md` § Semantic Search Plugin](CONTRIBUTING.md#semantic-search-plugin) for the exact `cargo build` and copy-DLL-next-to-exe steps.
+On top of fusion: an **exact-title substring lock** pins any session whose title literally contains your query to rank 1, so remembering the query correctly is never penalized. State and recency act as soft tie-breakers.
+
+### Measured on real session data
+
+30-query benchmark over ~780 sessions, comparing the previous additive scorer with the current RRF default:
+
+|                  | Additive | **RRF (default)** |
+|------------------|----------|-------------------|
+| MRR              | 0.696    | **0.802**         |
+| P@1              | 53%      | **73%**           |
+| Recall@10        | 93%      | 90%               |
+
+Per-category P@1 jumps: exact-title 33% → 100%, person-name 50% → 100%, semantic-only 38% → 62%, typo 0% → 33%. Keyword and partial-recall queries hold their ground.
+
+### What you get out of the box
+
+- No flags, no opt-in — RRF is the default scorer
+- The semantic signal needs the optional `semantic_search.dll` / `.so` / `.dylib` plugin; without it, the ranker degrades gracefully to BM25 + lexical
+- Embeddings are pre-computed and cached per session — search itself never embeds
+- Status bar shows 🧠 when the semantic plugin is loaded
+- Indexes are incremental — only changed sessions are re-indexed on each scan
+- **No index migration needed** when upgrading: schema, fingerprints, and embedding cache are unchanged
+
+### Built-in evaluation harness
+
+```bash
+agent-session-tui --search-bench "iteration review" --expect <session_id> --top 10
+agent-session-tui --search-eval --report eval/runs/today.json
+```
+
+Reads a gitignored `eval/search-queries.toml` of (query, expected session) pairs and reports MRR / P@1 / Recall@K, per-category and overall. Useful for catching ranking regressions before they ship.
+
+The semantic plugin lives in `semantic-plugin/`. See [`CONTRIBUTING.md` § Semantic Search Plugin](CONTRIBUTING.md#semantic-search-plugin) for the build + install steps.
 
 ## AI Auto-Grouping
 
@@ -254,6 +287,10 @@ cargo test --test codex_lifecycle_test -- --nocapture
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to get started — adding providers, building the semantic plugin, and code standards.
 
 For project internals, design decisions, and AI agent context, see [`AGENTS.md`](AGENTS.md).
+
+## Related
+
+[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) — an experimental fork of Windows Terminal with native agent integration. Where Intelligent Terminal is the *terminal* that hosts your agent CLI, this TUI is the *cross-CLI switchboard* for everything those agents leave behind: every session, every provider, in one searchable view.
 
 ## License
 
