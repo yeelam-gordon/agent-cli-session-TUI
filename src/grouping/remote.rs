@@ -1,16 +1,21 @@
 //! Client for a hosted tab auto-grouping service.
 //!
-//! **This endpoint is undocumented and not a published third-party API.** There
-//! is no contract, SLA, stable schema, or data-handling terms, and it can change
-//! or disappear without notice. Every call path therefore degrades to the local
-//! engine on failure, so grouping never breaks.
+//! The endpoint URL is published in Microsoft's [Edge endpoint allowlist][al]
+//! under "Tab groups", but **only as a firewall entry** — there is no published
+//! request/response contract, versioning guarantee, or terms covering
+//! third-party callers. Everything below was determined by probing the live
+//! service, so it can break without notice. Every call path therefore degrades
+//! to the local engine on failure, and grouping never breaks.
+//!
+//! [al]: https://learn.microsoft.com/en-us/deployedge/microsoft-edge-security-endpoints
 //!
 //! ## What is sent
 //!
 //! Session titles and working directories (as `file:///` URIs), for one
 //! representative per local cluster — near-duplicate sessions collapse to a
-//! single entry first. The service is Microsoft-hosted, so this data leaves the
-//! machine; that is the trade for the group names it returns.
+//! single entry first — plus the user's existing group *names* as lightweight
+//! placeholders so candidates can be folded into a group they already have.
+//! Sessions already assigned to those groups are never sent.
 //!
 //! The working directory is included because it measurably improves grouping:
 //! the service was built for browser tabs, where the URL is a strong signal, and

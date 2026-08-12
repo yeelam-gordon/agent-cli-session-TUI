@@ -240,11 +240,31 @@ timeout_secs = 20     # remote call timeout
 - **On any failure** — non-2xx, timeout, schema change — it silently falls back
   to `local`. Grouping never breaks.
 
-> **Note:** the grouping service is Microsoft-hosted and its endpoint is
-> undocumented — there's no published contract or data-handling terms, and it
-> could change without notice. Titles and folder paths can contain repository
-> and project names, and they do leave your machine. If that isn't acceptable
-> for your work, set `engine = "local"`.
+> **Note:** the grouping service is Microsoft-hosted. Its URL is published in
+> Microsoft's [Edge endpoint allowlist](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-security-endpoints)
+> (under "Tab groups"), but only as a firewall entry — there is no published
+> request/response contract, versioning guarantee, or terms covering
+> third-party callers, and the request shape used here was determined by
+> probing. Titles and folder paths do leave your machine. If that isn't
+> acceptable for your work, set `engine = "local"`.
+
+### Reusing the groups you already have
+
+New sessions that cluster with an already-grouped session inherit that group,
+so you don't accumulate near-duplicates. That happens locally and always works.
+
+There is also an opt-in mode that sends your existing group *names* (never the
+sessions in them) to the remote service so it can fold candidates in directly.
+It's **off by default**: the service accepts those payloads only erratically —
+measured against the live endpoint with 11 real sessions, 3 group names returned
+an empty response while 1 succeeded. Turning it on mostly costs a wasted
+round-trip before the automatic retry.
+
+```toml
+[grouping]
+reuse_existing_groups = false  # true to try sending existing group names
+max_group_anchors = 6          # how many names to offer when enabled
+```
 
 ### Other group-view keys
 

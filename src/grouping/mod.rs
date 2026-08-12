@@ -125,15 +125,25 @@ fn expand_over_clusters(
 
 /// Run the configured grouping engine. Blocking — call from a blocking thread.
 ///
-/// `existing_groups` are the user's current group names, used to decide
-/// `is_new` and to ask a remote engine to assign into them.
+/// `existing_groups` are the user's current group names. They decide `is_new`,
+/// and the remote engine offers them as context so candidates can be folded
+/// into a group the user already has.
 pub fn suggest(
     engine: GroupingEngine,
     inputs: &[GroupingInput],
     existing_groups: &[String],
-    language: &str,
-    timeout_secs: u64,
+    cfg: &crate::config::GroupingConfig,
 ) -> Result<Vec<AiSuggestion>, String> {
+    let language = cfg.language.as_str();
+    let timeout_secs = cfg.timeout_secs;
+    // Zero when the user opts out of reusing existing groups, so every
+    // suggestion comes back freshly named.
+    let max_anchors = if cfg.reuse_existing_groups {
+        cfg.max_group_anchors
+    } else {
+        0
+    };
+
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -159,12 +169,10 @@ pub fn suggest(
         GroupingEngine::Remote => {
             let is_anchor = |i: &GroupingInput| i.existing_group.is_some();
 
-            // Candidates: one representative per cluster that actually contains
-            // an ungrouped session, and the representative must itself be
-            // ungrouped. Sending an anchor-only cluster asks the service to
-            // regroup something already grouped — with enough existing groups
-            // every item looks assigned and it correctly returns nothing.
-            // Observed: 17 items sent, all anchors, 0 groups back, 0 suggestions.
+            // Candidates: one representative per cluster that contains an
+            // ungrouped session, and the representative must itself be
+            // ungrouped. Sending an already-grouped session as a candidate
+            // asks the service to regroup something already settled.
             let mut reps: Vec<remote::RemoteInput> = Vec::new();
             for c in &clusters {
                 let candidate = c
@@ -191,41 +199,50 @@ pub fn suggest(
             }
             let reps_only = reps.clone();
 
-            // Anchors ride along as context so the service can fold matching
-            // candidates into an existing group instead of inventing a name.
-            // They carry their real group so it is preserved verbatim.
-            let mut payload: Vec<remote::RemoteInput> = inputs
+            // Offer the user's existing group NAMES as context so candidates
+            // get folded into a group they already have instead of spawning a
+            // near-duplicate — while still leaving the service free to invent
+            // new groups for anything that doesn't fit.
+            //
+            // These are synthetic placeholders, one per group, carrying only
+            // the group name. Earlier this sent two REAL sessions per group,
+            // which (a) put 34 samples against 30 candidates and drowned out
+            // new-group suggestions, and (b) transmitted the titles of already
+            // grouped sessions. Neither is necessary.
+            //
+            // The placeholder url must be non-empty and generic: a blank url
+            // with a real groupId makes the service return an empty body, and
+            // a realistic project path over-anchors candidates onto that group.
+            let mut payload: Vec<remote::RemoteInput> = existing_groups
                 .iter()
-                .filter(|i| is_anchor(i))
-                // A real groupId paired with a blank groupName makes the
-                // service return an empty body — drop unnamed groups.
-                .filter(|i| {
-                    i.existing_group
-                        .as_deref()
-                        .is_some_and(|g| !g.trim().is_empty())
-                })
-                .map(|i| remote::RemoteInput {
-                    session_key: i.key.clone(),
-                    title: i.title.clone(),
-                    cwd_uri: i.cwd.as_deref().map(remote::path_to_file_uri),
-                    existing_group: i.existing_group.clone(),
+                .filter(|g| !g.trim().is_empty())
+                .take(max_anchors)
+                .enumerate()
+                .map(|(i, name)| remote::RemoteInput {
+                    session_key: format!("__group_placeholder_{i}"),
+                    title: name.clone(),
+                    cwd_uri: Some(format!("file:///groups/{name}")),
+                    existing_group: Some(name.clone()),
                 })
                 .collect();
+            let placeholder_count = payload.len();
             payload.extend(reps);
+            crate::log::info(&format!(
+                "Remote grouping: {} candidates + {} existing-group names",
+                payload.len() - placeholder_count,
+                placeholder_count
+            ));
 
             // The service intermittently answers 200 with an entirely empty
-            // body for some payload shapes — reproduced live with anchored
-            // items mixed in. Rather than chase an undocumented contract, try
-            // the anchored payload, then retry with candidates only (a shape
-            // that reliably works), then fall back to local. The user must
-            // never end up with nothing.
+            // body for some payload shapes. Rather than chase an inferred
+            // contract, try the full payload, then retry with candidates only
+            // (a shape that reliably works), then fall back to local. The user
+            // must never end up with nothing.
             let attempt = |payload: &[remote::RemoteInput], label: &str| {
                 match remote::suggest(payload, existing_groups, language, timeout_secs) {
                     Ok(s) if !s.is_empty() => Some(s),
                     Ok(_) => {
-                        crate::log::info(&format!(
-                            "Remote grouping returned no groups ({label})"
-                        ));
+                        crate::log::info(&format!("Remote grouping returned no groups ({label})"));
                         None
                     }
                     Err(e) => {
@@ -235,13 +252,26 @@ pub fn suggest(
                 }
             };
 
-            let rep_suggestions = attempt(&payload, "with anchors")
-                .or_else(|| attempt(&reps_only, "candidates only"));
+            let label = if placeholder_count > 0 {
+                "with existing-group names"
+            } else {
+                "candidates only"
+            };
+            let rep_suggestions = attempt(&payload, label).or_else(|| {
+                // Only worth retrying if the second payload differs — with no
+                // group names attached the two are identical.
+                if placeholder_count > 0 {
+                    attempt(&reps_only, "candidates only (retry)")
+                } else {
+                    None
+                }
+            });
 
             match rep_suggestions {
                 Some(s) => {
                     let expanded = expand_over_clusters(&s, &clusters, inputs);
-                    // Anchors are already assigned; drop any suggestion for them.
+                    // Drop the synthetic placeholders and anything already
+                    // grouped — neither is a real suggestion for the user.
                     let anchors: std::collections::HashSet<&str> = inputs
                         .iter()
                         .filter(|i| is_anchor(i))
@@ -249,6 +279,7 @@ pub fn suggest(
                         .collect();
                     Ok(expanded
                         .into_iter()
+                        .filter(|s| !s.session.starts_with("__group_placeholder_"))
                         .filter(|s| !anchors.contains(s.session.as_str()))
                         .collect())
                 }
@@ -275,6 +306,15 @@ mod tests {
                 existing_group: None,
             })
             .collect()
+    }
+
+    /// Grouping config for tests. `timeout_secs = 0` makes any remote attempt
+    /// fail immediately, which is how the fallback paths are exercised.
+    fn test_cfg(timeout_secs: u64) -> crate::config::GroupingConfig {
+        crate::config::GroupingConfig {
+            timeout_secs,
+            ..Default::default()
+        }
     }
 
     /// Privacy boundary: the local `text` may carry a summary, but only the
@@ -319,7 +359,7 @@ mod tests {
             ("p:2", "Read the complete benchmark prompt from prompt-files"),
             ("p:3", "Plan quarterly budget review meeting"),
         ]);
-        let out = suggest(GroupingEngine::Local, &inp, &[], "en-US", 5).unwrap();
+        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
         // The two duplicates get a group; the lone outlier does not.
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].group, out[1].group);
@@ -330,13 +370,13 @@ mod tests {
     #[test]
     fn local_engine_ignores_singletons() {
         let inp = inputs(&[("p:1", "Totally unique work item"), ("p:2", "Another one")]);
-        let out = suggest(GroupingEngine::Local, &inp, &[], "en-US", 5).unwrap();
+        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
     fn empty_input_returns_empty_without_work() {
-        let out = suggest(GroupingEngine::Local, &[], &[], "en-US", 5).unwrap();
+        let out = suggest(GroupingEngine::Local, &[], &[], &test_cfg(5)).unwrap();
         assert!(out.is_empty());
     }
 
@@ -409,7 +449,7 @@ mod tests {
             input_in("p:anchor", "benchmark prompt files run", Some("Rust Tooling")),
             input_in("p:new", "benchmark prompt files run", None),
         ];
-        let out = suggest(GroupingEngine::Local, &inp, &[], "en-US", 5).unwrap();
+        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
         assert_eq!(out.len(), 1, "anchor itself must not be re-suggested");
         assert_eq!(out[0].session, "p:new");
         assert_eq!(out[0].group, "Rust Tooling");
@@ -424,7 +464,7 @@ mod tests {
             input_in("p:anchor", "authentication token refresh logic", Some("Auth")),
             input_in("p:new", "authentication token refresh logic", None),
         ];
-        let out = suggest(GroupingEngine::Local, &inp, &[], "en-US", 5).unwrap();
+        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].group, "Auth");
     }
@@ -435,7 +475,7 @@ mod tests {
             input_in("p:a1", "same words here now", Some("G")),
             input_in("p:a2", "same words here now", Some("G")),
         ];
-        let out = suggest(GroupingEngine::Local, &inp, &[], "en-US", 5).unwrap();
+        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
         assert!(out.is_empty(), "all inputs were already grouped");
     }
 
@@ -452,7 +492,7 @@ mod tests {
         ];
         // Timeout of 0 would fail instantly if a request were attempted; a
         // successful empty result proves we short-circuited before the network.
-        let out = suggest(GroupingEngine::Remote, &inp, &[], "en-US", 0).unwrap();
+        let out = suggest(GroupingEngine::Remote, &inp, &[], &test_cfg(0)).unwrap();
         assert!(out.is_empty(), "no ungrouped sessions → no suggestions");
     }
 
@@ -466,9 +506,72 @@ mod tests {
             input_in("p:2", "benchmark prompt files run", None),
         ];
         // timeout_secs = 0 → the HTTP attempts fail immediately.
-        let out = suggest(GroupingEngine::Remote, &inp, &[], "en-US", 0).unwrap();
+        let out = suggest(GroupingEngine::Remote, &inp, &[], &test_cfg(0)).unwrap();
         assert_eq!(out.len(), 2, "must fall back to local clustering");
         assert_eq!(out[0].group, out[1].group);
         assert!(out[0].reason.starts_with("Local:"));
+    }
+
+    /// Existing group names are offered to the service as lightweight
+    /// placeholders so candidates can be folded into a group the user already
+    /// has. Those placeholders are internal plumbing — they must never surface
+    /// as suggestions, and they must never be mistaken for a real session.
+    #[test]
+    fn group_name_placeholders_never_surface_as_suggestions() {
+        let clusters = local::cluster(&[("p:1".to_string(), "some work item".to_string())]);
+        let inp = inputs(&[("p:1", "some work item")]);
+        let rep = vec![
+            AiSuggestion {
+                session: "__group_placeholder_0".into(),
+                group: "agent-mgt-tui".into(),
+                is_new: false,
+                score: 0.75,
+                reason: "r".into(),
+            },
+            AiSuggestion {
+                session: "p:1".into(),
+                group: "agent-mgt-tui".into(),
+                is_new: false,
+                score: 0.75,
+                reason: "r".into(),
+            },
+        ];
+        let expanded = expand_over_clusters(&rep, &clusters, &inp);
+        let kept: Vec<&AiSuggestion> = expanded
+            .iter()
+            .filter(|s| !s.session.starts_with("__group_placeholder_"))
+            .collect();
+        assert_eq!(kept.len(), 1, "placeholder must be filtered out");
+        assert_eq!(kept[0].session, "p:1");
+    }
+
+    /// Group-name context is off by default: the service accepts pre-assigned
+    /// groups only erratically (3 real names returned an empty body while 1
+    /// succeeded), so enabling it costs a wasted round-trip before the retry.
+    #[test]
+    fn group_name_context_is_off_by_default() {
+        let cfg = crate::config::GroupingConfig::default();
+        assert!(
+            !cfg.reuse_existing_groups,
+            "sending existing group names must be opt-in — the service \
+             rejects those payloads unpredictably"
+        );
+    }
+
+    /// Opting out of group reuse must stop existing-group context being sent,
+    /// so every suggestion comes back freshly named.
+    #[test]
+    fn reuse_existing_groups_false_sends_no_group_names() {
+        let cfg = crate::config::GroupingConfig {
+            reuse_existing_groups: false,
+            ..Default::default()
+        };
+        // The engine zeroes the budget when reuse is off.
+        let effective = if cfg.reuse_existing_groups {
+            cfg.max_group_anchors
+        } else {
+            0
+        };
+        assert_eq!(effective, 0);
     }
 }

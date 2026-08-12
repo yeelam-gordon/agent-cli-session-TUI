@@ -205,8 +205,24 @@ pub struct GroupingConfig {
     /// group names are written in.
     #[serde(default = "default_grouping_language")]
     pub language: String,
+    /// Whether to offer your existing group names to a remote engine so new
+    /// sessions get folded into a group you already have.
+    ///
+    /// **Off by default**: the service accepts pre-assigned groups only
+    /// erratically. Measured against the live endpoint with 11 real candidates,
+    /// even 3 group names returned an empty body while 1 succeeded; with
+    /// synthetic data 6 worked. Since the failure is payload-dependent and not
+    /// a tunable limit, enabling this mostly costs a wasted round-trip before
+    /// the automatic retry. Group reuse still happens locally — a session that
+    /// clusters with an already-grouped one inherits that group.
+    #[serde(default = "default_reuse_existing_groups")]
+    pub reuse_existing_groups: bool,
+    /// Maximum number of existing group names offered when
+    /// [`Self::reuse_existing_groups`] is enabled.
+    #[serde(default = "default_max_group_anchors")]
+    pub max_group_anchors: usize,
     /// Maximum seconds to wait for a remote grouping call. Far lower than the
-    /// ACP default because the remote endpoint answers a 30-item batch in ~2s;
+    /// ACP default because the endpoint answers a 30-item batch in ~2s;
     /// anything slower is a fault, not slow progress.
     #[serde(default = "default_grouping_timeout_secs")]
     pub timeout_secs: u64,
@@ -214,6 +230,14 @@ pub struct GroupingConfig {
 
 fn default_grouping_language() -> String {
     "en-US".into()
+}
+
+fn default_reuse_existing_groups() -> bool {
+    false
+}
+
+fn default_max_group_anchors() -> usize {
+    6
 }
 
 fn default_grouping_timeout_secs() -> u64 {
@@ -225,6 +249,8 @@ impl Default for GroupingConfig {
         Self {
             engine: GroupingEngine::default(),
             language: default_grouping_language(),
+            reuse_existing_groups: default_reuse_existing_groups(),
+            max_group_anchors: default_max_group_anchors(),
             timeout_secs: default_grouping_timeout_secs(),
         }
     }

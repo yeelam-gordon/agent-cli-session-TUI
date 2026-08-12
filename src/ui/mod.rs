@@ -834,8 +834,7 @@ impl App {
         self.acp_run_is_auto = is_auto;
 
         let engine = self.grouping_config.engine;
-        let language = self.grouping_config.language.clone();
-        let timeout_secs = self.grouping_config.timeout_secs;
+        let cfg = self.grouping_config.clone();
         let existing_groups: Vec<String> = self
             .group_mgr
             .all_groups()
@@ -851,7 +850,7 @@ impl App {
             // The engines are blocking (HTTP / CPU), so keep them off the
             // async runtime's worker threads.
             let result = tokio::task::spawn_blocking(move || {
-                crate::grouping::suggest(engine, &inputs, &existing_groups, &language, timeout_secs)
+                crate::grouping::suggest(engine, &inputs, &existing_groups, &cfg)
             })
             .await;
 
