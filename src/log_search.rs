@@ -84,7 +84,9 @@ struct FingerprintFile {
 
 impl FingerprintFile {
     fn load(path: &Path) -> Self {
-        let Ok(bytes) = fs::read(path) else { return Self::default() };
+        let Ok(bytes) = fs::read(path) else {
+            return Self::default();
+        };
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
@@ -213,7 +215,10 @@ impl LogSearcher {
     /// Pass BOTH active + hidden sessions so archived sessions stay searchable
     /// in the Hidden view.
     pub fn refresh(&self, sessions: &[Session], registry: &ProviderRegistry) -> Result<()> {
-        let mut writer = self.writer.lock().map_err(|_| anyhow::anyhow!("writer poisoned"))?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("writer poisoned"))?;
         let mut fps = self
             .fingerprints
             .lock()
@@ -274,7 +279,9 @@ impl LogSearcher {
             let mut any_present = false;
             for src in &sources {
                 let path = source_path(src);
-                let Ok(meta) = fs::metadata(path) else { continue };
+                let Ok(meta) = fs::metadata(path) else {
+                    continue;
+                };
                 any_present = true;
                 let mtime = meta
                     .modified()
@@ -315,9 +322,7 @@ impl LogSearcher {
             let mut doc = TantivyDocument::default();
             doc.add_text(self.session_id_field, &s.id);
             doc.add_text(self.content_field, &combined);
-            writer
-                .add_document(doc)
-                .context("adding doc to tantivy")?;
+            writer.add_document(doc).context("adding doc to tantivy")?;
             fps.insert(s.id.clone(), fp);
             pending_in_chunk += 1;
 
@@ -328,9 +333,7 @@ impl LogSearcher {
                     fingerprints: fps.clone(),
                 };
                 if let Err(e) = snapshot.save(&self.fingerprint_path) {
-                    crate::log::warn(&format!(
-                        "log_search: fingerprint chunk save failed: {e}"
-                    ));
+                    crate::log::warn(&format!("log_search: fingerprint chunk save failed: {e}"));
                 }
                 pending_in_chunk = 0;
                 // Yield so a cold-start reindex doesn't saturate the machine.
@@ -346,9 +349,7 @@ impl LogSearcher {
             };
             drop(fps);
             if let Err(e) = snapshot.save(&self.fingerprint_path) {
-                crate::log::warn(&format!(
-                    "log_search: fingerprint final save failed: {e}"
-                ));
+                crate::log::warn(&format!("log_search: fingerprint final save failed: {e}"));
             }
         }
         Ok(())
@@ -392,7 +393,10 @@ fn read_tail(path: &Path) -> Option<String> {
     // HEAD_BYTES bytes — a single `read()` may return short on some
     // platforms even when more data is available.
     let mut head_bytes = Vec::with_capacity(HEAD_BYTES as usize);
-    (&mut f).take(HEAD_BYTES).read_to_end(&mut head_bytes).ok()?;
+    (&mut f)
+        .take(HEAD_BYTES)
+        .read_to_end(&mut head_bytes)
+        .ok()?;
     buf.push_str(&String::from_utf8_lossy(&head_bytes));
     buf.push_str("\n...\n");
 
@@ -489,7 +493,8 @@ fn extract_structured_summaries(path: &Path, buf: &mut String) {
                         // Take first N chars — captures the user's question/topic
                         let trimmed = content.trim();
                         if !trimmed.is_empty() {
-                            let cap = trimmed.char_indices()
+                            let cap = trimmed
+                                .char_indices()
                                 .nth(USER_MSG_CAP)
                                 .map(|(i, _)| i)
                                 .unwrap_or(trimmed.len());
@@ -511,14 +516,33 @@ fn extract_structured_summaries(path: &Path, buf: &mut String) {
 fn escape_query(q: &str) -> String {
     let mut out = String::with_capacity(q.len() * 2);
     for ch in q.chars() {
-        if matches!(ch, '+' | '-' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~' | '*' | '?' | ':' | '\\' | '/') {
+        if matches!(
+            ch,
+            '+' | '-'
+                | '&'
+                | '|'
+                | '!'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '^'
+                | '"'
+                | '~'
+                | '*'
+                | '?'
+                | ':'
+                | '\\'
+                | '/'
+        ) {
             out.push('\\');
         }
         out.push(ch);
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {

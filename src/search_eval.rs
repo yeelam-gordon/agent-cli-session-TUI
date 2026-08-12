@@ -91,11 +91,20 @@ impl Aggregate {
         let denom = n as f32;
         let mrr = results.iter().map(|r| r.reciprocal_rank).sum::<f32>() / denom;
         let p1 = results.iter().filter(|r| r.rank == Some(1)).count() as f32 / denom;
-        let r5 = results.iter().filter(|r| matches!(r.rank, Some(k) if k <= 5)).count() as f32
+        let r5 = results
+            .iter()
+            .filter(|r| matches!(r.rank, Some(k) if k <= 5))
+            .count() as f32
             / denom;
-        let r10 = results.iter().filter(|r| matches!(r.rank, Some(k) if k <= 10)).count() as f32
+        let r10 = results
+            .iter()
+            .filter(|r| matches!(r.rank, Some(k) if k <= 10))
+            .count() as f32
             / denom;
-        let r20 = results.iter().filter(|r| matches!(r.rank, Some(k) if k <= 20)).count() as f32
+        let r20 = results
+            .iter()
+            .filter(|r| matches!(r.rank, Some(k) if k <= 20))
+            .count() as f32
             / denom;
         Self {
             n,
@@ -161,8 +170,8 @@ pub fn run_search_eval(
     println!("Eval queries: {}", qpath.display());
     println!("Scorer: RRF (default)");
 
-    let toml_text = std::fs::read_to_string(&qpath)
-        .with_context(|| format!("reading {}", qpath.display()))?;
+    let toml_text =
+        std::fs::read_to_string(&qpath).with_context(|| format!("reading {}", qpath.display()))?;
     let qfile: QueryFile = toml::from_str(&toml_text)
         .with_context(|| format!("parsing TOML in {}", qpath.display()))?;
     println!("  {} queries loaded", qfile.queries.len());
@@ -303,12 +312,24 @@ fn score_one_query(
 
 /// Pretty-print the report to stdout as a table.
 fn print_report(report: &Report) {
-    println!("─── Overall ({} queries, {} sessions) ───", report.overall.n, report.sessions_total);
+    println!(
+        "─── Overall ({} queries, {} sessions) ───",
+        report.overall.n, report.sessions_total
+    );
     println!("  MRR           = {:.3}", report.overall.mrr);
     println!("  P@1           = {:.1}%", report.overall.p_at_1 * 100.0);
-    println!("  Recall@5      = {:.1}%", report.overall.recall_at_5 * 100.0);
-    println!("  Recall@10     = {:.1}%", report.overall.recall_at_10 * 100.0);
-    println!("  Recall@20     = {:.1}%", report.overall.recall_at_20 * 100.0);
+    println!(
+        "  Recall@5      = {:.1}%",
+        report.overall.recall_at_5 * 100.0
+    );
+    println!(
+        "  Recall@10     = {:.1}%",
+        report.overall.recall_at_10 * 100.0
+    );
+    println!(
+        "  Recall@20     = {:.1}%",
+        report.overall.recall_at_20 * 100.0
+    );
     println!();
 
     if !report.by_category.is_empty() {

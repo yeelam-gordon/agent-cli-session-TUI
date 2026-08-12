@@ -195,43 +195,56 @@ The semantic plugin lives in `semantic-plugin/`. See [`CONTRIBUTING.md` § Seman
 
 ## AI Auto-Grouping
 
-Optional. Asks an AI agent (GitHub Copilot CLI by default) to suggest thematic groups for your ungrouped sessions. **Off by default** — opt in via `config.toml`.
+Suggests thematic groups for your ungrouped sessions. Runs automatically; press
+`s` in the Grouped view to run on demand. Suggestions appear as a dim
+`· ⟨group⟩` shadow under the session row — `y` accepts, `n` dismisses, `e` edits
+the name first.
 
-### What it does
+Sessions that look like an **already-grouped** session are suggested for that
+same existing group instead of a brand-new one.
 
-- Sends each ungrouped session's **title, summary, and updated_at timestamp** (never file contents) to the AI in batches of 30.
-- The AI proposes a group name + score for each session, or skips it.
-- Suggestions render inline as a dim `· ⟨group⟩` shadow under the session row in the Active view.
-- Press `y` to accept, `n` to dismiss, or `e` to edit the group name before saving.
+### Engines
 
-### Two modes
+Set with `[grouping] engine` in `config.toml`.
 
-| Mode | How to trigger | What happens |
-|------|----------------|--------------|
-| **Manual** | `s` in Grouped view | One batch, results open in a popup so you can step through y/n/e |
-| **Auto** | `auto_suggest = true` in config | Runs in the background after the initial session load. Chains batches automatically until every ungrouped session has been analyzed. No popup — suggestions appear inline as shadows. |
+**`remote` — the default.** Sends session titles and working directories to a
+hosted tab auto-grouping service, which returns natural group names like
+"System Maintenance". About 2 seconds for 30 sessions. Nothing to install or
+authenticate.
 
-### Requirements
+**`local`** — no network. This is *not* a local AI model: it simply compares how
+many words two titles share, and names each group after its most common words.
+That produces blunt names like `benchmark-prompt-files`, so expect to rename
+some with `e`. It runs in ~0.2s and is also the automatic fallback whenever
+`remote` fails.
 
-- `copilot` CLI installed on PATH and authenticated (`copilot login`)
-- `prompts/group-suggest.md` template next to the binary (shipped in the release zip)
-
-### Configuration
+**`acp`** — legacy. Spawns the CLI configured in `[acp]` (default `copilot`).
+Best names, but 25–45s per batch and it burns your Copilot quota. Requires the
+`copilot` CLI authenticated and `prompts/group-suggest.md` next to the binary.
+A run exceeding `timeout_secs` is **terminated**, not just abandoned.
 
 ```toml
-[acp]
-command = "copilot"
-extra_args = ["--effort", "low"]   # ~30% faster than default; quality unchanged for this task
-auto_suggest = false               # set to true for background auto-suggest
-timeout_secs = 180                 # bump if your model is slow
-# prompt_template = '~/.config/agent-session-tui/group-suggest.md'
+[grouping]
+engine = "remote"     # "remote" | "local" | "acp"
+language = "en-US"    # language for generated group names
+timeout_secs = 20     # remote call timeout
 ```
 
-### Cost & performance
+### What `remote` sends
 
-- ~25–45s per 30-session batch with `--effort low`
-- Each batch counts against your Copilot CLI usage quota
-- Auto-suggest chains batches: ~1 minute per 30 sessions until all are processed
+- **Sent:** session titles and working directories (as `file:///` URIs), for one
+  representative per cluster of near-duplicate sessions. In testing that reduced
+  40 sessions to 8 entries. The working directory is included because it
+  measurably improves results.
+- **Never sent:** session summaries, file contents, chat transcripts.
+- **On any failure** — non-2xx, timeout, schema change — it silently falls back
+  to `local`. Grouping never breaks.
+
+> **Note:** the grouping service is Microsoft-hosted and its endpoint is
+> undocumented — there's no published contract or data-handling terms, and it
+> could change without notice. Titles and folder paths can contain repository
+> and project names, and they do leave your machine. If that isn't acceptable
+> for your work, set `engine = "local"`.
 
 ### Other group-view keys
 

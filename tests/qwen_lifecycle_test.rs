@@ -1,7 +1,7 @@
 use agent_session_tui::config::ProviderConfig;
 use agent_session_tui::provider::qwen::QwenProvider;
-use agent_session_tui::testing::TestRunner;
 use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::TestRunner;
 
 #[test]
 fn qwen_lifecycle() {
@@ -20,6 +20,8 @@ fn qwen_lifecycle() {
         launch_fallback_args: None,
         launch_fallback: None,
         wt_profile: None,
+        remote_list_cmd: None,
+        remote_stream_cmd: None,
     };
     let provider = QwenProvider::new(&pc);
 

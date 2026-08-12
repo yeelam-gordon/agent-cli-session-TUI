@@ -50,7 +50,10 @@ pub enum SupervisorEvent {
 /// Commands from the TUI to the supervisor.
 #[derive(Debug)]
 pub enum SupervisorCommand {
-    NewSession { provider_key: String, cwd: String },
+    NewSession {
+        provider_key: String,
+        cwd: String,
+    },
     ResumeSession {
         provider_session_id: String,
         provider_key: String,
@@ -155,10 +158,7 @@ impl SessionViewModel {
     /// caused rapid 'a' presses to serialise behind the scan (each command
     /// waited 5–12s for the lock), and queued archives could be lost on
     /// quit before they drained.
-    fn snapshot(
-        &self,
-        archived_keys: &HashSet<String>,
-    ) -> (Vec<Session>, Vec<Session>) {
+    fn snapshot(&self, archived_keys: &HashSet<String>) -> (Vec<Session>, Vec<Session>) {
         let mut active = Vec::new();
         let mut hidden = Vec::new();
         for s in self.sessions.values() {
@@ -337,7 +337,11 @@ impl Supervisor {
         }
     }
 
-    fn scan_and_notify(&self, vm: &Arc<Mutex<SessionViewModel>>, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
+    fn scan_and_notify(
+        &self,
+        vm: &Arc<Mutex<SessionViewModel>>,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+    ) -> Result<()> {
         Self::scan_providers(&self.registry, &self.archive, vm, event_tx)
     }
 
@@ -353,7 +357,11 @@ impl Supervisor {
     /// This gives the user a first visible list in ~1-2s (instead of waiting
     /// 10-30s for every provider's full tail-read pass to complete) while
     /// still delivering the full dataset soon after.
-    fn scan_and_notify_initial(&self, vm: &Arc<Mutex<SessionViewModel>>, event_tx: &mpsc::UnboundedSender<SupervisorEvent>) -> Result<()> {
+    fn scan_and_notify_initial(
+        &self,
+        vm: &Arc<Mutex<SessionViewModel>>,
+        event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
+    ) -> Result<()> {
         Self::scan_providers_two_phase(&self.registry, &self.archive, vm, event_tx)
     }
 
@@ -367,7 +375,9 @@ impl Supervisor {
         /// Sized to fill one viewport comfortably; full dataset follows in phase 2.
         const FIRST_PAGE: usize = 20;
 
-        let providers: Vec<_> = registry.providers().iter()
+        let providers: Vec<_> = registry
+            .providers()
+            .iter()
             .filter(|p| p.capabilities().supports_discovery)
             .collect();
 
@@ -385,7 +395,11 @@ impl Supervisor {
                         Ok(p) => p,
                         Err(e) => {
                             crate::log::warn(&format!("Phase 1 '{}' error: {}", provider.key(), e));
-                            crate::provider::PagedSessions { sessions: vec![], total: 0, has_more: false }
+                            crate::provider::PagedSessions {
+                                sessions: vec![],
+                                total: 0,
+                                has_more: false,
+                            }
                         }
                     };
                     let mut sessions = paged.sessions;
@@ -397,7 +411,10 @@ impl Supervisor {
                     }
                     crate::log::info(&format!(
                         "Phase 1 '{}': {} of {} sessions in {:?}",
-                        provider.key(), sessions.len(), paged.total, pstart.elapsed()
+                        provider.key(),
+                        sessions.len(),
+                        paged.total,
+                        pstart.elapsed()
                     ));
                     let _ = tx.send((provider.key().to_string(), sessions));
                 });
@@ -439,7 +456,9 @@ impl Supervisor {
                     }
                     crate::log::info(&format!(
                         "Phase 2 '{}': {} sessions in {:?}",
-                        provider.key(), sessions.len(), pstart.elapsed()
+                        provider.key(),
+                        sessions.len(),
+                        pstart.elapsed()
                     ));
                     let _ = tx.send((provider.key().to_string(), sessions));
                 });
@@ -475,7 +494,9 @@ impl Supervisor {
         vm: &Arc<Mutex<SessionViewModel>>,
         event_tx: &mpsc::UnboundedSender<SupervisorEvent>,
     ) -> Result<()> {
-        let providers: Vec<_> = registry.providers().iter()
+        let providers: Vec<_> = registry
+            .providers()
+            .iter()
             .filter(|p| p.capabilities().supports_discovery)
             .collect();
 
@@ -510,7 +531,9 @@ impl Supervisor {
                     }
                     crate::log::info(&format!(
                         "Provider '{}' scan: {} sessions in {:?}",
-                        provider.key(), sessions.len(), pstart.elapsed()
+                        provider.key(),
+                        sessions.len(),
+                        pstart.elapsed()
                     ));
                     let _ = tx.send((provider.key().to_string(), sessions));
                 });
@@ -657,10 +680,14 @@ impl Supervisor {
         }
 
         let display = tab_title.unwrap_or(title);
-        crate::log::warn(&format!("Could not find tab for: {} / {}", display, session_id));
-        let _ = event_tx.send(SupervisorEvent::Error(
-            format!("Tab not found for '{}'", display),
+        crate::log::warn(&format!(
+            "Could not find tab for: {} / {}",
+            display, session_id
         ));
+        let _ = event_tx.send(SupervisorEvent::Error(format!(
+            "Tab not found for '{}'",
+            display
+        )));
     }
 
     fn handle_archive(
@@ -675,7 +702,10 @@ impl Supervisor {
                 if let Err(e) = archive.archive(provider_key, provider_session_id) {
                     crate::log::warn(&format!(
                         "handle_archive: save FAILED for {}:{}: {} (held lock {:?})",
-                        provider_key, provider_session_id, e, t0.elapsed()
+                        provider_key,
+                        provider_session_id,
+                        e,
+                        t0.elapsed()
                     ));
                 }
             }
@@ -734,10 +764,32 @@ fn expand_launch_args(args: &[String], cwd: &str, command: &str) -> Vec<String> 
 
 /// Try to launch with a program + args. Returns Ok if spawned, Err if program not found.
 fn try_launch(program: &str, args: &[String]) -> Result<()> {
-    std::process::Command::new(program)
-        .args(args)
-        .spawn()?;
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    spawn_launcher(&mut command)?;
     Ok(())
+}
+
+/// Spawn a terminal launcher without allowing it to read from or write to the TUI.
+///
+/// Launchers such as `wtcli` print status text on stdout. If inherited, that
+/// output bypasses ratatui and corrupts its alternate-screen buffer. Inherited
+/// stdin can also let a launcher consume navigation keys intended for the TUI.
+fn spawn_launcher(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+}
+
+#[cfg(windows)]
+fn windows_command_available(program: &str) -> bool {
+    let mut command = std::process::Command::new("where.exe");
+    command.arg(program);
+    spawn_launcher(&mut command)
+        .and_then(|mut child| child.wait())
+        .is_ok_and(|status| status.success())
 }
 
 /// Launch a command in a new terminal. Tries custom launch_cmd/args first,
@@ -763,12 +815,17 @@ fn launch_in_terminal(
     }
 
     // 2. Custom fallback_cmd + fallback_args
-    if let (Some(ref fb_cmd), Some(ref fb_args)) = (&config.launch_fallback_cmd, &config.launch_fallback_args) {
+    if let (Some(ref fb_cmd), Some(ref fb_args)) =
+        (&config.launch_fallback_cmd, &config.launch_fallback_args)
+    {
         let args = expand_launch_args(fb_args, cwd, &cmd_str);
         match try_launch(fb_cmd, &args) {
             Ok(_) => return Ok(()),
             Err(e) => {
-                crate::log::warn(&format!("Fallback {} failed: {}, trying shortcut", fb_cmd, e));
+                crate::log::warn(&format!(
+                    "Fallback {} failed: {}, trying shortcut",
+                    fb_cmd, e
+                ));
             }
         }
     }
@@ -786,7 +843,13 @@ fn launch_in_terminal(
         config.launch_fallback.as_deref()
     };
 
-    launch_with_shortcut(&cmd_str, cwd, method, fallback_method, config.wt_profile.as_deref())
+    launch_with_shortcut(
+        &cmd_str,
+        cwd,
+        method,
+        fallback_method,
+        config.wt_profile.as_deref(),
+    )
 }
 
 /// Launch using shortcut method names: "wt", "pwsh", "cmd".
@@ -813,7 +876,9 @@ fn launch_with_shortcut(
                 args.push("/k".to_string());
                 args.push(cmd_str.to_string());
 
-                match std::process::Command::new(m).args(&args).spawn() {
+                let mut command = std::process::Command::new(m);
+                command.args(&args);
+                match spawn_launcher(&mut command) {
                     Ok(_) => Ok(()),
                     Err(_) => {
                         let fb = fallback.unwrap_or("cmd");
@@ -823,25 +888,39 @@ fn launch_with_shortcut(
                 }
             }
             "pwsh" => {
-                match std::process::Command::new("pwsh")
-                    .args(["-NoExit", "-Command", cmd_str])
-                    .current_dir(cwd)
-                    .spawn()
-                {
+                if !windows_command_available("pwsh") {
+                    if let Some(fb) = fallback {
+                        crate::log::warn(&format!("pwsh not found, falling back to {}", fb));
+                        return launch_with_shortcut(cmd_str, cwd, fb, None, None);
+                    }
+                    return Err(anyhow::anyhow!("pwsh not found"));
+                }
+
+                // `pwsh` is the interactive shell, so it cannot itself have
+                // null stdio. Use `start` as the isolated launcher and let the
+                // new PowerShell window receive its own console streams.
+                let mut command = std::process::Command::new("cmd");
+                command
+                    .args([
+                        "/d", "/c", "start", "", "pwsh", "-NoExit", "-Command", cmd_str,
+                    ])
+                    .current_dir(cwd);
+                match spawn_launcher(&mut command) {
                     Ok(_) => Ok(()),
                     Err(_) if fallback.is_some() => {
-                        let fb = fallback.expect("checked is_some above");
-                        crate::log::warn(&format!("pwsh not found, falling back to {}", fb));
+                        let fb = fallback.expect("checked above");
+                        crate::log::warn(&format!("pwsh launcher failed, falling back to {}", fb));
                         launch_with_shortcut(cmd_str, cwd, fb, None, None)
                     }
                     Err(e) => Err(e.into()),
                 }
             }
             _ => {
-                std::process::Command::new("cmd")
+                let mut command = std::process::Command::new("cmd");
+                command
                     .args(["/c", "start", "cmd", "/k", cmd_str])
-                    .current_dir(cwd)
-                    .spawn()?;
+                    .current_dir(cwd);
+                spawn_launcher(&mut command)?;
                 Ok(())
             }
         }
@@ -851,9 +930,50 @@ fn launch_with_shortcut(
     {
         let _ = (method, fallback, wt_profile);
         let shell_cmd = format!("cd {} && {}", cwd, cmd_str);
-        std::process::Command::new("sh")
-            .args(["-c", &format!("xterm -e '{}' &", shell_cmd)])
-            .spawn()?;
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", &format!("xterm -e '{}' &", shell_cmd)]);
+        spawn_launcher(&mut command)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::spawn_launcher;
+    use std::process::{Command, Stdio};
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_command_availability_detects_missing_programs() {
+        assert!(super::windows_command_available("cmd"));
+        assert!(!super::windows_command_available(
+            "agent-session-tui-definitely-missing-command"
+        ));
+    }
+
+    #[test]
+    fn launcher_processes_detach_from_tui_stdio() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "echo launcher-output & echo launcher-error 1>&2"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "printf launcher-output; printf launcher-error >&2"]);
+            command
+        };
+
+        // Regression: resume launchers inherited all three streams, allowing
+        // wtcli output to corrupt the screen and child input to freeze navigation.
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = spawn_launcher(&mut command).expect("launcher should spawn");
+        assert!(child.stdin.is_none());
+        assert!(child.stdout.is_none());
+        assert!(child.stderr.is_none());
+        assert!(child.wait().expect("launcher should exit").success());
     }
 }

@@ -14,7 +14,7 @@ pub mod schema;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ use serde_json::Value;
 
 use crate::config::ProviderConfig as AppProviderConfig;
 use crate::models::{
-    ActivitySource, Confidence, HealthState, InteractionState, PersistenceState,
-    ProcessState, ProviderCapabilities, Session, SessionState, StateSignals,
+    ActivitySource, Confidence, HealthState, InteractionState, PersistenceState, ProcessState,
+    ProviderCapabilities, Session, SessionState, StateSignals,
 };
 use crate::process_info::{discover_processes, extract_flag_value, ProcessEntry};
 use crate::provider::{PagedSessions, Provider, SessionDetail};
@@ -39,10 +39,26 @@ use std::collections::{HashMap, HashSet};
 
 /// Cached discovery result for a single session. If the events file's mtime
 /// hasn't changed since we last parsed it, we skip the tail-read + parse
-/// entirely and reuse the stored `Session`.
+/// entirely and reuse the stored result.
+///
+/// `session: None` is a **negative cache entry**: this stub was parsed and
+/// deliberately yielded nothing (an empty/abandoned session). Remembering that
+/// matters — without it, every empty session is re-read from disk on every
+/// scan, forever. Measured on a real store: 979 of 3169 Copilot sessions were
+/// empty, costing ~1000 pointless file reads per scan cycle and dominating a
+/// 17-second scan.
 struct CachedScan {
-    mtime_raw: Option<SystemTime>,
-    session: Session,
+    /// Normalised to milliseconds. The on-disk form stores millis, so keeping
+    /// a full-precision `SystemTime` here made every reloaded entry compare
+    /// unequal to the freshly-stat'd mtime — the persisted cache silently did
+    /// almost nothing across restarts (observed: 2494 misses vs 676 hits).
+    mtime_ms: Option<u64>,
+    session: Option<Session>,
+}
+
+/// Millisecond view of a stat'd mtime, matching what we persist.
+fn stub_mtime_ms(t: Option<SystemTime>) -> Option<u64> {
+    t.and_then(systime_to_ms)
 }
 
 /// On-disk form of `CachedScan`. SystemTime isn't serde-native, so we persist
@@ -50,7 +66,10 @@ struct CachedScan {
 #[derive(Serialize, Deserialize)]
 struct PersistedScan {
     mtime_ms: Option<u64>,
-    session: Session,
+    /// `None` = known-empty. Defaults so caches written before negative
+    /// entries existed still load (a present object deserializes as `Some`).
+    #[serde(default)]
+    session: Option<Session>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,11 +82,9 @@ struct PersistedCache {
 const SCAN_CACHE_VERSION: u32 = 1;
 
 fn systime_to_ms(t: SystemTime) -> Option<u64> {
-    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
-}
-
-fn ms_to_systime(ms: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_millis(ms)
+    t.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
 }
 
 fn scan_cache_path(provider_name: &str) -> PathBuf {
@@ -76,7 +93,9 @@ fn scan_cache_path(provider_name: &str) -> PathBuf {
 
 fn load_scan_cache_from_disk(provider_name: &str) -> HashMap<String, CachedScan> {
     let path = scan_cache_path(provider_name);
-    let Ok(text) = std::fs::read_to_string(&path) else { return HashMap::new(); };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
     let Ok(pc) = serde_json::from_str::<PersistedCache>(&text) else {
         crate::log::info(&format!(
             "scan_cache: discarded unreadable cache at {:?}",
@@ -96,7 +115,7 @@ fn load_scan_cache_from_disk(provider_name: &str) -> HashMap<String, CachedScan>
         out.insert(
             k,
             CachedScan {
-                mtime_raw: v.mtime_ms.map(ms_to_systime),
+                mtime_ms: v.mtime_ms,
                 session: v.session,
             },
         );
@@ -118,14 +137,19 @@ fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedSc
             (
                 k.clone(),
                 PersistedScan {
-                    mtime_ms: v.mtime_raw.and_then(systime_to_ms),
+                    mtime_ms: v.mtime_ms,
                     session: v.session.clone(),
                 },
             )
         })
         .collect();
-    let pc = PersistedCache { version: SCAN_CACHE_VERSION, entries };
-    let Ok(text) = serde_json::to_string(&pc) else { return; };
+    let pc = PersistedCache {
+        version: SCAN_CACHE_VERSION,
+        entries,
+    };
+    let Ok(text) = serde_json::to_string(&pc) else {
+        return;
+    };
     if let Err(e) = std::fs::write(&tmp, text) {
         crate::log::warn(&format!("scan_cache write {tmp:?} failed: {e}"));
         return;
@@ -242,10 +266,14 @@ impl Provider for ConfigDrivenProvider {
         for stub in &stubs {
             seen.insert(stub.session_id.clone());
 
-            // Cache hit: same session_id AND same mtime → reuse parsed Session.
+            // Cache hit: same session_id AND same mtime → reuse the stored
+            // result, including a remembered "this one is empty" (None).
             if let Some(entry) = cache.get(&stub.session_id) {
-                if entry.mtime_raw == stub.mtime_raw {
-                    out.push(entry.session.clone());
+                if entry.mtime_ms == stub_mtime_ms(stub.mtime_raw) {
+                    match &entry.session {
+                        Some(s) => out.push(s.clone()),
+                        None => dropped += 1,
+                    }
                     hits += 1;
                     continue;
                 }
@@ -258,16 +286,29 @@ impl Provider for ConfigDrivenProvider {
                 Ok(Some(s)) => {
                     cache.insert(
                         stub.session_id.clone(),
-                        CachedScan { mtime_raw: stub.mtime_raw, session: s.clone() },
+                        CachedScan {
+                            mtime_ms: stub_mtime_ms(stub.mtime_raw),
+                            session: Some(s.clone()),
+                        },
                     );
                     out.push(s);
                 }
                 Ok(None) => {
-                    // Filtered out (e.g. empty session) — ensure no stale cache entry.
-                    cache.remove(&stub.session_id);
+                    // Deterministically empty at this mtime — remember that so
+                    // we never re-read it until the file actually changes.
+                    cache.insert(
+                        stub.session_id.clone(),
+                        CachedScan {
+                            mtime_ms: stub_mtime_ms(stub.mtime_raw),
+                            session: None,
+                        },
+                    );
                     dropped += 1;
                 }
                 Err(_) => {
+                    // A read/parse error may be transient (file mid-write, AV
+                    // lock). Do NOT negative-cache it — drop the entry so the
+                    // next scan retries.
                     cache.remove(&stub.session_id);
                     dropped += 1;
                 }
@@ -275,7 +316,9 @@ impl Provider for ConfigDrivenProvider {
         }
 
         // Evict cache entries for sessions that no longer exist on disk.
+        let before_evict = cache.len();
         cache.retain(|k, _| seen.contains(k));
+        let evicted = before_evict - cache.len();
 
         crate::log::info(&format!(
             "Provider '{}' scan cache: total={} hits={} misses={} dropped={}",
@@ -286,9 +329,12 @@ impl Provider for ConfigDrivenProvider {
             dropped
         ));
 
-        // Persist if anything changed this scan (misses, drops, or size shrank
-        // via retain()). Hits-only scans skip disk I/O.
-        let mutated = misses > 0 || dropped > 0 || cache.len() != hits + misses;
+        // Persist only when the cache actually changed. `dropped` can no longer
+        // be used as a proxy: empty sessions are now negative-cached, so a
+        // steady state with known-empty sessions reports drops on every scan
+        // while the cache itself is untouched. Writing then would re-serialize
+        // thousands of sessions to disk every cycle.
+        let mutated = misses > 0 || evicted > 0;
         if mutated {
             save_scan_cache_to_disk(&self.cfg.name, &cache);
         }
@@ -310,7 +356,8 @@ impl Provider for ConfigDrivenProvider {
     /// returned `sessions.len()` may be smaller than `limit`.
     fn discover_sessions_paged(&self, offset: usize, limit: usize) -> Result<PagedSessions> {
         // Stat-only enumeration to get total candidate count for `has_more`.
-        let total_candidates = count_candidates(&self.cfg.discovery, &self.cfg.session_id, &self.base_dir)?;
+        let total_candidates =
+            count_candidates(&self.cfg.discovery, &self.cfg.session_id, &self.base_dir)?;
 
         // Load only (offset+limit) candidates by mtime-desc.
         let take = offset.saturating_add(limit);
@@ -323,13 +370,19 @@ impl Provider for ConfigDrivenProvider {
 
         let mut parsed: Vec<Session> = Vec::with_capacity(candidates.len());
         for cand in candidates {
-            if let Ok(Some(s)) = parse_session(self, &cand) { parsed.push(s) }
+            if let Ok(Some(s)) = parse_session(self, &cand) {
+                parsed.push(s)
+            }
         }
         parsed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
         let sessions: Vec<Session> = parsed.into_iter().skip(offset).take(limit).collect();
         let has_more = total_candidates > offset + sessions.len();
-        Ok(PagedSessions { sessions, total: total_candidates, has_more })
+        Ok(PagedSessions {
+            sessions,
+            total: total_candidates,
+            has_more,
+        })
     }
 
     fn match_processes(&self, sessions: &mut [Session]) -> Result<()> {
@@ -367,7 +420,11 @@ impl Provider for ConfigDrivenProvider {
         }
         if let TabTitleConfig::FromTitle = tab {
             let t = session.title.trim();
-            return if t.is_empty() { None } else { Some(t.to_string()) };
+            return if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            };
         }
         let state_dir = session.state_dir.as_deref()?;
         // Try configured tail first (fast path). If the required event (e.g. a
@@ -376,7 +433,12 @@ impl Provider for ConfigDrivenProvider {
         // cap, then fall back to reading the whole file.
         let base_tail = base_tail_bytes(self);
         let mut tail = base_tail.max(1);
-        let caps = [tail, tail.saturating_mul(4), tail.saturating_mul(16), usize::MAX];
+        let caps = [
+            tail,
+            tail.saturating_mul(4),
+            tail.saturating_mul(16),
+            usize::MAX,
+        ];
         for &cap in &caps {
             let events = read_session_events_with_tail(self, state_dir, cap).ok()?;
             if let Some(t) = extract_tab_title(self, tab, &events) {
@@ -384,7 +446,9 @@ impl Provider for ConfigDrivenProvider {
             }
             // If we already read the whole file, stop.
             if let Ok(md) = std::fs::metadata(session_events_path(self, state_dir)) {
-                if (md.len() as usize) <= cap { break; }
+                if (md.len() as usize) <= cap {
+                    break;
+                }
             }
             tail = cap;
         }
@@ -471,14 +535,18 @@ fn list_stubs(
         } => {
             let mut out = Vec::new();
             for entry in std::fs::read_dir(base_dir)?.flatten() {
-                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) { continue; }
+                if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                    continue;
+                }
                 let dir = entry.path();
                 let session_id = dir
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_string();
-                if session_id.is_empty() { continue; }
+                if session_id.is_empty() {
+                    continue;
+                }
                 let events_path = dir.join(events_file);
                 let (mtime_raw, mtime_str) = stat_mtime_pair(&events_path);
                 let metadata_path = metadata_file.as_deref().map(|name| dir.join(name));
@@ -522,25 +590,59 @@ fn list_stubs(
                 })
                 .collect())
         }
-        DiscoveryStrategy::DatePartitioned { pattern: _, tail_bytes } => {
+        DiscoveryStrategy::DatePartitioned {
+            pattern: _,
+            tail_bytes,
+        } => {
             let mut out = Vec::new();
             for yr in std::fs::read_dir(base_dir)?.flatten() {
-                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                for mo in std::fs::read_dir(yr.path()).ok().into_iter().flatten().flatten() {
-                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                    for day in std::fs::read_dir(mo.path()).ok().into_iter().flatten().flatten() {
-                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                        for file in std::fs::read_dir(day.path()).ok().into_iter().flatten().flatten() {
+                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                for mo in std::fs::read_dir(yr.path())
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    for day in std::fs::read_dir(mo.path())
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                            continue;
+                        }
+                        for file in std::fs::read_dir(day.path())
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                        {
                             let p = file.path();
-                            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+                            if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                                continue;
+                            }
                             let session_id = p
                                 .file_stem()
                                 .and_then(|s| s.to_str())
                                 .map(|s| {
-                                    s.rsplit('-').take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("-")
+                                    s.rsplit('-')
+                                        .take(5)
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                        .rev()
+                                        .collect::<Vec<_>>()
+                                        .join("-")
                                 })
                                 .unwrap_or_default();
-                            if session_id.is_empty() { continue; }
+                            if session_id.is_empty() {
+                                continue;
+                            }
                             let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
                             out.push(SessionStub {
                                 session_id,
@@ -589,7 +691,13 @@ fn list_candidates(
             events_file,
             tail_bytes,
             lockfile_pattern: _,
-        } => list_dir_per_session(base_dir, metadata_file.as_deref(), events_file, *tail_bytes, limit),
+        } => list_dir_per_session(
+            base_dir,
+            metadata_file.as_deref(),
+            events_file,
+            *tail_bytes,
+            limit,
+        ),
         DiscoveryStrategy::FilePerSession {
             glob,
             tail_bytes,
@@ -602,9 +710,10 @@ fn list_candidates(
             matches!(session_id_cfg, SessionIdConfig::ParentDirName),
             limit,
         ),
-        DiscoveryStrategy::DatePartitioned { pattern, tail_bytes } => {
-            list_date_partitioned(base_dir, pattern, *tail_bytes, limit)
-        }
+        DiscoveryStrategy::DatePartitioned {
+            pattern,
+            tail_bytes,
+        } => list_date_partitioned(base_dir, pattern, *tail_bytes, limit),
     }
 }
 
@@ -623,13 +732,22 @@ fn count_candidates(
             let mut n = 0;
             for entry in std::fs::read_dir(base_dir)?.flatten() {
                 if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                    && entry.file_name().to_str().map(|s| !s.is_empty()).unwrap_or(false) {
-                        n += 1;
-                    }
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                {
+                    n += 1;
+                }
             }
             Ok(n)
         }
-        DiscoveryStrategy::FilePerSession { glob, hide_paths_glob, .. } => {
+        DiscoveryStrategy::FilePerSession {
+            glob,
+            hide_paths_glob,
+            ..
+        } => {
             let mut stubs: Vec<FileStub> = Vec::new();
             let session_id_from_parent = matches!(session_id_cfg, SessionIdConfig::ParentDirName);
             stat_files_recursive(
@@ -645,12 +763,33 @@ fn count_candidates(
         DiscoveryStrategy::DatePartitioned { .. } => {
             let mut n = 0;
             for yr in std::fs::read_dir(base_dir)?.flatten() {
-                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                for mo in std::fs::read_dir(yr.path()).ok().into_iter().flatten().flatten() {
-                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                    for day in std::fs::read_dir(mo.path()).ok().into_iter().flatten().flatten() {
-                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                        for file in std::fs::read_dir(day.path()).ok().into_iter().flatten().flatten() {
+                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                for mo in std::fs::read_dir(yr.path())
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                        continue;
+                    }
+                    for day in std::fs::read_dir(mo.path())
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                    {
+                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                            continue;
+                        }
+                        for file in std::fs::read_dir(day.path())
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                        {
                             let p = file.path();
                             if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
                                 n += 1;
@@ -667,8 +806,12 @@ fn count_candidates(
 /// Cheap stat returning both the SystemTime (for sort) and RFC3339 string
 /// (for the Candidate). One syscall.
 fn stat_mtime_pair(p: &Path) -> (Option<std::time::SystemTime>, Option<String>) {
-    let Ok(md) = std::fs::metadata(p) else { return (None, None); };
-    let Ok(t) = md.modified() else { return (None, None); };
+    let Ok(md) = std::fs::metadata(p) else {
+        return (None, None);
+    };
+    let Ok(t) = md.modified() else {
+        return (None, None);
+    };
     let dt: chrono::DateTime<chrono::Local> = t.into();
     (Some(t), Some(dt.to_rfc3339()))
 }
@@ -706,17 +849,31 @@ fn list_dir_per_session(
             continue;
         }
         let dir = entry.path();
-        let session_id = dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        if session_id.is_empty() { continue; }
+        let session_id = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if session_id.is_empty() {
+            continue;
+        }
         let events_path = dir.join(events_file);
         let (mtime_raw, mtime_str) = stat_mtime_pair(&events_path);
-        stubs.push(DirStub { dir, session_id, events_path, mtime_raw, mtime_str });
+        stubs.push(DirStub {
+            dir,
+            session_id,
+            events_path,
+            mtime_raw,
+            mtime_str,
+        });
     }
 
     // Phase B: sort by mtime desc and truncate if limit requested.
     if limit.is_some() {
         stubs.sort_by_key(|b| std::cmp::Reverse(b.mtime_raw));
-        if let Some(n) = limit { stubs.truncate(n); }
+        if let Some(n) = limit {
+            stubs.truncate(n);
+        }
     }
 
     // Phase C: heavy reads — tail events + metadata YAML — only for surviving stubs.
@@ -765,7 +922,9 @@ fn list_file_per_session(
     // Phase B: sort by mtime desc and truncate if limit requested.
     if limit.is_some() {
         stubs.sort_by_key(|b| std::cmp::Reverse(b.mtime_raw));
-        if let Some(n) = limit { stubs.truncate(n); }
+        if let Some(n) = limit {
+            stubs.truncate(n);
+        }
     }
 
     // Phase C: heavy tail reads only for survivors.
@@ -791,7 +950,9 @@ fn stat_files_recursive(
     session_id_from_parent: bool,
     out: &mut Vec<FileStub>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let p = entry.path();
         let ft = match entry.file_type() {
@@ -805,7 +966,10 @@ fn stat_files_recursive(
         if !matches_simple_glob(&p, root, glob_pat) {
             continue;
         }
-        if hide_globs.iter().any(|pat| matches_simple_glob(&p, root, pat)) {
+        if hide_globs
+            .iter()
+            .any(|pat| matches_simple_glob(&p, root, pat))
+        {
             continue;
         }
         let session_id = if session_id_from_parent {
@@ -820,9 +984,16 @@ fn stat_files_recursive(
                 .unwrap_or("")
                 .to_string()
         };
-        if session_id.is_empty() { continue; }
+        if session_id.is_empty() {
+            continue;
+        }
         let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
-        out.push(FileStub { path: p, session_id, mtime_raw, mtime_str });
+        out.push(FileStub {
+            path: p,
+            session_id,
+            mtime_raw,
+            mtime_str,
+        });
     }
 }
 
@@ -840,25 +1011,61 @@ fn list_date_partitioned(
     // Phase A: stat-only enumeration across YYYY/MM/DD.
     let mut stubs: Vec<FileStub> = Vec::new();
     for yr in std::fs::read_dir(base)?.flatten() {
-        if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-        for mo in std::fs::read_dir(yr.path()).ok().into_iter().flatten().flatten() {
-            if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-            for day in std::fs::read_dir(mo.path()).ok().into_iter().flatten().flatten() {
-                if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) { continue; }
-                for file in std::fs::read_dir(day.path()).ok().into_iter().flatten().flatten() {
+        if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        for mo in std::fs::read_dir(yr.path())
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            for day in std::fs::read_dir(mo.path())
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                for file in std::fs::read_dir(day.path())
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
                     let p = file.path();
-                    if p.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+                    if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                        continue;
+                    }
                     let session_id = p
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .map(|s| {
                             // Codex files are `rollout-<iso>-<uuid>.jsonl` — take UUID
-                            s.rsplit('-').take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("-")
+                            s.rsplit('-')
+                                .take(5)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join("-")
                         })
                         .unwrap_or_default();
-                    if session_id.is_empty() { continue; }
+                    if session_id.is_empty() {
+                        continue;
+                    }
                     let (mtime_raw, mtime_str) = stat_mtime_pair(&p);
-                    stubs.push(FileStub { path: p, session_id, mtime_raw, mtime_str });
+                    stubs.push(FileStub {
+                        path: p,
+                        session_id,
+                        mtime_raw,
+                        mtime_str,
+                    });
                 }
             }
         }
@@ -867,7 +1074,9 @@ fn list_date_partitioned(
     // Phase B: sort + truncate if limit.
     if limit.is_some() {
         stubs.sort_by_key(|b| std::cmp::Reverse(b.mtime_raw));
-        if let Some(n) = limit { stubs.truncate(n); }
+        if let Some(n) = limit {
+            stubs.truncate(n);
+        }
     }
 
     // Phase C: heavy tail reads only for survivors.
@@ -898,7 +1107,9 @@ fn matches_simple_glob(path: &Path, base: &Path, pat: &str) -> bool {
                 if chars.peek() == Some(&'*') {
                     chars.next();
                     // optional trailing slash
-                    if chars.peek() == Some(&'/') { chars.next(); }
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                    }
                     re.push_str(".*");
                 } else {
                     re.push_str("[^/]*");
@@ -933,13 +1144,17 @@ fn read_jsonl_tail(path: &Path, tail_bytes: usize) -> Result<Vec<Value>> {
         let mut s = String::new();
         f.read_to_string(&mut s)?;
         // drop partial first line
-        if let Some(pos) = s.find('\n') { s.drain(..=pos); }
+        if let Some(pos) = s.find('\n') {
+            s.drain(..=pos);
+        }
         s
     };
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             out.push(v);
         }
@@ -993,13 +1208,12 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     // title
     let title_extracted = extract_field(prov, &cand.metadata, &kept, &cfg.fields.title);
     let title_used_fallback = title_extracted.is_none();
-    let title = title_extracted
-        .unwrap_or_else(|| format!("{} session", cfg.display_name));
+    let title = title_extracted.unwrap_or_else(|| format!("{} session", cfg.display_name));
     let title = truncate_str_safe(&title, 120);
 
     // summary
-    let mut summary = extract_field(prov, &cand.metadata, &kept, &cfg.fields.summary)
-        .unwrap_or_default();
+    let mut summary =
+        extract_field(prov, &cand.metadata, &kept, &cfg.fields.summary).unwrap_or_default();
 
     // summary_parts — labeled multi-section composition (the richer detail
     // pane body the legacy hand-written providers produced).
@@ -1041,10 +1255,22 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     }
 
     // timestamps
-    let created_at = extract_timestamp(prov, &cand.metadata, &kept, &cfg.fields.created_at, cand.file_mtime.as_deref())
-        .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
-    let updated_at = extract_timestamp(prov, &cand.metadata, &kept, &cfg.fields.updated_at, cand.file_mtime.as_deref())
-        .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
+    let created_at = extract_timestamp(
+        prov,
+        &cand.metadata,
+        &kept,
+        &cfg.fields.created_at,
+        cand.file_mtime.as_deref(),
+    )
+    .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
+    let updated_at = extract_timestamp(
+        prov,
+        &cand.metadata,
+        &kept,
+        &cfg.fields.updated_at,
+        cand.file_mtime.as_deref(),
+    )
+    .unwrap_or_else(|| cand.file_mtime.clone().unwrap_or_default());
 
     // state — default Resumable unless a process matches later
     let state = SessionState {
@@ -1090,13 +1316,17 @@ fn resolve_cwd(
 ) -> Result<Option<PathBuf>> {
     match &prov.cfg.cwd {
         CwdConfig::YamlField { path } => {
-            let Some(meta) = &cand.metadata else { return Ok(None) };
+            let Some(meta) = &cand.metadata else {
+                return Ok(None);
+            };
             let e = prov.expr(path);
             Ok(e.eval_str(meta).map(PathBuf::from))
         }
         CwdConfig::EventField { event_type, field } => {
             let e = prov.expr(field);
-            let type_filter = event_type.as_ref().map(|t| prov.expr(&format!("type == \"{t}\"")));
+            let type_filter = event_type
+                .as_ref()
+                .map(|t| prov.expr(&format!("type == \"{t}\"")));
             for ev in events {
                 let matches = match &type_filter {
                     Some(tf) => tf.eval_bool(ev),
@@ -1144,7 +1374,11 @@ fn resolve_cwd(
             }
             Ok(None)
         }
-        CwdConfig::DirnameDecode { decoder, backtrack, from_parent } => {
+        CwdConfig::DirnameDecode {
+            decoder,
+            backtrack,
+            from_parent,
+        } => {
             // For FilePerSession, the encoded CWD lives in the PARENT directory name.
             // For DirPerSession, the session dir itself carries the encoded CWD.
             let name_src: Option<&Path> = if *from_parent {
@@ -1158,7 +1392,11 @@ fn resolve_cwd(
                 .unwrap_or("");
             Ok(Some(decode_cwd_name(name, decoder, *backtrack)))
         }
-        CwdConfig::ConfigLookup { lookup_file, key_source, value_path } => {
+        CwdConfig::ConfigLookup {
+            lookup_file,
+            key_source,
+            value_path,
+        } => {
             let p = expand_path(lookup_file);
             let text = std::fs::read_to_string(&p).unwrap_or_default();
             let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -1169,7 +1407,11 @@ fn resolve_cwd(
             }
             Ok(None)
         }
-        CwdConfig::ConfigReverseLookup { lookup_file, key_source, container_path } => {
+        CwdConfig::ConfigReverseLookup {
+            lookup_file,
+            key_source,
+            container_path,
+        } => {
             let p = expand_path(lookup_file);
             let text = std::fs::read_to_string(&p).unwrap_or_default();
             let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -1239,7 +1481,11 @@ fn decode_cwd_name(name: &str, decoder: &str, backtrack: bool) -> PathBuf {
             let mut out = String::new();
             let bytes = name.as_bytes();
             let mut i = 0usize;
-            if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b'-' && bytes[2] == b'-' {
+            if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b'-'
+                && bytes[2] == b'-'
+            {
                 out.push(bytes[0] as char);
                 out.push(':');
                 out.push('\\');
@@ -1267,7 +1513,11 @@ fn drive_dash_backtrack(encoded: &str) -> Option<PathBuf> {
     let (drive, remainder) = match encoded.find("--") {
         Some(pos) => {
             let drive = format!("{}:\\", &encoded[..pos]);
-            let rest = if pos + 2 < encoded.len() { &encoded[pos + 2..] } else { "" };
+            let rest = if pos + 2 < encoded.len() {
+                &encoded[pos + 2..]
+            } else {
+                ""
+            };
             (drive, rest)
         }
         None => return None,
@@ -1342,14 +1592,21 @@ fn extract_field_one(
 
     let raw = match spec.strategy.as_str() {
         "metadata_field" => meta.as_ref().and_then(|m| path.eval_str(m)),
-        "first_matching_event" => events.iter().find(|ev| match &predicate {
-            Some(p) => p.eval_bool(ev),
-            None => true,
-        }).and_then(|ev| path.eval_str(ev)),
-        "last_matching_event" => events.iter().rev().find(|ev| match &predicate {
-            Some(p) => p.eval_bool(ev),
-            None => true,
-        }).and_then(|ev| path.eval_str(ev)),
+        "first_matching_event" => events
+            .iter()
+            .find(|ev| match &predicate {
+                Some(p) => p.eval_bool(ev),
+                None => true,
+            })
+            .and_then(|ev| path.eval_str(ev)),
+        "last_matching_event" => events
+            .iter()
+            .rev()
+            .find(|ev| match &predicate {
+                Some(p) => p.eval_bool(ev),
+                None => true,
+            })
+            .and_then(|ev| path.eval_str(ev)),
         "nth_from_end_matching_event" => {
             let n = spec.nth.unwrap_or(1).max(1);
             events
@@ -1372,7 +1629,11 @@ fn extract_field_one(
                 })
                 .filter_map(|ev| path.eval_str(ev))
                 .collect();
-            if parts.is_empty() { None } else { Some(parts.join(sep)) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(sep))
+            }
         }
         _ => None,
     };
@@ -1397,9 +1658,17 @@ fn apply_transforms(input: &str, transforms: &[String], limit: Option<usize>) ->
                 let mut out = String::with_capacity(s.len());
                 let mut in_tag = false;
                 for ch in s.chars() {
-                    if ch == '<' { in_tag = true; continue; }
-                    if ch == '>' { in_tag = false; continue; }
-                    if !in_tag { out.push(ch); }
+                    if ch == '<' {
+                        in_tag = true;
+                        continue;
+                    }
+                    if ch == '>' {
+                        in_tag = false;
+                        continue;
+                    }
+                    if !in_tag {
+                        out.push(ch);
+                    }
                 }
                 out.trim().to_string()
             }
@@ -1454,20 +1723,19 @@ fn extract_timestamp(
 // Liveness detection — strategy chain dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn match_processes_dispatch(
-    prov: &ConfigDrivenProvider,
-    sessions: &mut [Session],
-) -> Result<()> {
+fn match_processes_dispatch(prov: &ConfigDrivenProvider, sessions: &mut [Session]) -> Result<()> {
     let cfg = &prov.cfg.liveness_detection;
 
     // Enumerate processes once if any strategy needs them.
-    let needs_procs = cfg.strategies.iter().any(|s| matches!(
-        s,
-        LivenessStrategy::CmdlineFlagUuid { .. }
-            | LivenessStrategy::CmdlinePositionalUuid
-            | LivenessStrategy::CmdlineContains
-            | LivenessStrategy::RecentlyActive { .. }
-    ));
+    let needs_procs = cfg.strategies.iter().any(|s| {
+        matches!(
+            s,
+            LivenessStrategy::CmdlineFlagUuid { .. }
+                | LivenessStrategy::CmdlinePositionalUuid
+                | LivenessStrategy::CmdlineContains
+                | LivenessStrategy::RecentlyActive { .. }
+        )
+    });
     let procs: HashMap<u32, ProcessEntry> = if needs_procs {
         match cfg.executable.as_deref() {
             Some(exe) => discover_processes(exe),
@@ -1478,7 +1746,10 @@ fn match_processes_dispatch(
     };
 
     // Enumerate WT tab titles once if any strategy needs them.
-    let needs_tabs = cfg.strategies.iter().any(|s| matches!(s, LivenessStrategy::TabTitleMatch { .. }));
+    let needs_tabs = cfg
+        .strategies
+        .iter()
+        .any(|s| matches!(s, LivenessStrategy::TabTitleMatch { .. }));
     let tab_titles: Vec<String> = if needs_tabs {
         crate::wt_tabs::list_tab_titles().unwrap_or_default()
     } else {
@@ -1499,7 +1770,9 @@ fn match_processes_dispatch(
 
     // Build state signals from events, then run default_state_inference
     for s in sessions.iter_mut() {
-        let Some(dir) = s.state_dir.as_deref() else { continue };
+        let Some(dir) = s.state_dir.as_deref() else {
+            continue;
+        };
         let events = read_session_events(prov, dir).unwrap_or_default();
         let signals = build_state_signals(prov, &events, s);
         s.state = prov.infer_state(&signals);
@@ -1520,21 +1793,21 @@ fn run_strategy(
     claimed: &mut HashSet<u32>,
 ) -> bool {
     match strategy {
-        LivenessStrategy::Lockfile { lockfile_pattern, pid_extract_regex } => {
-            strat_lockfile(s, lockfile_pattern, pid_extract_regex)
-        }
+        LivenessStrategy::Lockfile {
+            lockfile_pattern,
+            pid_extract_regex,
+        } => strat_lockfile(s, lockfile_pattern, pid_extract_regex),
         LivenessStrategy::CmdlineFlagUuid { flag } => {
             strat_cmdline_flag_uuid(s, procs, claimed, flag, cfg)
         }
         LivenessStrategy::CmdlinePositionalUuid => {
             strat_cmdline_positional_uuid(s, procs, claimed, cfg)
         }
-        LivenessStrategy::CmdlineContains => {
-            strat_cmdline_contains(s, procs, claimed, cfg)
-        }
-        LivenessStrategy::TabTitleMatch { fuzzy, min_title_len } => {
-            strat_tab_title_match(s, tab_titles, *fuzzy, *min_title_len)
-        }
+        LivenessStrategy::CmdlineContains => strat_cmdline_contains(s, procs, claimed, cfg),
+        LivenessStrategy::TabTitleMatch {
+            fuzzy,
+            min_title_len,
+        } => strat_tab_title_match(s, tab_titles, *fuzzy, *min_title_len),
         LivenessStrategy::RecentlyActive { within_secs } => {
             strat_recently_active(s, procs, claimed, *within_secs, cfg)
         }
@@ -1544,8 +1817,12 @@ fn run_strategy(
 // ── Strategy implementations ────────────────────────────────────────────────
 
 fn strat_lockfile(s: &mut Session, pattern: &str, pid_regex: &str) -> bool {
-    let Some(dir) = s.state_dir.as_deref() else { return false };
-    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let Some(dir) = s.state_dir.as_deref() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
     let mut best_pid: Option<u32> = None;
     let mut best_mtime: Option<std::time::SystemTime> = None;
     for e in entries.flatten() {
@@ -1553,7 +1830,9 @@ fn strat_lockfile(s: &mut Session, pattern: &str, pid_regex: &str) -> bool {
         if !matches_simple_glob(&e.path(), dir, pattern) {
             continue;
         }
-        let Some(pid) = regex_capture1(pid_regex, &name).and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Some(pid) = regex_capture1(pid_regex, &name).and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
         let mtime = e.metadata().ok().and_then(|m| m.modified().ok());
         if best_mtime.is_none() || mtime > best_mtime {
             best_mtime = mtime;
@@ -1592,12 +1871,16 @@ fn strat_cmdline_flag_uuid(
     cfg: &LivenessDetectionConfig,
 ) -> bool {
     for (pid, p) in procs {
-        if claimed.contains(pid) { continue; }
-        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
-        let matched = flag
-            .as_slice()
-            .iter()
-            .any(|f| extract_flag_value(&p.command_line, f).as_deref() == Some(s.provider_session_id.as_str()));
+        if claimed.contains(pid) {
+            continue;
+        }
+        if !cmdline_passes_filters(&p.command_line, cfg) {
+            continue;
+        }
+        let matched = flag.as_slice().iter().any(|f| {
+            extract_flag_value(&p.command_line, f).as_deref()
+                == Some(s.provider_session_id.as_str())
+        });
         if matched {
             claimed.insert(*pid);
             s.pid = Some(*pid);
@@ -1615,9 +1898,16 @@ fn strat_cmdline_positional_uuid(
     cfg: &LivenessDetectionConfig,
 ) -> bool {
     for (pid, p) in procs {
-        if claimed.contains(pid) { continue; }
-        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
-        if p.command_line.split_whitespace().any(|a| a == s.provider_session_id) {
+        if claimed.contains(pid) {
+            continue;
+        }
+        if !cmdline_passes_filters(&p.command_line, cfg) {
+            continue;
+        }
+        if p.command_line
+            .split_whitespace()
+            .any(|a| a == s.provider_session_id)
+        {
             claimed.insert(*pid);
             s.pid = Some(*pid);
             s.state.process = ProcessState::Running;
@@ -1634,8 +1924,12 @@ fn strat_cmdline_contains(
     cfg: &LivenessDetectionConfig,
 ) -> bool {
     for (pid, p) in procs {
-        if claimed.contains(pid) { continue; }
-        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
+        if claimed.contains(pid) {
+            continue;
+        }
+        if !cmdline_passes_filters(&p.command_line, cfg) {
+            continue;
+        }
         if p.command_line.contains(&s.provider_session_id) {
             claimed.insert(*pid);
             s.pid = Some(*pid);
@@ -1685,14 +1979,20 @@ fn strat_recently_active(
     within_secs: u64,
     cfg: &LivenessDetectionConfig,
 ) -> bool {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else { return false };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) else {
+        return false;
+    };
     let delta = chrono::Utc::now().signed_duration_since(parsed.to_utc());
     if delta.num_seconds() > within_secs as i64 {
         return false;
     }
     for (pid, p) in procs {
-        if claimed.contains(pid) { continue; }
-        if !cmdline_passes_filters(&p.command_line, cfg) { continue; }
+        if claimed.contains(pid) {
+            continue;
+        }
+        if !cmdline_passes_filters(&p.command_line, cfg) {
+            continue;
+        }
         claimed.insert(*pid);
         s.pid = Some(*pid);
         s.state.process = ProcessState::Running;
@@ -1710,9 +2010,11 @@ fn process_is_alive(pid: u32) -> bool {
 
 fn read_session_events(prov: &ConfigDrivenProvider, state_dir: &Path) -> Result<Vec<Value>> {
     match &prov.cfg.discovery.strategy {
-        DiscoveryStrategy::DirPerSession { events_file, tail_bytes, .. } => {
-            read_jsonl_tail(&state_dir.join(events_file), *tail_bytes)
-        }
+        DiscoveryStrategy::DirPerSession {
+            events_file,
+            tail_bytes,
+            ..
+        } => read_jsonl_tail(&state_dir.join(events_file), *tail_bytes),
         DiscoveryStrategy::FilePerSession { tail_bytes, .. }
         | DiscoveryStrategy::DatePartitioned { tail_bytes, .. } => {
             read_jsonl_tail(state_dir, *tail_bytes)
@@ -1769,7 +2071,12 @@ fn build_state_signals(
 
     // last_event_age
     if let Some(last) = events.last() {
-        let ts_paths = ["timestamp", "startTime", "payload.timestamp", "data.startTime"];
+        let ts_paths = [
+            "timestamp",
+            "startTime",
+            "payload.timestamp",
+            "data.startTime",
+        ];
         let mut age: Option<u64> = None;
         for p in ts_paths.iter() {
             if let Some(s) = prov.expr(p).eval_str(last) {
@@ -1832,9 +2139,10 @@ fn build_state_signals(
         .strategies
         .iter()
         .find_map(|s| match s {
-            LivenessStrategy::Lockfile { lockfile_pattern, pid_extract_regex } => {
-                Some((lockfile_pattern.as_str(), pid_extract_regex.as_str()))
-            }
+            LivenessStrategy::Lockfile {
+                lockfile_pattern,
+                pid_extract_regex,
+            } => Some((lockfile_pattern.as_str(), pid_extract_regex.as_str())),
             _ => None,
         });
     if let Some((lockfile_pattern, pid_extract_regex)) = lockfile_cfg {
@@ -1842,9 +2150,13 @@ fn build_state_signals(
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for e in entries.flatten() {
                     let name = e.file_name().to_string_lossy().to_string();
-                    if !matches_simple_glob(&e.path(), dir, lockfile_pattern) { continue; }
+                    if !matches_simple_glob(&e.path(), dir, lockfile_pattern) {
+                        continue;
+                    }
                     signals.lock_file_exists = Some(true);
-                    if let Some(pid) = regex_capture1(pid_extract_regex, &name).and_then(|s| s.parse::<u32>().ok()) {
+                    if let Some(pid) =
+                        regex_capture1(pid_extract_regex, &name).and_then(|s| s.parse::<u32>().ok())
+                    {
                         signals.lock_file_pid = Some(pid);
                     }
                 }
@@ -1861,7 +2173,10 @@ fn apply_state_delta(signals: &mut StateSignals, delta: &StateSignalDelta, _sess
         match i.as_str() {
             "busy" => signals.has_unfinished_turn = Some(true),
             "waiting_input" => signals.has_unfinished_turn = Some(false),
-            "idle" => { signals.has_unfinished_turn = Some(false); signals.recent_tool_activity = Some(false); }
+            "idle" => {
+                signals.has_unfinished_turn = Some(false);
+                signals.recent_tool_activity = Some(false);
+            }
             _ => {}
         }
     }
@@ -1895,10 +2210,19 @@ fn extract_tab_title(
         TabTitleConfig::FromField { r#where, path } => {
             let w = prov.expr(r#where);
             let p = prov.expr(path);
-            events.iter().rev().find(|ev| w.eval_bool(ev)).and_then(|ev| p.eval_str(ev))
+            events
+                .iter()
+                .rev()
+                .find(|ev| w.eval_bool(ev))
+                .and_then(|ev| p.eval_str(ev))
         }
         TabTitleConfig::FromToolCall {
-            tool_name, r#where, tool_name_path, args_path, arg_field, iterate_path,
+            tool_name,
+            r#where,
+            tool_name_path,
+            args_path,
+            arg_field,
+            iterate_path,
         } => {
             let w = prov.expr(r#where);
             let tnp = prov.expr(tool_name_path);
@@ -1906,7 +2230,9 @@ fn extract_tab_title(
             let af = prov.expr(arg_field);
             let ip = iterate_path.as_ref().map(|p| prov.expr(p));
             for ev in events.iter().rev() {
-                if !w.eval_bool(ev) { continue; }
+                if !w.eval_bool(ev) {
+                    continue;
+                }
                 // Build the list of "tool call" values to scan.
                 let tool_calls: Vec<Value> = if let Some(ref ipe) = ip {
                     match ipe.eval(ev) {
@@ -1917,7 +2243,9 @@ fn extract_tab_title(
                     vec![ev.clone()]
                 };
                 for tc in tool_calls.iter().rev() {
-                    if tnp.eval_str(tc).as_deref() != Some(tool_name) { continue; }
+                    if tnp.eval_str(tc).as_deref() != Some(tool_name) {
+                        continue;
+                    }
                     let args_value = ap.eval(tc);
                     let candidate = af.eval(&args_value);
                     if let Some(s) = match candidate {
@@ -1979,10 +2307,16 @@ mod tiny_regex {
         let mut i = 0usize;
         let mut anchored_start = false;
         let mut anchored_end = false;
-        if i < bytes.len() && bytes[i] == b'^' { anchored_start = true; i += 1; }
+        if i < bytes.len() && bytes[i] == b'^' {
+            anchored_start = true;
+            i += 1;
+        }
         while i < bytes.len() {
             let c = bytes[i];
-            if c == b'$' && i + 1 == bytes.len() { anchored_end = true; break; }
+            if c == b'$' && i + 1 == bytes.len() {
+                anchored_end = true;
+                break;
+            }
             if c == b'(' {
                 cap_start = Some(nodes.len());
                 i += 1;
@@ -2003,9 +2337,13 @@ mod tiny_regex {
 
         // try matching at each starting position
         for start in 0..=input.len() {
-            if anchored_start && start != 0 { break; }
+            if anchored_start && start != 0 {
+                break;
+            }
             if let Some((end, cap)) = match_nodes(&nodes, input, start, cap_start, cap_end) {
-                if anchored_end && end != input.len() { continue; }
+                if anchored_end && end != input.len() {
+                    continue;
+                }
                 if want_cap {
                     return Some(cap.unwrap_or_else(|| input[start..end].to_string()));
                 } else {
@@ -2019,18 +2357,22 @@ mod tiny_regex {
     #[derive(Debug, Clone)]
     enum Node {
         Lit(u8),
-        Any,        // .
-        Digit,      // \d
-        Class(Vec<(u8, u8)>, bool), // ranges, negate
+        Any,                                  // .
+        Digit,                                // \d
+        Class(Vec<(u8, u8)>, bool),           // ranges, negate
         Rep(Box<Node>, usize, Option<usize>), // min, max
     }
 
     fn parse_atom(b: &[u8]) -> Option<(Node, usize)> {
-        if b.is_empty() { return None; }
+        if b.is_empty() {
+            return None;
+        }
         match b[0] {
             b'.' => Some((Node::Any, 1)),
             b'\\' => {
-                if b.len() < 2 { return None; }
+                if b.len() < 2 {
+                    return None;
+                }
                 match b[1] {
                     b'd' => Some((Node::Digit, 2)),
                     c => Some((Node::Lit(c), 2)),
@@ -2039,7 +2381,10 @@ mod tiny_regex {
             b'[' => {
                 let mut j = 1;
                 let mut negate = false;
-                if j < b.len() && b[j] == b'^' { negate = true; j += 1; }
+                if j < b.len() && b[j] == b'^' {
+                    negate = true;
+                    j += 1;
+                }
                 let mut ranges = Vec::new();
                 while j < b.len() && b[j] != b']' {
                     let lo = b[j];
@@ -2052,7 +2397,9 @@ mod tiny_regex {
                         j += 1;
                     }
                 }
-                if j >= b.len() { return None; }
+                if j >= b.len() {
+                    return None;
+                }
                 Some((Node::Class(ranges, negate), j + 1))
             }
             c => Some((Node::Lit(c), 1)),
@@ -2060,7 +2407,9 @@ mod tiny_regex {
     }
 
     fn apply_quant(node: Node, b: &[u8]) -> (Node, usize) {
-        if b.is_empty() { return (node, 0); }
+        if b.is_empty() {
+            return (node, 0);
+        }
         match b[0] {
             b'*' => (Node::Rep(Box::new(node), 0, None), 1),
             b'+' => (Node::Rep(Box::new(node), 1, None), 1),
@@ -2076,7 +2425,11 @@ mod tiny_regex {
             Node::Digit => b.is_ascii_digit(),
             Node::Class(ranges, neg) => {
                 let hit = ranges.iter().any(|(lo, hi)| b >= *lo && b <= *hi);
-                if *neg { !hit } else { hit }
+                if *neg {
+                    !hit
+                } else {
+                    hit
+                }
             }
             _ => false,
         }
@@ -2104,12 +2457,22 @@ mod tiny_regex {
         cap_start_pos: Option<usize>,
         cap_end_pos: Option<usize>,
     ) -> Option<(usize, Option<String>)> {
-        let cap_start_pos = if Some(ni) == cap_start { Some(pos) } else { cap_start_pos };
-        let cap_end_pos = if Some(ni) == cap_end { Some(pos) } else { cap_end_pos };
+        let cap_start_pos = if Some(ni) == cap_start {
+            Some(pos)
+        } else {
+            cap_start_pos
+        };
+        let cap_end_pos = if Some(ni) == cap_end {
+            Some(pos)
+        } else {
+            cap_end_pos
+        };
 
         if ni == nodes.len() {
             let cap = match (cap_start_pos, cap_end_pos) {
-                (Some(s), Some(e)) if e >= s => Some(std::str::from_utf8(&input[s..e]).ok()?.to_string()),
+                (Some(s), Some(e)) if e >= s => {
+                    Some(std::str::from_utf8(&input[s..e]).ok()?.to_string())
+                }
                 _ => None,
             };
             return Some((pos, cap));
@@ -2119,8 +2482,12 @@ mod tiny_regex {
                 let mut count = 0usize;
                 let mut p = pos;
                 while count < *min {
-                    if p >= input.len() { return None; }
-                    if !node_matches_byte(inner, input[p]) { return None; }
+                    if p >= input.len() {
+                        return None;
+                    }
+                    if !node_matches_byte(inner, input[p]) {
+                        return None;
+                    }
                     p += 1;
                     count += 1;
                 }
@@ -2128,23 +2495,49 @@ mod tiny_regex {
                 let mut positions = vec![p];
                 while p < input.len() {
                     let hit_max = max.map(|m| count >= m).unwrap_or(false);
-                    if hit_max { break; }
-                    if !node_matches_byte(inner, input[p]) { break; }
+                    if hit_max {
+                        break;
+                    }
+                    if !node_matches_byte(inner, input[p]) {
+                        break;
+                    }
                     p += 1;
                     count += 1;
                     positions.push(p);
                 }
                 for try_p in positions.into_iter().rev() {
-                    if let Some(r) = match_rec(nodes, ni + 1, input, try_p, cap_start, cap_end, cap_start_pos, cap_end_pos) {
+                    if let Some(r) = match_rec(
+                        nodes,
+                        ni + 1,
+                        input,
+                        try_p,
+                        cap_start,
+                        cap_end,
+                        cap_start_pos,
+                        cap_end_pos,
+                    ) {
                         return Some(r);
                     }
                 }
                 None
             }
             other => {
-                if pos >= input.len() { return None; }
-                if !node_matches_byte(other, input[pos]) { return None; }
-                match_rec(nodes, ni + 1, input, pos + 1, cap_start, cap_end, cap_start_pos, cap_end_pos)
+                if pos >= input.len() {
+                    return None;
+                }
+                if !node_matches_byte(other, input[pos]) {
+                    return None;
+                }
+                match_rec(
+                    nodes,
+                    ni + 1,
+                    input,
+                    pos + 1,
+                    cap_start,
+                    cap_end,
+                    cap_start_pos,
+                    cap_end_pos,
+                )
             }
         }
     }
@@ -2157,6 +2550,146 @@ mod tiny_regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the cache key was a full-precision `SystemTime`, but the
+    /// on-disk form stores milliseconds. After a reload the two never compared
+    /// equal for any file with sub-millisecond mtime, so the persisted cache
+    /// did almost nothing across restarts — observed 2494 misses vs 676 hits
+    /// (the hits being only entries with no mtime at all). Both sides must be
+    /// normalised to milliseconds.
+    #[test]
+    fn mtime_comparison_survives_millisecond_persistence() {
+        use std::time::Duration;
+        let with_sub_ms = UNIX_EPOCH + Duration::from_nanos(1_700_000_000_123_456_789);
+        let as_ms = stub_mtime_ms(Some(with_sub_ms)).expect("convertible");
+
+        // Simulate a reload: only millisecond precision came back from disk.
+        let reloaded = CachedScan {
+            mtime_ms: Some(as_ms),
+            session: None,
+        };
+        assert_eq!(
+            reloaded.mtime_ms,
+            stub_mtime_ms(Some(with_sub_ms)),
+            "a reloaded entry must still match the freshly-stat'd mtime"
+        );
+    }
+
+    #[test]
+    fn stub_mtime_ms_handles_absent_mtime() {
+        assert_eq!(stub_mtime_ms(None), None);
+    }
+
+    /// Round-trip a negative cache entry through the on-disk format.
+    /// A `None` session means "known empty"; losing it would silently restore
+    /// the re-read-every-scan behaviour after a restart.
+    #[test]
+    fn persisted_scan_round_trips_a_negative_entry() {
+        let p = PersistedScan {
+            mtime_ms: Some(1234),
+            session: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: PersistedScan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mtime_ms, Some(1234));
+        assert!(back.session.is_none(), "negative entry must survive reload");
+    }
+
+    /// Caches written before negative entries existed have a bare `session`
+    /// object and no concept of `None`. They must still load rather than being
+    /// discarded, or every user pays a full cold rescan on upgrade.
+    #[test]
+    fn persisted_scan_accepts_pre_negative_cache_format() {
+        let legacy = r#"{"mtime_ms":99,"session":{
+            "id":"x","provider_session_id":"sid","provider_name":"copilot",
+            "cwd":"C:\\tmp","title":"t","tab_title":null,"summary":"s",
+            "state":{"process":"Exited","interaction":"Unknown",
+                     "persistence":"Resumable","health":"Clean",
+                     "confidence":"Low","reason":""},
+            "pid":null,"created_at":"","updated_at":"","state_dir":null}}"#;
+        let back: PersistedScan =
+            serde_json::from_str(legacy).expect("legacy cache entry must still parse");
+        assert_eq!(back.mtime_ms, Some(99));
+        assert!(
+            back.session.is_some(),
+            "a present session object must load as Some"
+        );
+    }
+
+    /// The load-bearing regression. An empty session must be parsed once and
+    /// then remembered as empty, so repeat scans cost no disk reads.
+    ///
+    /// Before this, `Ok(None)` called `cache.remove()`, so on a real store 979
+    /// of 3169 Copilot sessions were re-read on every scan cycle — the bulk of
+    /// a 17-second scan.
+    #[test]
+    fn empty_sessions_are_negative_cached_not_rescanned() {
+        use std::fs;
+
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("copilot.yaml");
+        assert!(yaml.exists(), "providers/copilot.yaml missing");
+
+        let tmp = tempfile::tempdir().unwrap();
+        // A real session, plus an empty one that yields nothing.
+        let good = tmp.path().join("aaaaaaaa-0000-0000-0000-000000000001");
+        fs::create_dir_all(&good).unwrap();
+        fs::write(good.join("workspace.yaml"), "cwd: C:\\tmp\nsummary: Real\n").unwrap();
+        fs::write(
+            good.join("events.jsonl"),
+            "{\"type\":\"user.message\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"data\":{\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        let empty = tmp.path().join("bbbbbbbb-0000-0000-0000-000000000002");
+        fs::create_dir_all(&empty).unwrap();
+        fs::write(empty.join("events.jsonl"), "").unwrap();
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "copilot".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
+        };
+        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg).expect("load copilot.yaml");
+
+        let first = prov.discover_sessions().expect("first scan");
+        let second = prov.discover_sessions().expect("second scan");
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "repeat scans must return the same sessions"
+        );
+
+        // The empty session must now be present in the cache as a negative
+        // entry — not absent, which is what forced a re-read every scan.
+        let cache = prov.scan_cache.lock().unwrap();
+        let entry = cache.get("bbbbbbbb-0000-0000-0000-000000000002");
+        assert!(
+            entry.is_some(),
+            "empty session must be remembered as a negative cache entry"
+        );
+        assert!(
+            entry.unwrap().session.is_none(),
+            "the remembered entry must be None (known-empty)"
+        );
+        // The real session is cached positively and still returned.
+        let good_entry = cache.get("aaaaaaaa-0000-0000-0000-000000000001");
+        assert!(good_entry.is_some_and(|e| e.session.is_some()));
+    }
 
     #[test]
     fn drive_dash_decodes() {
@@ -2172,11 +2705,7 @@ mod tests {
         // No disk → backtrack gives up and returns the fully-hyphenated leaf.
         // This confirms we at least do not crash and prefer the conservative
         // "keep the hyphen" interpretation when the path doesn't exist.
-        let p = decode_cwd_name(
-            "Z--DoesNotExist-subdir-with-hyphens",
-            "drive_dash",
-            true,
-        );
+        let p = decode_cwd_name("Z--DoesNotExist-subdir-with-hyphens", "drive_dash", true);
         assert_eq!(p, PathBuf::from("Z:\\DoesNotExist-subdir-with-hyphens"));
     }
 
@@ -2194,7 +2723,11 @@ mod tests {
     #[test]
     fn apply_transforms_basic() {
         assert_eq!(
-            apply_transforms("hello world", &["first_line".into(), "truncate:5".into()], None),
+            apply_transforms(
+                "hello world",
+                &["first_line".into(), "truncate:5".into()],
+                None
+            ),
             "hello…"
         );
     }
@@ -2212,7 +2745,11 @@ mod tests {
         assert_eq!(
             apply_transforms(
                 "<notification id=\"abc\" type=\"task.completed\">some content</notification>",
-                &["strip_xml_tags".into(), "first_line".into(), "truncate:20".into()],
+                &[
+                    "strip_xml_tags".into(),
+                    "first_line".into(),
+                    "truncate:20".into()
+                ],
                 None,
             ),
             "some content"
@@ -2228,7 +2765,9 @@ mod tests {
         use std::fs;
 
         // Locate providers/copilot.yaml relative to the crate root.
-        let yaml = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers").join("copilot.yaml");
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("copilot.yaml");
         assert!(yaml.exists(), "providers/copilot.yaml missing");
 
         // Build a synthetic session tree.
@@ -2266,6 +2805,8 @@ mod tests {
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
             .expect("load providers/copilot.yaml");
@@ -2340,7 +2881,9 @@ mod tests {
         use std::fs;
         use std::io::Write;
 
-        let yaml = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers").join("copilot.yaml");
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("copilot.yaml");
 
         let tmp = tempfile::tempdir().unwrap();
         let sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -2394,6 +2937,8 @@ mod tests {
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
             .expect("load providers/copilot.yaml");
@@ -2421,7 +2966,9 @@ mod tests {
     fn claude_yaml_end_to_end() {
         use std::fs;
 
-        let yaml = Path::new(env!("CARGO_MANIFEST_DIR")).join("providers").join("claude.yaml");
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("claude.yaml");
         assert!(yaml.exists(), "providers/claude.yaml missing");
 
         // Synthetic `projects/` tree.
@@ -2476,6 +3023,8 @@ mod tests {
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
             .expect("load providers/claude.yaml");
@@ -2483,14 +3032,21 @@ mod tests {
         let sessions = prov.discover_sessions().expect("discover_sessions");
         assert_eq!(sessions.len(), 1, "memory + subagents should be hidden");
         for s in &sessions {
-            eprintln!("  -> id={} cwd={:?} title={:?}", s.provider_session_id, s.cwd, s.title);
+            eprintln!(
+                "  -> id={} cwd={:?} title={:?}",
+                s.provider_session_id, s.cwd, s.title
+            );
         }
         assert_eq!(sessions.len(), 1, "memory + subagents should be hidden");
         let s = &sessions[0];
         assert_eq!(s.provider_session_id, sid);
         assert_eq!(s.provider_name, "claude");
         assert_eq!(s.title, "first user question");
-        assert!(s.summary.starts_with("first user question"), "summary: {:?}", s.summary);
+        assert!(
+            s.summary.starts_with("first user question"),
+            "summary: {:?}",
+            s.summary
+        );
         // Backtracking with a non-existent drive falls back to literal leaf.
         assert!(s.cwd.ends_with("synth-proj"), "cwd: {:?}", s.cwd);
         assert!(!s.updated_at.is_empty(), "updated_at missing");
@@ -2553,6 +3109,8 @@ mod tests {
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
             .expect("load providers/codex.yaml");
@@ -2641,6 +3199,8 @@ mod tests {
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg)
             .expect("load providers/qwen.yaml");
@@ -2828,6 +3388,8 @@ tab_title:
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov =
             ConfigDrivenProvider::from_config(cfg, &app_cfg).expect("construct gemini provider");
@@ -3051,6 +3613,8 @@ liveness_detection:
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::from_config(cfg, &app_cfg).unwrap();
         let sessions = prov.discover_sessions().unwrap();
@@ -3156,7 +3720,12 @@ liveness_detection:
       within_secs: 1800
 "#,
             base = tmp.path().display().to_string().replace('\\', "\\\\"),
-            lookup = tmp.path().join("kimi.json").display().to_string().replace('\\', "\\\\"),
+            lookup = tmp
+                .path()
+                .join("kimi.json")
+                .display()
+                .to_string()
+                .replace('\\', "\\\\"),
         );
         let cfg: ProviderConfigFile = serde_yaml::from_str(&yaml_src).unwrap();
         let app_cfg = AppProviderConfig {
@@ -3174,11 +3743,16 @@ liveness_detection:
             launch_fallback_args: None,
             launch_fallback: None,
             wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
         };
         let prov = ConfigDrivenProvider::from_config(cfg, &app_cfg).unwrap();
         let sessions = prov.discover_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].provider_session_id, sid);
-        assert_eq!(sessions[0].cwd, std::path::PathBuf::from("D:/Demo/agent-session-tui"));
+        assert_eq!(
+            sessions[0].cwd,
+            std::path::PathBuf::from("D:/Demo/agent-session-tui")
+        );
     }
 }

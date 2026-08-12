@@ -1,11 +1,11 @@
 use std::ptr;
 
+use windows::core::BSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::BSTR;
 
 /// Focus a Windows Terminal tab whose name contains `search` (case-insensitive).
 ///
@@ -22,7 +22,9 @@ pub fn focus_wt_tab(search: &str) -> bool {
     let result = unsafe { focus_wt_tab_inner(search).unwrap_or(false) };
     crate::log::info(&format!(
         "focus_wt_tab('{}') = {} in {:?}",
-        search, result, start.elapsed()
+        search,
+        result,
+        start.elapsed()
     ));
     result
 }
@@ -33,8 +35,7 @@ unsafe fn focus_wt_tab_inner(search: &str) -> windows::core::Result<bool> {
     // COM init (safe to call multiple times — returns S_FALSE if already initialized)
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-    let uia: IUIAutomation =
-        CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+    let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
 
     let root = uia.GetRootElement()?;
 

@@ -13,11 +13,11 @@ use ratatui::{prelude::*, widgets::*};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
+use crate::acp::AiSuggestion;
+use crate::groups::GroupManager;
 use crate::log_search::LogSearcher;
 use crate::models::{InteractionState, PersistenceState, ProcessState, Session};
 use crate::provider::ProviderRegistry;
-use crate::groups::GroupManager;
-use crate::acp::AiSuggestion;
 use crate::supervisor::{SupervisorCommand, SupervisorEvent};
 use crate::util::truncate_str_safe;
 
@@ -142,7 +142,10 @@ enum AcpState {
     /// ACP agent subprocess running, waiting for response.
     Running { started: std::time::Instant },
     /// Suggestions received, user reviewing them.
-    Results { suggestions: Vec<AiSuggestion>, cursor: usize },
+    Results {
+        suggestions: Vec<AiSuggestion>,
+        cursor: usize,
+    },
     /// ACP call failed.
     Failed(String),
 }
@@ -161,6 +164,9 @@ pub struct App {
     log_lines: Vec<String>,
     log_scroll: usize,
     status_message: String,
+    /// Armed after pressing Enter on a running session once. A second Enter on
+    /// the same session shortly after force-resumes it instead of focusing again.
+    pending_force_resume: Option<(String, String, std::time::Instant)>,
     should_quit: bool,
     provider_keys: Vec<String>,
     default_provider: String,
@@ -222,6 +228,11 @@ pub struct App {
     acp_state: AcpState,
     /// ACP configuration (command, extra_args, prompt_template).
     acp_config: crate::config::AcpConfig,
+    /// Grouping engine configuration (engine, language, timeout).
+    grouping_config: crate::config::GroupingConfig,
+    /// Direct line to our own event queue for grouping results, bypassing the
+    /// supervisor (which is blocked during its initial scan). Set in `run`.
+    group_event_tx: Option<mpsc::UnboundedSender<SupervisorEvent>>,
     /// In Grouped view: maps visual row index → session index in self.sessions.
     /// None = header row (not selectable as session). Rebuilt each draw.
     grouped_row_map: Vec<Option<usize>>,
@@ -258,6 +269,10 @@ pub struct App {
     acp_run_is_auto: bool,
 }
 
+const DOUBLE_ENTER_FORCE_RESUME_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(1500);
+const MAX_SUPERVISOR_EVENTS_PER_TICK: usize = 32;
+
 impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -271,6 +286,7 @@ impl App {
         semantic_index_min_interval_ms: u64,
         group_mgr: GroupManager,
         acp_config: Option<crate::config::AcpConfig>,
+        grouping_config: crate::config::GroupingConfig,
     ) -> Self {
         let mut list_state = ListState::default();
         // No selection until all providers report in
@@ -317,12 +333,15 @@ impl App {
                 if reserved.contains(&ch) {
                     shortcut_errors.push(format!(
                         "Provider '{}': shortcut '{}' is reserved — ignored",
-                        p.key(), ch
+                        p.key(),
+                        ch
                     ));
                 } else if let Some(existing) = shortcut_map.get(&ch) {
                     shortcut_errors.push(format!(
                         "Shortcut '{}' collision: '{}' and '{}' — both ignored",
-                        ch, existing, p.key()
+                        ch,
+                        existing,
+                        p.key()
                     ));
                     shortcut_map.remove(&ch);
                 } else {
@@ -338,16 +357,22 @@ impl App {
             initial_status_msg
         };
 
-        // ACP is **explicit opt-in**: the feature is only available when the
-        // user has written an `[acp]` section in their config.toml AND the
-        // prompt template is findable next to the binary. Both conditions
-        // must hold; either alone is not enough. Without explicit opt-in the
-        // `s` shortcut is hidden, auto-suggest never kicks, and no copilot
-        // process is spawned.
+        // Availability depends on the selected engine.
+        //
+        // `local` and `remote` are self-contained: no prompt template, no CLI
+        // auth, no subprocess — so they are always available. `acp` remains
+        // **explicit opt-in**: it needs an `[acp]` section in config.toml AND a
+        // findable prompt template. Both conditions must hold; either alone is
+        // not enough. Without that, the `s` shortcut is hidden, auto-suggest
+        // never kicks, and no copilot process is spawned.
         let user_opted_in = acp_config.is_some();
         let acp_config = acp_config.unwrap_or_default();
-        let acp_available = user_opted_in
-            && crate::acp::resolve_template(&acp_config).is_some();
+        let acp_available = match grouping_config.engine {
+            crate::config::GroupingEngine::Acp => {
+                user_opted_in && crate::acp::resolve_template(&acp_config).is_some()
+            }
+            _ => true,
+        };
 
         Self {
             sessions: Vec::new(),
@@ -360,6 +385,7 @@ impl App {
             log_lines: vec!["Session manager started. Scanning for sessions...".into()],
             log_scroll: 0,
             status_message: initial_status_msg,
+            pending_force_resume: None,
             should_quit: false,
             default_provider,
             provider_keys,
@@ -388,6 +414,8 @@ impl App {
             group_edit: None,
             acp_state: AcpState::Idle,
             acp_config,
+            grouping_config,
+            group_event_tx: None,
             grouped_row_map: Vec::new(),
             grouped_header_names: Vec::new(),
             grouped_view_sort_order: None,
@@ -417,10 +445,11 @@ impl App {
         self.acp_available = false;
         self.list_state.select(Some(0));
         self.apply_filter();
-        self.status_message =
-            "🎬 Mock data — for demos and screenshots".into();
-        self.log_lines
-            .push(format!("Mock mode: loaded {} sessions", self.sessions.len()));
+        self.status_message = "🎬 Mock data — for demos and screenshots".into();
+        self.log_lines.push(format!(
+            "Mock mode: loaded {} sessions",
+            self.sessions.len()
+        ));
     }
 
     /// Add pre-existing group assignments, used in `--mock-data` mode so the
@@ -470,6 +499,81 @@ impl App {
         }
     }
 
+    fn selection_row_count(&self) -> usize {
+        if self.view_mode == ViewMode::Grouped && !self.grouped_row_map.is_empty() {
+            self.grouped_row_map.len()
+        } else {
+            self.filtered_indices.len()
+        }
+    }
+
+    fn is_selectable_row(&self, idx: usize) -> bool {
+        if self.view_mode == ViewMode::Grouped && !self.grouped_row_map.is_empty() {
+            matches!(self.grouped_row_map.get(idx), Some(Some(_)))
+        } else {
+            idx < self.filtered_indices.len()
+        }
+    }
+
+    fn nearest_selectable_row(&self, from: usize) -> Option<usize> {
+        let count = self.selection_row_count();
+        if count == 0 {
+            return None;
+        }
+        let anchor = from.min(count - 1);
+        if self.is_selectable_row(anchor) {
+            return Some(anchor);
+        }
+        for idx in (anchor + 1)..count {
+            if self.is_selectable_row(idx) {
+                return Some(idx);
+            }
+        }
+        let mut idx = anchor;
+        while idx > 0 {
+            idx -= 1;
+            if self.is_selectable_row(idx) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    fn move_selection_up(&mut self) {
+        if self.selected_index == 0 {
+            return;
+        }
+        let mut idx = self.selected_index;
+        while idx > 0 {
+            idx -= 1;
+            if self.is_selectable_row(idx) {
+                self.selected_index = idx;
+                self.list_state.select(Some(idx));
+                self.detail_scroll = 0;
+                self.user_navigated = true;
+                return;
+            }
+        }
+    }
+
+    fn move_selection_down(&mut self) {
+        let count = self.selection_row_count();
+        if count == 0 || self.selected_index + 1 >= count {
+            return;
+        }
+        let mut idx = self.selected_index + 1;
+        while idx < count {
+            if self.is_selectable_row(idx) {
+                self.selected_index = idx;
+                self.list_state.select(Some(idx));
+                self.detail_scroll = 0;
+                self.user_navigated = true;
+                return;
+            }
+            idx += 1;
+        }
+    }
+
     /// Existing groups that match the current prompt input (case-insensitive
     /// substring). Returns ALL matches sorted by descending member count
     /// (stable: ties broken by name). The caller is responsible for
@@ -498,18 +602,22 @@ impl App {
     /// Kick a background AI grouping run if eligible. Wraps the same path the
     /// `s` key uses, but flagged as auto so a failure is logged silently
     /// instead of opening a modal banner.
-    fn maybe_kick_auto_suggest(
-        &mut self,
-        cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>,
-    ) {
+    fn maybe_kick_auto_suggest(&mut self, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
         if self.auto_suggest_kicked {
             return;
         }
         if !self.acp_available {
-            crate::log::info("AI auto-suggest SKIPPED: prompts/group-suggest.md not found next to binary");
+            crate::log::info(
+                "AI auto-suggest SKIPPED: prompts/group-suggest.md not found next to binary",
+            );
             return;
         }
-        if !self.acp_config.auto_suggest {
+        // `[acp] auto_suggest` gates the ACP engine only. It exists because that
+        // engine spawns a CLI, takes 25-45s, and consumes quota — none of which
+        // should happen without explicit consent. The remote and local engines
+        // are fast and free, so they run automatically.
+        let is_acp = self.grouping_config.engine == crate::config::GroupingEngine::Acp;
+        if is_acp && !self.acp_config.auto_suggest {
             return;
         }
         if !self.initial_load_complete {
@@ -521,6 +629,25 @@ impl App {
         // Snapshot once so we set the flag exactly when we attempt — even if
         // prepare_prompt fails, we don't want to retry on every event tick.
         self.auto_suggest_kicked = true;
+
+        // Non-ACP engines run in-process: no subprocess, no prompt template.
+        if !is_acp {
+            match self.spawn_grouping_run(cmd_tx, true) {
+                Some(count) => {
+                    self.status_message =
+                        format!("🤖 Auto-analyzing {} sessions in background...", count);
+                    crate::log::info(&format!(
+                        "Auto-suggest KICKED via {:?} engine: {} sessions",
+                        self.grouping_config.engine, count
+                    ));
+                }
+                None => {
+                    crate::log::info("Auto-suggest SKIPPED: no ungrouped sessions to analyze");
+                }
+            }
+            return;
+        }
+
         let sem_ref = self.semantic.try_lock().ok();
         let sem_plugin = sem_ref.as_deref();
         match crate::acp::prepare_prompt(
@@ -541,14 +668,17 @@ impl App {
                     started: std::time::Instant::now(),
                 };
                 self.acp_run_is_auto = true;
-                self.status_message = format!("🤖 Auto-analyzing {} sessions in background...", count);
+                self.status_message =
+                    format!("🤖 Auto-analyzing {} sessions in background...", count);
                 self.log_lines.push(format!(
                     "AI auto-suggest: sending {} sessions to ACP agent (total asked so far: {})",
-                    count, self.auto_suggest_asked.len()
+                    count,
+                    self.auto_suggest_asked.len()
                 ));
                 crate::log::info(&format!(
                     "AI auto-suggest KICKED: {} sessions (cumulative asked={})",
-                    count, self.auto_suggest_asked.len()
+                    count,
+                    self.auto_suggest_asked.len()
                 ));
                 let cfg = self.acp_config.clone();
                 let event_tx = cmd_tx.clone();
@@ -605,6 +735,160 @@ impl App {
         }
     }
 
+    /// Collect the ungrouped sessions eligible for a grouping run, plus a few
+    /// "anchor" sessions that are already grouped.
+    ///
+    /// Anchors are what let an engine assign new sessions *into* an existing
+    /// group rather than always inventing a name: the remote service preserves a
+    /// supplied `groupId`/`groupName` and folds matching items into it, and the
+    /// local engine reuses an anchor's group name for its whole cluster.
+    /// Batch rules mirror the ACP path: skip grouped, dismissed, and
+    /// already-asked sessions, capped at 30.
+    fn collect_grouping_batch(&self) -> (Vec<crate::grouping::GroupingInput>, Vec<String>) {
+        const BATCH_SIZE: usize = 30;
+        /// Anchors per existing group. Two is enough to convey the group's
+        /// theme without crowding out the sessions we actually want grouped.
+        const ANCHORS_PER_GROUP: usize = 2;
+
+        let text_for = |s: &crate::models::Session| {
+            let summary: String = s.summary.chars().take(100).collect();
+            if summary.trim().is_empty() {
+                s.title.clone()
+            } else {
+                format!("{} {}", s.title, summary)
+            }
+        };
+        let mut inputs: Vec<crate::grouping::GroupingInput> = Vec::new();
+        let mut anchor_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for s in &self.sessions {
+            let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+            let groups = self.group_mgr.groups_for(&key);
+            if groups.is_empty() {
+                continue;
+            }
+            // Already grouped — usable as an anchor for its first group.
+            if let Some(g) = groups.first() {
+                let count = anchor_counts.entry(g.clone()).or_insert(0);
+                if *count < ANCHORS_PER_GROUP {
+                    *count += 1;
+                    inputs.push(crate::grouping::GroupingInput {
+                        key,
+                        text: text_for(s),
+                        title: s.title.clone(),
+                        cwd: Some(s.cwd.clone()),
+                        existing_group: Some(g.clone()),
+                    });
+                }
+            }
+        }
+
+        let mut asked = Vec::new();
+        for s in &self.sessions {
+            if asked.len() >= BATCH_SIZE {
+                break;
+            }
+            let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+            if !self.group_mgr.groups_for(&key).is_empty()
+                || self.group_mgr.has_any_dismissal(&key)
+                || self.auto_suggest_asked.contains(&key)
+            {
+                continue;
+            }
+            inputs.push(crate::grouping::GroupingInput {
+                key: key.clone(),
+                text: text_for(s),
+                title: s.title.clone(),
+                cwd: Some(s.cwd.clone()),
+                existing_group: None,
+            });
+            asked.push(key);
+        }
+
+        (inputs, asked)
+    }
+
+    /// Spawn a grouping run on the configured non-ACP engine.
+    ///
+    /// Returns the number of sessions asked about, or `None` when there was
+    /// nothing to do. Unlike the ACP path this spawns no subprocess, needs no
+    /// prompt template, and creates no throwaway session to archive.
+    fn spawn_grouping_run(
+        &mut self,
+        cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>,
+        is_auto: bool,
+    ) -> Option<usize> {
+        let (inputs, asked) = self.collect_grouping_batch();
+        if asked.is_empty() {
+            return None;
+        }
+        for k in &asked {
+            self.auto_suggest_asked.insert(k.clone());
+        }
+
+        let count = asked.len();
+        self.acp_state = AcpState::Running {
+            started: std::time::Instant::now(),
+        };
+        self.acp_run_is_auto = is_auto;
+
+        let engine = self.grouping_config.engine;
+        let language = self.grouping_config.language.clone();
+        let timeout_secs = self.grouping_config.timeout_secs;
+        let existing_groups: Vec<String> = self
+            .group_mgr
+            .all_groups()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        // Deliver straight to our own event queue when we have that channel;
+        // routing via `cmd_tx` would stall behind the supervisor's initial scan.
+        let direct_tx = self.group_event_tx.clone();
+        let fallback_tx = cmd_tx.clone();
+
+        tokio::spawn(async move {
+            // The engines are blocking (HTTP / CPU), so keep them off the
+            // async runtime's worker threads.
+            let result = tokio::task::spawn_blocking(move || {
+                crate::grouping::suggest(engine, &inputs, &existing_groups, &language, timeout_secs)
+            })
+            .await;
+
+            let (event, command) = match result {
+                Ok(Ok(suggestions)) => {
+                    let json = serde_json::to_string(&suggestions).unwrap_or_default();
+                    (
+                        SupervisorEvent::AcpResult(json.clone()),
+                        SupervisorCommand::AcpResult(json),
+                    )
+                }
+                Ok(Err(e)) => (
+                    SupervisorEvent::AcpError(e.clone()),
+                    SupervisorCommand::AcpError(e),
+                ),
+                Err(e) => {
+                    let msg = format!("grouping task failed: {e}");
+                    (
+                        SupervisorEvent::AcpError(msg.clone()),
+                        SupervisorCommand::AcpError(msg),
+                    )
+                }
+            };
+
+            match direct_tx {
+                Some(tx) => {
+                    let _ = tx.send(event);
+                }
+                None => {
+                    let _ = fallback_tx.send(command);
+                }
+            }
+        });
+
+        Some(count)
+    }
+
     /// Rebuild the filtered indices based on the search query.
     /// Uses tiered ranking: exact → fuzzy → semantic (from cached embeddings).
     fn apply_filter(&mut self) {
@@ -640,7 +924,11 @@ impl App {
                 .as_ref()
                 .map(|ls| ls.search(&query))
                 .unwrap_or_default();
-            let log_ref = if log_matches.is_empty() { None } else { Some(&log_matches) };
+            let log_ref = if log_matches.is_empty() {
+                None
+            } else {
+                Some(&log_matches)
+            };
             let results = crate::search::ranked_search_default(view, &query, sem_ref, log_ref);
             // Only update semantic matches if we actually ran semantic search
             if sem_ref.is_some() {
@@ -653,16 +941,28 @@ impl App {
             }
             self.filtered_indices = results.into_iter().map(|r| r.index).collect();
         }
-        // Always select the top result after filtering
+        // Always select the top result after filtering.
         self.selected_index = 0;
-        self.list_state.select(Some(0));
+        if self.filtered_indices.is_empty() {
+            self.list_state.select(None);
+        } else {
+            self.list_state.select(Some(0));
+        }
     }
 
     pub async fn run(
         mut self,
         mut event_rx: mpsc::UnboundedReceiver<SupervisorEvent>,
         cmd_tx: mpsc::UnboundedSender<SupervisorCommand>,
+        event_tx: mpsc::UnboundedSender<SupervisorEvent>,
     ) -> Result<()> {
+        // Grouping results are delivered straight to our own event queue rather
+        // than routed back through the supervisor. The supervisor runs its
+        // initial full scan *before* entering its command loop, so on a large
+        // session store (3169 sessions ≈ 30s) a result produced during startup
+        // would sit unforwarded until that scan finished — the suggestions were
+        // ready in 1.4s but did not appear for 29s.
+        self.group_event_tx = Some(event_tx);
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, cursor::Hide)?;
@@ -709,10 +1009,44 @@ impl App {
                 }
             }
 
-            // Drain supervisor events
-            while let Ok(ev) = event_rx.try_recv() {
+            // Drain supervisor events, but cap the work per frame so large
+            // refresh bursts never stall keyboard handling.
+            //
+            // Grouping results are handled BEFORE session updates within a
+            // batch. A `SessionsUpdated` event can carry thousands of sessions
+            // and take seconds to merge; strict arrival order meant a grouping
+            // result that arrived mid-scan sat behind them, leaving the
+            // "analyzing" spinner running long after the work had finished.
+            // Observed: grouping done in 1.5s, result shown 24s later.
+            let mut drained_events = 0usize;
+            let mut pending: Vec<SupervisorEvent> = Vec::new();
+            while drained_events < MAX_SUPERVISOR_EVENTS_PER_TICK {
+                let Ok(ev) = event_rx.try_recv() else {
+                    break;
+                };
+                drained_events += 1;
+                pending.push(ev);
+            }
+            // Stable partition by move: grouping results first, everything
+            // else after, each keeping its relative arrival order.
+            if pending.len() > 1 {
+                let (mut grouping, others): (Vec<_>, Vec<_>) =
+                    pending.into_iter().partition(|e| {
+                        matches!(
+                            e,
+                            SupervisorEvent::AcpResult(_) | SupervisorEvent::AcpError(_)
+                        )
+                    });
+                grouping.extend(others);
+                pending = grouping;
+            }
+            for ev in pending {
                 match ev {
-                    SupervisorEvent::SessionsUpdated { provider_key, mut active, mut hidden } => {
+                    SupervisorEvent::SessionsUpdated {
+                        provider_key,
+                        mut active,
+                        mut hidden,
+                    } => {
                         // Snapshot the scan's ORIGINAL placement before any
                         // local filter runs. These snapshots tell us what the
                         // scan itself saw on disk — essential for the drain
@@ -775,12 +1109,10 @@ impl App {
                         // "count drops to 2xx, bounces to 4xx" regression
                         // and the "unarchived session vanishes entirely"
                         // regression.
-                        self.pending_archives.retain(|p| {
-                            !(p.confirmed && scan_hidden_keys.contains(&p.key))
-                        });
-                        self.pending_unarchives.retain(|p| {
-                            !(p.confirmed && scan_active_keys.contains(&p.key))
-                        });
+                        self.pending_archives
+                            .retain(|p| !(p.confirmed && scan_hidden_keys.contains(&p.key)));
+                        self.pending_unarchives
+                            .retain(|p| !(p.confirmed && scan_active_keys.contains(&p.key)));
 
                         let active_count = active.len();
                         let hidden_count = hidden.len();
@@ -812,7 +1144,9 @@ impl App {
                                 self.seen_providers.insert(s.provider_name.clone());
                             }
                         }
-                        let all_providers_in = self.provider_keys.iter()
+                        let all_providers_in = self
+                            .provider_keys
+                            .iter()
                             .all(|k| self.seen_providers.contains(k));
 
                         // Detect the transition from "still loading" → "done".
@@ -832,17 +1166,18 @@ impl App {
                         // list/selection/detail on initial_load_complete to avoid
                         // the cold-start flicker where rows appear without a
                         // highlight and the detail pane churns against partial data.
-                        let user_reading_detail = self.focus == Focus::Detail && self.detail_scroll > 0;
+                        let user_reading_detail =
+                            self.focus == Focus::Detail && self.detail_scroll > 0;
 
-                        let prev_selected_id = if self.user_navigated {
-                            self.selected_session()
-                                .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()))
-                        } else {
-                            None
-                        };
+                        let prev_selected_id = self
+                            .selected_session()
+                            .map(|s| (s.provider_name.clone(), s.provider_session_id.clone()));
 
                         let set_changed = active.len() != self.sessions.len()
-                            || active.iter().zip(self.sessions.iter()).any(|(new, old)| new.id != old.id);
+                            || active
+                                .iter()
+                                .zip(self.sessions.iter())
+                                .any(|(new, old)| new.id != old.id);
 
                         self.sessions = active;
                         self.hidden_sessions = hidden;
@@ -855,7 +1190,10 @@ impl App {
                             self.semantic_matches.clear();
                             self.selected_index = 0;
                             self.list_state.select(None);
-                        } else if !user_reading_detail && (just_completed_initial_load || data_changed) && (set_changed || !self.search_active) {
+                        } else if !user_reading_detail
+                            && (just_completed_initial_load || data_changed)
+                            && (set_changed || !self.search_active)
+                        {
                             self.apply_filter();
 
                             if just_completed_initial_load || !self.user_navigated {
@@ -867,13 +1205,17 @@ impl App {
                                 // User navigated → restore their position across refreshes.
                                 if self.view_mode == ViewMode::Grouped {
                                     // Defer to draw cycle when grouped_row_map is rebuilt
-                                    self.pending_restore_selection = Some((prev_provider.clone(), prev_id.clone()));
+                                    self.pending_restore_selection =
+                                        Some((prev_provider.clone(), prev_id.clone()));
                                 } else {
                                     let view = self.current_view_sessions();
-                                    if let Some(pos) = self.filtered_indices.iter().position(|&idx| {
-                                        let s = &view[idx];
-                                        &s.provider_name == prev_provider && &s.provider_session_id == prev_id
-                                    }) {
+                                    if let Some(pos) =
+                                        self.filtered_indices.iter().position(|&idx| {
+                                            let s = &view[idx];
+                                            &s.provider_name == prev_provider
+                                                && &s.provider_session_id == prev_id
+                                        })
+                                    {
                                         self.selected_index = pos;
                                         self.list_state.select(Some(pos));
                                     }
@@ -906,155 +1248,128 @@ impl App {
                             } else {
                                 self.last_semantic_index_at = Some(std::time::Instant::now());
                                 crate::log::info("[idx] data_changed=true, eligible to run");
-                            // Background semantic indexing. Embeds title + summary
-                            // + cwd + log head/tail per session (hash-gated so
-                            // unchanged sessions skip). CRITICAL: acquire and
-                            // release the plugin mutex PER SESSION so the UI can
-                            // (a) read live progress via the separate
-                            // shared_status handle and (b) run user searches
-                            // without waiting for the whole indexing run.
-                            let sem_clone = self.semantic.clone();
-                            let registry = std::sync::Arc::clone(&self.registry);
-                            let all_sessions: Vec<Session> = self.sessions.clone();
+                                // Background semantic indexing. Embeds title + summary
+                                // + cwd + log head/tail per session (hash-gated so
+                                // unchanged sessions skip). CRITICAL: acquire and
+                                // release the plugin mutex PER SESSION so the UI can
+                                // (a) read live progress via the separate
+                                // shared_status handle and (b) run user searches
+                                // without waiting for the whole indexing run.
+                                let sem_clone = self.semantic.clone();
+                                let registry = std::sync::Arc::clone(&self.registry);
+                                let all_sessions: Vec<Session> = self.sessions.clone();
 
-                            // Quick pre-check: if nothing needs re-embedding,
-                            // don't spawn the indexer thread at all. This avoids
-                            // N round-trip locks per refresh tick once the
-                            // corpus is fully indexed.
-                            let precheck_start = std::time::Instant::now();
-                            let total_sessions = all_sessions.len();
-                            let stale_count = {
-                                match sem_clone.lock() {
-                                    Ok(sem) => {
-                                        if sem.lib.is_none() {
-                                            0
-                                        } else {
-                                            sem.count_needing_embedding(&all_sessions, |s| {
-                                                build_semantic_chunks(s, &registry)
-                                                    .first()
-                                                    .map(|(t, _)| t.clone())
-                                                    .unwrap_or_default()
-                                            })
-                                        }
-                                    }
-                                    Err(_) => 0,
-                                }
-                            };
-                            let precheck_ms = precheck_start.elapsed().as_millis();
-                            crate::log::info(&format!(
-                                "[idx] precheck: stale={} total={} ({}ms)",
-                                stale_count, total_sessions, precheck_ms
-                            ));
-                            let should_index = stale_count > 0;
-
-                            if should_index {
                                 std::thread::spawn(move || {
-                                let thread_start = std::time::Instant::now();
-                                let total = all_sessions.len();
-                                let mut embedded_since_flush = 0usize;
+                                    let thread_start = std::time::Instant::now();
+                                    let total = all_sessions.len();
+                                    let mut embedded_since_flush = 0usize;
 
-                                // Make sure the model is loaded. After an idle
-                                // period we may have unloaded it to save memory.
-                                let load_start = std::time::Instant::now();
-                                let was_already_loaded;
-                                {
-                                    let mut sem = match sem_clone.lock() {
-                                        Ok(g) => g,
-                                        Err(_) => return,
-                                    };
-                                    was_already_loaded = sem.lib.is_some();
-                                    let dir = sem.cache_dir().unwrap_or("").to_string();
-                                    if !sem.ensure_loaded(&dir) {
-                                        crate::log::warn("[idx] ensure_loaded failed");
-                                        return;
-                                    }
-                                }
-                                let load_ms = load_start.elapsed().as_millis();
-                                crate::log::info(&format!(
-                                    "[idx] model_load: {}ms (already_loaded={})",
-                                    load_ms, was_already_loaded
-                                ));
-
-                                let embed_loop_start = std::time::Instant::now();
-                                let mut embedded_count = 0usize;
-                                let mut total_embed_ms: u128 = 0;
-                                for (i, session) in all_sessions.iter().enumerate() {
-                                    let chunks = build_semantic_chunks(session, &registry);
-                                    // Use first chunk's hash as identity
-                                    let identity_hash = chunks.first()
-                                        .map(|(t, _)| crate::search::hash_text(t))
-                                        .unwrap_or(0);
-
-                                    // Short lock: skip-check.
-                                    let needs = {
-                                        let sem = match sem_clone.lock() {
-                                            Ok(g) => g,
-                                            Err(_) => return,
-                                        };
-                                        sem.needs_embedding(&session.id, identity_hash)
-                                    };
-
-                                    if needs {
-                                        let one_embed_start = std::time::Instant::now();
+                                    // Make sure the model is loaded. After an idle
+                                    // period we may have unloaded it to save memory.
+                                    let load_start = std::time::Instant::now();
+                                    let was_already_loaded;
+                                    {
                                         let mut sem = match sem_clone.lock() {
                                             Ok(g) => g,
                                             Err(_) => return,
                                         };
-                                        let chunk_pairs: Vec<(String, u64)> = chunks.iter()
-                                            .map(|(t, _)| (t.clone(), crate::search::hash_text(t)))
-                                            .collect();
-                                        let count = sem.embed_and_cache_multi(&session.id, &chunk_pairs);
-                                        if count > 0 {
-                                            embedded_since_flush += 1;
-                                            embedded_count += 1;
-                                        }
-                                        sem.update_progress(i + 1, total);
-                                        if embedded_since_flush >= 20 {
-                                            sem.save_cache();
-                                            embedded_since_flush = 0;
-                                        }
-                                        drop(sem);
-                                        let one_embed_ms =
-                                            one_embed_start.elapsed().as_millis();
-                                        total_embed_ms += one_embed_ms;
-                                        crate::log::info(&format!(
-                                            "[idx] embed session={} chunks={} ({}ms)",
-                                            &session.id[..session.id.len().min(8)],
-                                            count,
-                                            one_embed_ms
-                                        ));
-                                    } else {
-                                        if let Ok(mut sem) = sem_clone.lock() {
-                                            sem.update_progress(i + 1, total);
+                                        was_already_loaded = sem.lib.is_some();
+                                        let dir = sem.cache_dir().unwrap_or("").to_string();
+                                        if !sem.ensure_loaded(&dir) {
+                                            crate::log::warn("[idx] ensure_loaded failed");
+                                            return;
                                         }
                                     }
-                                }
-                                let embed_loop_ms = embed_loop_start.elapsed().as_millis();
-                                crate::log::info(&format!(
-                                    "[idx] embed_loop: {} embedded in {}ms (sum_embed={}ms)",
-                                    embedded_count, embed_loop_ms, total_embed_ms
-                                ));
+                                    let load_ms = load_start.elapsed().as_millis();
+                                    crate::log::info(&format!(
+                                        "[idx] model_load: {}ms (already_loaded={})",
+                                        load_ms, was_already_loaded
+                                    ));
 
-                                // Final flush, mark Ready, and unload the model
-                                // to return ~550MB of weights to the OS. The
-                                // model reloads on demand next time the user
-                                // runs a semantic search query.
-                                let unload_start = std::time::Instant::now();
-                                if let Ok(mut sem) = sem_clone.lock() {
-                                    if embedded_since_flush > 0 {
-                                        sem.save_cache();
+                                    let embed_loop_start = std::time::Instant::now();
+                                    let mut embedded_count = 0usize;
+                                    let mut total_embed_ms: u128 = 0;
+                                    for (i, session) in all_sessions.iter().enumerate() {
+                                        let chunks = build_semantic_chunks(session, &registry);
+                                        // Use first chunk's hash as identity
+                                        let identity_hash = chunks
+                                            .first()
+                                            .map(|(t, _)| crate::search::hash_text(t))
+                                            .unwrap_or(0);
+
+                                        // Short lock: skip-check.
+                                        let needs = {
+                                            let sem = match sem_clone.lock() {
+                                                Ok(g) => g,
+                                                Err(_) => return,
+                                            };
+                                            sem.needs_embedding(&session.id, identity_hash)
+                                        };
+
+                                        if needs {
+                                            let one_embed_start = std::time::Instant::now();
+                                            let mut sem = match sem_clone.lock() {
+                                                Ok(g) => g,
+                                                Err(_) => return,
+                                            };
+                                            let chunk_pairs: Vec<(String, u64)> = chunks
+                                                .iter()
+                                                .map(|(t, _)| {
+                                                    (t.clone(), crate::search::hash_text(t))
+                                                })
+                                                .collect();
+                                            let count = sem
+                                                .embed_and_cache_multi(&session.id, &chunk_pairs);
+                                            if count > 0 {
+                                                embedded_since_flush += 1;
+                                                embedded_count += 1;
+                                            }
+                                            sem.update_progress(i + 1, total);
+                                            if embedded_since_flush >= 20 {
+                                                sem.save_cache();
+                                                embedded_since_flush = 0;
+                                            }
+                                            drop(sem);
+                                            let one_embed_ms =
+                                                one_embed_start.elapsed().as_millis();
+                                            total_embed_ms += one_embed_ms;
+                                            crate::log::info(&format!(
+                                                "[idx] embed session={} chunks={} ({}ms)",
+                                                &session.id[..session.id.len().min(8)],
+                                                count,
+                                                one_embed_ms
+                                            ));
+                                        } else {
+                                            if let Ok(mut sem) = sem_clone.lock() {
+                                                sem.update_progress(i + 1, total);
+                                            }
+                                        }
                                     }
-                                    sem.mark_ready();
-                                    sem.unload();
-                                }
-                                let unload_ms = unload_start.elapsed().as_millis();
-                                let total_ms = thread_start.elapsed().as_millis();
-                                crate::log::info(&format!(
+                                    let embed_loop_ms = embed_loop_start.elapsed().as_millis();
+                                    crate::log::info(&format!(
+                                        "[idx] embed_loop: {} embedded in {}ms (sum_embed={}ms)",
+                                        embedded_count, embed_loop_ms, total_embed_ms
+                                    ));
+
+                                    // Final flush, mark Ready, and unload the model
+                                    // to return ~550MB of weights to the OS. The
+                                    // model reloads on demand next time the user
+                                    // runs a semantic search query.
+                                    let unload_start = std::time::Instant::now();
+                                    if let Ok(mut sem) = sem_clone.lock() {
+                                        if embedded_since_flush > 0 {
+                                            sem.save_cache();
+                                        }
+                                        sem.mark_ready();
+                                        sem.unload();
+                                    }
+                                    let unload_ms = unload_start.elapsed().as_millis();
+                                    let total_ms = thread_start.elapsed().as_millis();
+                                    crate::log::info(&format!(
                                     "[idx] DONE total={}ms (load={}ms embed_loop={}ms unload={}ms embedded={})",
                                     total_ms, load_ms, embed_loop_ms, unload_ms, embedded_count
                                 ));
                                 });
-                            }
                             } // end else (should_run)
                         }
 
@@ -1116,7 +1431,10 @@ impl App {
                         // This one fired on every SupervisorEvent and burned
                         // ~1% idle CPU spawning redundant threads.)
                     }
-                    SupervisorEvent::ArchiveConfirmed { provider_key, provider_session_id } => {
+                    SupervisorEvent::ArchiveConfirmed {
+                        provider_key,
+                        provider_session_id,
+                    } => {
                         // Persist is done, but DO NOT drain the pending entry
                         // here. Scans that were already in flight when 'a'
                         // was pressed can still arrive and report the
@@ -1130,7 +1448,10 @@ impl App {
                             }
                         }
                     }
-                    SupervisorEvent::UnarchiveConfirmed { provider_key, provider_session_id } => {
+                    SupervisorEvent::UnarchiveConfirmed {
+                        provider_key,
+                        provider_session_id,
+                    } => {
                         let key = format!("{}:{}", provider_key, provider_session_id);
                         for p in self.pending_unarchives.iter_mut() {
                             if p.key == key {
@@ -1177,10 +1498,7 @@ impl App {
                                         .find(|k| **k == raw)
                                         .cloned()
                                         .or_else(|| {
-                                            live_keys
-                                                .iter()
-                                                .find(|k| k.starts_with(&raw))
-                                                .cloned()
+                                            live_keys.iter().find(|k| k.starts_with(&raw)).cloned()
                                         });
                                     match canonical {
                                         Some(full) => {
@@ -1208,8 +1526,7 @@ impl App {
                                     ));
                                 }
                                 for sg in &resolved {
-                                    self.auto_suggestions
-                                        .insert(sg.session.clone(), sg.clone());
+                                    self.auto_suggestions.insert(sg.session.clone(), sg.clone());
                                 }
                                 if count == 0 {
                                     self.acp_state = AcpState::Idle;
@@ -1246,10 +1563,8 @@ impl App {
                             Err(e) => {
                                 if was_auto {
                                     self.acp_state = AcpState::Idle;
-                                    self.log_lines.push(format!(
-                                        "AI auto-suggest parse error: {}",
-                                        e
-                                    ));
+                                    self.log_lines
+                                        .push(format!("AI auto-suggest parse error: {}", e));
                                 } else {
                                     self.acp_state =
                                         AcpState::Failed(format!("Parse error: {}", e));
@@ -1317,6 +1632,23 @@ impl App {
             ));
 
             if is_running {
+                if self
+                    .pending_force_resume
+                    .as_ref()
+                    .is_some_and(|(prov, sid, at)| {
+                        prov == &pname
+                            && sid == &psid
+                            && at.elapsed() <= DOUBLE_ENTER_FORCE_RESUME_WINDOW
+                    })
+                {
+                    self.pending_force_resume = None;
+                    self.handle_force_resume(cmd_tx);
+                    return;
+                }
+
+                self.pending_force_resume =
+                    Some((pname.clone(), psid.clone(), std::time::Instant::now()));
+
                 if let Some(ref tt) = tab_title {
                     let _ = cmd_tx.send(SupervisorCommand::FocusSession {
                         tab_title: Some(tt.clone()),
@@ -1324,20 +1656,23 @@ impl App {
                         provider_session_id: psid.clone(),
                     });
                     self.status_message = format!(
-                        "🔍 Focusing: {} ({})",
-                        tt, crate::util::short_id(&psid, 8)
+                        "🔍 Focusing: {} ({}) — press Enter again to force resume",
+                        tt,
+                        crate::util::short_id(&psid, 8)
                     );
                     self.log_lines.push(format!(
                         "Focusing tab: {} ({})",
-                        tt, crate::util::short_id(&psid, 8)
+                        tt,
+                        crate::util::short_id(&psid, 8)
                     ));
                 } else {
                     self.status_message = format!(
-                        "⚠ Tab focus not available for {} sessions",
+                        "⚠ Tab focus not available for {} sessions — press Enter again to force resume",
                         pname
                     );
                 }
             } else {
+                self.pending_force_resume = None;
                 let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
                     provider_session_id: psid.clone(),
                     provider_key: pname,
@@ -1345,17 +1680,63 @@ impl App {
                 });
                 self.status_message = format!(
                     "▶ Resuming: {} ({})",
-                    title, crate::util::short_id(&psid, 8)
+                    title,
+                    crate::util::short_id(&psid, 8)
                 );
                 self.log_lines.push(format!(
                     "Resuming: {} ({})",
-                    title, crate::util::short_id(&psid, 8)
+                    title,
+                    crate::util::short_id(&psid, 8)
                 ));
             }
         }
     }
 
+    /// Force a resume even if the selected session is currently classified as
+    /// Running. This is useful for remote/box workflows where "running" means
+    /// "a live tab exists somewhere", but the user explicitly wants another
+    /// attached terminal anyway.
+    fn handle_force_resume(&mut self, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
+        if let Some(session) = self.selected_session() {
+            let psid = session.provider_session_id.clone();
+            let pname = session.provider_name.clone();
+            let title = session.title.clone();
+            let scwd = session.cwd.to_string_lossy().to_string();
+            let state_label = session.state.label().to_string();
+            let state_process = session.state.process;
+            self.pending_force_resume = None;
+
+            crate::log::info(&format!(
+                "Force resume: {} state={:?} process={:?}",
+                crate::util::short_id(&psid, 8),
+                state_label,
+                state_process,
+            ));
+
+            let _ = cmd_tx.send(SupervisorCommand::ResumeSession {
+                provider_session_id: psid.clone(),
+                provider_key: pname,
+                session_cwd: scwd,
+            });
+            self.status_message = format!(
+                "▶ Force resuming: {} ({})",
+                title,
+                crate::util::short_id(&psid, 8)
+            );
+            self.log_lines.push(format!(
+                "Force resume: {} ({})",
+                title,
+                crate::util::short_id(&psid, 8)
+            ));
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent, cmd_tx: &mpsc::UnboundedSender<SupervisorCommand>) {
+        // Any key other than a plain Enter cancels a pending double-Enter arm.
+        if !(key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Enter) {
+            self.pending_force_resume = None;
+        }
+
         // ── Group assignment prompt intercepts all keys ──────────────
         if self.group_prompt.is_some() {
             // Snapshot once — lets us call `self.filter_groups_for_prompt`
@@ -1452,7 +1833,8 @@ impl App {
                     // Apply rename if changed
                     let effective_name = if !new_name.is_empty() && new_name != old_name {
                         self.group_mgr.rename_group(&old_name, &new_name);
-                        self.log_lines.push(format!("Renamed '{}' → '{}'", old_name, new_name));
+                        self.log_lines
+                            .push(format!("Renamed '{}' → '{}'", old_name, new_name));
                         new_name
                     } else {
                         old_name
@@ -1461,7 +1843,8 @@ impl App {
                     // Apply description if non-empty
                     if !desc.is_empty() {
                         self.group_mgr.set_group_description(&effective_name, &desc);
-                        self.log_lines.push(format!("Description for '{}': {}", effective_name, desc));
+                        self.log_lines
+                            .push(format!("Description for '{}': {}", effective_name, desc));
                     }
 
                     self.group_edit = None;
@@ -1469,15 +1852,23 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     match edit.field {
-                        GroupEditField::Name => { edit.name_input.pop(); }
-                        GroupEditField::Description => { edit.desc_input.pop(); }
+                        GroupEditField::Name => {
+                            edit.name_input.pop();
+                        }
+                        GroupEditField::Description => {
+                            edit.desc_input.pop();
+                        }
                     }
                     return;
                 }
                 KeyCode::Char(c) => {
                     match edit.field {
-                        GroupEditField::Name => { edit.name_input.push(c); }
-                        GroupEditField::Description => { edit.desc_input.push(c); }
+                        GroupEditField::Name => {
+                            edit.name_input.push(c);
+                        }
+                        GroupEditField::Description => {
+                            edit.desc_input.push(c);
+                        }
                     }
                     return;
                 }
@@ -1486,7 +1877,11 @@ impl App {
         }
 
         // ── ACP suggestion results intercept keys ────────────────────
-        if let AcpState::Results { ref suggestions, ref mut cursor } = self.acp_state {
+        if let AcpState::Results {
+            ref suggestions,
+            ref mut cursor,
+        } = self.acp_state
+        {
             match key.code {
                 KeyCode::Esc => {
                     self.acp_state = AcpState::Idle;
@@ -1518,7 +1913,10 @@ impl App {
                         self.status_message = "All suggestions processed".to_string();
                     } else {
                         let new_cursor = (*cursor).min(sgs.len() - 1);
-                        self.acp_state = AcpState::Results { suggestions: sgs, cursor: new_cursor };
+                        self.acp_state = AcpState::Results {
+                            suggestions: sgs,
+                            cursor: new_cursor,
+                        };
                     }
                     return;
                 }
@@ -1538,7 +1936,10 @@ impl App {
                         self.status_message = "All suggestions processed".to_string();
                     } else {
                         let new_cursor = (*cursor).min(sgs.len() - 1);
-                        self.acp_state = AcpState::Results { suggestions: sgs, cursor: new_cursor };
+                        self.acp_state = AcpState::Results {
+                            suggestions: sgs,
+                            cursor: new_cursor,
+                        };
                     }
                     return;
                 }
@@ -1557,7 +1958,10 @@ impl App {
                         self.acp_state = AcpState::Idle;
                     } else {
                         let new_cursor = (*cursor).min(sgs.len() - 1);
-                        self.acp_state = AcpState::Results { suggestions: sgs, cursor: new_cursor };
+                        self.acp_state = AcpState::Results {
+                            suggestions: sgs,
+                            cursor: new_cursor,
+                        };
                     }
                     return;
                 }
@@ -1617,20 +2021,8 @@ impl App {
                     // Switch to detail pane while keeping search results
                     self.focus = Focus::Detail;
                 }
-                KeyCode::Up
-                    if self.selected_index > 0 => {
-                        self.selected_index -= 1;
-                        self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
-                        self.user_navigated = true;
-                }
-                KeyCode::Down
-                    if self.selected_index + 1 < self.filtered_indices.len() => {
-                        self.selected_index += 1;
-                        self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
-                        self.user_navigated = true;
-                }
+                KeyCode::Up => self.move_selection_up(),
+                KeyCode::Down => self.move_selection_down(),
                 KeyCode::Backspace => {
                     self.search_query.pop();
                     self.apply_filter();
@@ -1691,25 +2083,12 @@ impl App {
 
         match self.focus {
             Focus::SessionList => match key.code {
-                KeyCode::Esc
-                    if !self.search_query.is_empty() => {
-                        self.search_query.clear();
-                        self.apply_filter();
+                KeyCode::Esc if !self.search_query.is_empty() => {
+                    self.search_query.clear();
+                    self.apply_filter();
                 }
-                KeyCode::Up | KeyCode::Char('k')
-                    if self.selected_index > 0 => {
-                        self.selected_index -= 1;
-                        self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
-                        self.user_navigated = true;
-                }
-                KeyCode::Down | KeyCode::Char('j')
-                    if self.selected_index + 1 < self.filtered_indices.len() => {
-                        self.selected_index += 1;
-                        self.list_state.select(Some(self.selected_index));
-                        self.detail_scroll = 0;
-                        self.user_navigated = true;
-                }
+                KeyCode::Up | KeyCode::Char('k') => self.move_selection_up(),
+                KeyCode::Down | KeyCode::Char('j') => self.move_selection_down(),
                 KeyCode::Tab => {
                     self.focus = Focus::Detail;
                 }
@@ -1791,10 +2170,8 @@ impl App {
                 KeyCode::Char('g') if self.group_prompt.is_none() => {
                     // Open group-assignment prompt for the selected session.
                     if let Some(session) = self.selected_session() {
-                        let session_key = format!(
-                            "{}:{}",
-                            session.provider_name, session.provider_session_id
-                        );
+                        let session_key =
+                            format!("{}:{}", session.provider_name, session.provider_session_id);
                         self.group_prompt = Some(GroupPrompt {
                             session_key,
                             input: String::new(),
@@ -1805,10 +2182,8 @@ impl App {
                 KeyCode::Char('u') => {
                     // Unassign: remove selected session from its first group.
                     if let Some(session) = self.selected_session() {
-                        let session_key = format!(
-                            "{}:{}",
-                            session.provider_name, session.provider_session_id
-                        );
+                        let session_key =
+                            format!("{}:{}", session.provider_name, session.provider_session_id);
                         let groups = self.group_mgr.groups_for(&session_key);
                         if let Some(first) = groups.first() {
                             let g = first.clone();
@@ -1824,8 +2199,14 @@ impl App {
                 KeyCode::Char('e') if matches!(self.view_mode, ViewMode::Grouped) => {
                     // Edit group: immediately editable, no menu
                     let sel = self.list_state.selected().unwrap_or(0);
-                    if let Some((_idx, group_name)) = self.grouped_header_names.iter().find(|(idx, _)| *idx == sel) {
-                        let desc = self.group_mgr.get_group_description(group_name)
+                    if let Some((_idx, group_name)) = self
+                        .grouped_header_names
+                        .iter()
+                        .find(|(idx, _)| *idx == sel)
+                    {
+                        let desc = self
+                            .group_mgr
+                            .get_group_description(group_name)
                             .unwrap_or_default();
                         self.group_edit = Some(GroupEditPrompt {
                             original_name: group_name.clone(),
@@ -1837,16 +2218,37 @@ impl App {
                 }
                 KeyCode::Char('s') if matches!(self.view_mode, ViewMode::Grouped) => {
                     if !self.acp_available {
-                        self.status_message = "AI grouping not set up — see README → AI Auto-Suggest".to_string();
+                        self.status_message =
+                            "AI grouping not set up — see README → AI Auto-Suggest".to_string();
                         return;
                     }
+                    // Manual `s` resets the ask-history so the user gets a
+                    // fresh batch starting from the top of the ungrouped list.
+                    self.auto_suggest_asked.clear();
+
+                    // Non-ACP engines run in-process — no subprocess to spawn.
+                    if self.grouping_config.engine != crate::config::GroupingEngine::Acp {
+                        match self.spawn_grouping_run(cmd_tx, false) {
+                            Some(count) => {
+                                self.status_message =
+                                    format!("🤖 Analyzing {} sessions...", count);
+                                self.log_lines.push(format!(
+                                    "Grouping: sending {} ungrouped sessions to {:?} engine",
+                                    count, self.grouping_config.engine
+                                ));
+                            }
+                            None => {
+                                self.status_message =
+                                    "No ungrouped sessions to analyze".to_string();
+                            }
+                        }
+                        return;
+                    }
+
                     // AI suggest: prepare prompt and spawn ACP background task
                     // Try to get semantic similarities (non-blocking try_lock)
                     let sem_ref = self.semantic.try_lock().ok();
                     let sem_plugin = sem_ref.as_deref();
-                    // Manual `s` resets the ask-history so the user gets a
-                    // fresh batch starting from the top of the ungrouped list.
-                    self.auto_suggest_asked.clear();
                     match crate::acp::prepare_prompt(
                         &self.acp_config,
                         &self.sessions,
@@ -1864,7 +2266,10 @@ impl App {
                             };
                             self.acp_run_is_auto = false;
                             self.status_message = format!("🤖 Analyzing {} sessions...", count);
-                            self.log_lines.push(format!("AI: sending {} ungrouped sessions to ACP agent", count));
+                            self.log_lines.push(format!(
+                                "AI: sending {} ungrouped sessions to ACP agent",
+                                count
+                            ));
 
                             // Spawn background task with timeout
                             let cfg = self.acp_config.clone();
@@ -1886,15 +2291,15 @@ impl App {
                                 let result = tokio::time::timeout(
                                     timeout,
                                     crate::acp::run_acp_suggest(cfg, prompt, acp_session_id),
-                                ).await;
+                                )
+                                .await;
                                 let _ = match result {
                                     Ok(Ok(suggestions)) => {
-                                        let json = serde_json::to_string(&suggestions).unwrap_or_default();
+                                        let json =
+                                            serde_json::to_string(&suggestions).unwrap_or_default();
                                         event_tx.send(SupervisorCommand::AcpResult(json))
                                     }
-                                    Ok(Err(e)) => {
-                                        event_tx.send(SupervisorCommand::AcpError(e))
-                                    }
+                                    Ok(Err(e)) => event_tx.send(SupervisorCommand::AcpError(e)),
                                     Err(_) => {
                                         crate::log::warn(&format!(
                                             "AI manual suggest TIMED OUT after {}s",
@@ -1925,10 +2330,17 @@ impl App {
                                     provider_key: pname.clone(),
                                 });
                                 // Track locally so incoming refreshes don't put it back
-                                self.pending_archives.push(PendingTransition { key, confirmed: false });
+                                self.pending_archives.push(PendingTransition {
+                                    key,
+                                    confirmed: false,
+                                });
                                 // Resolve the actual session index (Grouped view has header rows)
-                                let session_idx_opt = if self.view_mode == ViewMode::Grouped && !self.grouped_row_map.is_empty() {
-                                    self.grouped_row_map.get(self.selected_index).and_then(|o| *o)
+                                let session_idx_opt = if self.view_mode == ViewMode::Grouped
+                                    && !self.grouped_row_map.is_empty()
+                                {
+                                    self.grouped_row_map
+                                        .get(self.selected_index)
+                                        .and_then(|o| *o)
                                 } else {
                                     self.filtered_indices.get(self.selected_index).copied()
                                 };
@@ -1971,7 +2383,10 @@ impl App {
                                     provider_session_id: psid.clone(),
                                     provider_key: pname.clone(),
                                 });
-                                self.pending_unarchives.push(PendingTransition { key, confirmed: false });
+                                self.pending_unarchives.push(PendingTransition {
+                                    key,
+                                    confirmed: false,
+                                });
                                 if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
                                     if idx < self.hidden_sessions.len() {
                                         let removed = self.hidden_sessions.remove(idx);
@@ -1993,8 +2408,10 @@ impl App {
                                         }
                                     }
                                 }
-                                self.log_lines
-                                    .push(format!("Unarchived: {}", crate::util::short_id(&psid, 8)));
+                                self.log_lines.push(format!(
+                                    "Unarchived: {}",
+                                    crate::util::short_id(&psid, 8)
+                                ));
                             }
                         }
                     }
@@ -2062,9 +2479,8 @@ impl App {
                 KeyCode::Up => {
                     self.log_scroll = self.log_scroll.saturating_sub(1);
                 }
-                KeyCode::Down
-                    if self.log_scroll + 1 < self.log_lines.len() => {
-                        self.log_scroll += 1;
+                KeyCode::Down if self.log_scroll + 1 < self.log_lines.len() => {
+                    self.log_scroll += 1;
                 }
                 _ => {}
             },
@@ -2106,7 +2522,10 @@ impl App {
             let mut spans: Vec<Span<'static>> = vec![
                 Span::styled(
                     " Group: ",
-                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!("{}▏", prompt.input)),
             ];
@@ -2114,10 +2533,7 @@ impl App {
                 let new_hint = if prompt.input.trim().is_empty() {
                     "  ←→ pick · ⏎ assign · Esc cancel".to_string()
                 } else {
-                    format!(
-                        "  (⏎ creates new group '{}') · Esc cancel",
-                        prompt.input
-                    )
+                    format!("  (⏎ creates new group '{}') · Esc cancel", prompt.input)
                 };
                 spans.push(Span::styled(new_hint, Style::default().fg(Color::DarkGray)));
             } else {
@@ -2150,7 +2566,10 @@ impl App {
                     if i == cursor {
                         spans.push(Span::styled(
                             format!("▸ {} ({})", name, count),
-                            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
                         ));
                     } else {
                         spans.push(Span::styled(
@@ -2166,7 +2585,11 @@ impl App {
                     ));
                 }
                 spans.push(Span::styled(
-                    format!("   {}/{}  ←→ pick · ⏎ assign · Esc cancel", cursor + 1, total),
+                    format!(
+                        "   {}/{}  ←→ pick · ⏎ assign · Esc cancel",
+                        cursor + 1,
+                        total
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
@@ -2174,16 +2597,23 @@ impl App {
                 .style(Style::default().bg(Color::Black).fg(Color::White));
             f.render_widget(prompt_text, chunks[3]);
         }
-
     }
 
     fn draw_title_bar(&self, f: &mut Frame, area: Rect) {
-        let hl = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let hl = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
 
         if self.group_prompt.is_some() {
             // Group assignment prompt mode
             let title = Paragraph::new(Line::from(vec![
-                Span::styled(" Assign Group ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " Assign Group ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  type name  "),
                 Span::styled("⏎", hl),
                 Span::raw(" assign  "),
@@ -2199,13 +2629,37 @@ impl App {
                 GroupEditField::Description => "Description",
             };
             let title = Paragraph::new(Line::from(vec![
-                Span::styled(" ✏ Edit Group ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(format!("  [{}]  editing: {}  ", ge.original_name, field_label)),
-                Span::styled("↑↓", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ✏ Edit Group ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "  [{}]  editing: {}  ",
+                    ge.original_name, field_label
+                )),
+                Span::styled(
+                    "↑↓",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" switch  "),
-                Span::styled("⏎", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "⏎",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" save  "),
-                Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" cancel"),
             ]));
             f.render_widget(title, area);
@@ -2216,7 +2670,13 @@ impl App {
                 let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                 let frame = spinner[(elapsed as usize) % spinner.len()];
                 let title = Paragraph::new(Line::from(vec![
-                    Span::styled(" 🤖 AI Analyzing ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        " 🤖 AI Analyzing ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(format!("  {} {}s  ", frame, elapsed)),
                     Span::styled("Esc", hl),
                     Span::raw(" cancel"),
@@ -2228,9 +2688,19 @@ impl App {
                 // navigating; the spinner shows in the status bar instead.
                 self.draw_normal_title_bar(f, area);
             }
-        } else if let AcpState::Results { suggestions, cursor } = &self.acp_state {
+        } else if let AcpState::Results {
+            suggestions,
+            cursor,
+        } = &self.acp_state
+        {
             let title = Paragraph::new(Line::from(vec![
-                Span::styled(" 🤖 AI Suggestions ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " 🤖 AI Suggestions ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!("  {}/{} ", cursor + 1, suggestions.len())),
                 Span::styled("y", hl),
                 Span::raw(" accept  "),
@@ -2245,9 +2715,19 @@ impl App {
             ]));
             f.render_widget(title, area);
         } else if let AcpState::Failed(ref msg) = self.acp_state {
-            let display = if msg.len() > 60 { &msg[..60] } else { msg.as_str() };
+            let display = if msg.len() > 60 {
+                &msg[..60]
+            } else {
+                msg.as_str()
+            };
             let title = Paragraph::new(Line::from(vec![
-                Span::styled(" ⚠ AI Error ", Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ⚠ AI Error ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!("  {}  ", display)),
                 Span::raw("press any key"),
             ]));
@@ -2261,7 +2741,10 @@ impl App {
                 let title = Paragraph::new(Line::from(vec![
                     Span::styled(
                         " 🤖 Suggestion ",
-                        Style::default().fg(Color::Black).bg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!("  → {} ({}%)  ", sg.group, pct)),
                     Span::styled("y", hl),
@@ -2278,7 +2761,13 @@ impl App {
                 f.render_widget(title, area);
             } else {
                 let title = Paragraph::new(Line::from(vec![
-                    Span::styled(" Search ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        " Search ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw("  "),
                     Span::styled("⏎", hl),
                     Span::raw(" open  "),
@@ -2301,7 +2790,9 @@ impl App {
     /// their normal navigation hints instead of an opaque "AI Analyzing"
     /// banner.
     fn draw_normal_title_bar(&self, f: &mut Frame, area: Rect) {
-        let hl = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        let hl = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
         match self.view_mode {
             ViewMode::Active => {
                 let has_suggestion = self.pending_suggestion_for_selection().is_some();
@@ -2313,7 +2804,10 @@ impl App {
                     let title = Paragraph::new(Line::from(vec![
                         Span::styled(
                             " 🤖 Suggestion ",
-                            Style::default().fg(Color::Black).bg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::LightCyan)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(format!("  → {} ({}%)  ", sg.group, pct)),
                         Span::styled("y", hl),
@@ -2332,8 +2826,8 @@ impl App {
                     f.render_widget(title, area);
                 } else {
                     let suggestion_count = self.auto_suggestions.len();
-                    let auto_running = matches!(self.acp_state, AcpState::Running { .. })
-                        && self.acp_run_is_auto;
+                    let auto_running =
+                        matches!(self.acp_state, AcpState::Running { .. }) && self.acp_run_is_auto;
                     let header_label = if auto_running {
                         let elapsed = if let AcpState::Running { started } = &self.acp_state {
                             started.elapsed().as_secs()
@@ -2342,14 +2836,23 @@ impl App {
                         };
                         let spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                         let frame = spinner[(elapsed as usize) % spinner.len()];
-                        format!(" Agent Session Manager · 🤖 analyzing {} {}s ", frame, elapsed)
+                        format!(
+                            " Agent Session Manager · 🤖 analyzing {} {}s ",
+                            frame, elapsed
+                        )
                     } else if suggestion_count > 0 {
                         format!(" Agent Session Manager · 🤖 {} ", suggestion_count)
                     } else {
                         " Agent Session Manager ".to_string()
                     };
                     let mut spans = vec![
-                        Span::styled(header_label, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            header_label,
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw("  "),
                         Span::styled("⏎", hl),
                         Span::raw(" open  "),
@@ -2379,7 +2882,13 @@ impl App {
             ViewMode::Grouped => {
                 let title = Paragraph::new(Line::from({
                     let mut spans = vec![
-                        Span::styled(" 📂 Grouped ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            " 📂 Grouped ",
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw("  "),
                         Span::styled("⏎", hl),
                         Span::raw(" open  "),
@@ -2408,7 +2917,13 @@ impl App {
             }
             ViewMode::Hidden => {
                 let title = Paragraph::new(Line::from(vec![
-                    Span::styled(" 📦 Archived ", Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        " 📦 Archived ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw("  "),
                     Span::styled("⏎", hl),
                     Span::raw(" open  "),
@@ -2424,7 +2939,12 @@ impl App {
         }
     }
 
-    fn build_session_item(&self, list_idx: usize, session_idx: usize, show_badges: bool) -> ListItem<'static> {
+    fn build_session_item(
+        &self,
+        list_idx: usize,
+        session_idx: usize,
+        show_badges: bool,
+    ) -> ListItem<'static> {
         let s = &self.current_view_sessions()[session_idx];
         let badge = s.state.badge();
         let age = format_age(&s.updated_at);
@@ -2470,7 +2990,14 @@ impl App {
         let group_badge_str = if !show_badges || group_names.is_empty() {
             String::new()
         } else {
-            format!("  {}", group_names.iter().map(|g| format!("[{}]", g)).collect::<Vec<_>>().join(" "))
+            format!(
+                "  {}",
+                group_names
+                    .iter()
+                    .map(|g| format!("[{}]", g))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         };
 
         // Inline AI suggestion — shown whenever a pending auto-suggestion
@@ -2489,10 +3016,7 @@ impl App {
                 format!("{} · {}", s.state.label(), age),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(
-                group_badge_str,
-                Style::default().fg(Color::Blue),
-            ),
+            Span::styled(group_badge_str, Style::default().fg(Color::Blue)),
         ];
         if let Some(sg) = suggestion {
             // "Shadow" rendering — visibly dimmer than the title but bright
@@ -2502,9 +3026,7 @@ impl App {
             let new_marker = if sg.is_new { "✨ " } else { "" };
             age_spans.push(Span::styled(
                 format!("  · ⟨{}{}⟩", new_marker, sg.group),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
             ));
         }
         let age_line = Line::from(age_spans);
@@ -2555,7 +3077,8 @@ impl App {
     fn build_grouped_list_items(&mut self) -> Vec<ListItem<'static>> {
         // Collect sessions by group. A session can appear under multiple groups.
         let sessions = self.current_view_sessions();
-        let mut grouped: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
         let mut ungrouped_indices: Vec<usize> = Vec::new();
 
         for &session_idx in &self.filtered_indices {
@@ -2606,12 +3129,12 @@ impl App {
         // Render each group with a header
         for (group_name, session_indices) in &ordered {
             // Group header
-            let header = Line::from(vec![
-                Span::styled(
-                    format!("▼ {} ({})", group_name, session_indices.len()),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-            ]);
+            let header = Line::from(vec![Span::styled(
+                format!("▼ {} ({})", group_name, session_indices.len()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )]);
             items.push(ListItem::new(vec![header]));
             row_map.push(None);
             header_names.push((visual_idx, group_name.clone()));
@@ -2639,7 +3162,9 @@ impl App {
                     Span::styled(
                         title_display,
                         if visual_idx == self.selected_index {
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Gray)
                         },
@@ -2660,12 +3185,12 @@ impl App {
 
         // Ungrouped section
         if !ungrouped_indices.is_empty() {
-            let header = Line::from(vec![
-                Span::styled(
-                    format!("▼ Ungrouped ({})", ungrouped_indices.len()),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                ),
-            ]);
+            let header = Line::from(vec![Span::styled(
+                format!("▼ Ungrouped ({})", ungrouped_indices.len()),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )]);
             items.push(ListItem::new(vec![header]));
             row_map.push(None);
             visual_idx += 1;
@@ -2691,7 +3216,9 @@ impl App {
                     Span::styled(
                         title_display,
                         if visual_idx == self.selected_index {
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Gray)
                         },
@@ -2728,12 +3255,28 @@ impl App {
             }
         }
 
+        // Group headers are not selectable sessions. If the current index
+        // points at a header (for example after apply_filter() reset to 0),
+        // snap to the nearest real session row to keep highlight and action
+        // targets aligned.
+        if let Some(idx) = self.nearest_selectable_row(self.selected_index) {
+            self.selected_index = idx;
+            self.list_state.select(Some(idx));
+        } else {
+            self.selected_index = 0;
+            self.list_state.select(None);
+        }
+
         items
     }
 
     fn draw_session_list(&mut self, f: &mut Frame, area: Rect) {
         // When AI suggestions are showing, render them instead of sessions
-        if let AcpState::Results { ref suggestions, ref cursor } = self.acp_state.clone() {
+        if let AcpState::Results {
+            ref suggestions,
+            ref cursor,
+        } = self.acp_state.clone()
+        {
             self.draw_suggestion_list(f, area, suggestions, *cursor);
             return;
         }
@@ -2760,10 +3303,13 @@ impl App {
         // In Grouped view, show grouped/total counts
         let grouped_count = if self.view_mode == ViewMode::Grouped {
             let sessions = self.current_view_sessions();
-            sessions.iter().filter(|s| {
-                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
-                !self.group_mgr.groups_for(&key).is_empty()
-            }).count()
+            sessions
+                .iter()
+                .filter(|s| {
+                    let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                    !self.group_mgr.groups_for(&key).is_empty()
+                })
+                .count()
         } else {
             0
         };
@@ -2779,7 +3325,10 @@ impl App {
                 self.search_query
             )
         } else if self.view_mode == ViewMode::Grouped {
-            format!(" {} ({} grouped / {} total) ", view_label, grouped_count, view_count)
+            format!(
+                " {} ({} grouped / {} total) ",
+                view_label, grouped_count, view_count
+            )
         } else {
             format!(" {} ({}) ", view_label, self.filtered_indices.len())
         };
@@ -2818,7 +3367,9 @@ impl App {
                 let score_pct = (sg.score * 100.0) as u32;
 
                 // Try to find session title from self.sessions
-                let title = self.sessions.iter()
+                let title = self
+                    .sessions
+                    .iter()
                     .find(|s| {
                         let key = format!("{}:{}", s.provider_name, s.provider_session_id);
                         key == sg.session
@@ -2834,7 +3385,9 @@ impl App {
                     Span::styled(
                         title,
                         if is_selected {
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Gray)
                         },
@@ -2897,15 +3450,14 @@ impl App {
 
             // Name field — always shows input, cursor on focused field
             let name_label_style = if name_focused {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
             lines.push(Line::from(vec![
-                Span::styled(
-                    if name_focused { " ✎ " } else { "   " },
-                    name_label_style,
-                ),
+                Span::styled(if name_focused { " ✎ " } else { "   " }, name_label_style),
                 Span::styled("Name: ", name_label_style),
                 Span::styled(
                     if name_focused {
@@ -2914,7 +3466,9 @@ impl App {
                         ge.name_input.clone()
                     },
                     if name_focused {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
                     },
@@ -2925,7 +3479,9 @@ impl App {
 
             // Description field
             let desc_label_style = if desc_focused {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
@@ -2937,15 +3493,14 @@ impl App {
                 ge.desc_input.clone()
             };
             lines.push(Line::from(vec![
-                Span::styled(
-                    if desc_focused { " ✎ " } else { "   " },
-                    desc_label_style,
-                ),
+                Span::styled(if desc_focused { " ✎ " } else { "   " }, desc_label_style),
                 Span::styled("Description: ", desc_label_style),
                 Span::styled(
                     desc_display,
                     if desc_focused {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
                     },
@@ -2961,16 +3516,17 @@ impl App {
             // Show member sessions
             let sessions = self.current_view_sessions();
             let group_name = &ge.original_name;
-            let member_count = sessions.iter().filter(|s| {
-                let key = format!("{}:{}", s.provider_name, s.provider_session_id);
-                self.group_mgr.groups_for(&key).contains(group_name)
-            }).count();
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" Members: {} sessions", member_count),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
+            let member_count = sessions
+                .iter()
+                .filter(|s| {
+                    let key = format!("{}:{}", s.provider_name, s.provider_session_id);
+                    self.group_mgr.groups_for(&key).contains(group_name)
+                })
+                .count();
+            lines.push(Line::from(vec![Span::styled(
+                format!(" Members: {} sessions", member_count),
+                Style::default().fg(Color::DarkGray),
+            )]));
             for s in sessions.iter() {
                 let key = format!("{}:{}", s.provider_name, s.provider_session_id);
                 if self.group_mgr.groups_for(&key).contains(group_name) {
@@ -2982,7 +3538,10 @@ impl App {
                     lines.push(Line::from(vec![
                         Span::raw("   "),
                         Span::styled(format!("{} ", s.state.badge()), Style::default()),
-                        Span::styled(format!("{:<6} ", s.provider_name), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("{:<6} ", s.provider_name),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                         Span::styled(title_display, Style::default().fg(Color::Gray)),
                     ]));
                 }
@@ -3001,14 +3560,20 @@ impl App {
         }
 
         // When AI suggestions are showing, render suggestion detail + session info
-        if let AcpState::Results { ref suggestions, ref cursor } = self.acp_state {
+        if let AcpState::Results {
+            ref suggestions,
+            ref cursor,
+        } = self.acp_state
+        {
             if let Some(sg) = suggestions.get(*cursor) {
                 let mut lines = vec![];
 
                 // Suggestion header
                 lines.push(Line::from(Span::styled(
                     " AI Suggestion",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(Span::styled(
                     " ─────────────────────────",
@@ -3016,10 +3581,19 @@ impl App {
                 )));
 
                 // Group info
-                let new_badge = if sg.is_new { " ✨ new group" } else { " existing group" };
+                let new_badge = if sg.is_new {
+                    " ✨ new group"
+                } else {
+                    " existing group"
+                };
                 lines.push(Line::from(vec![
                     Span::styled(" Group: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&sg.group, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        &sg.group,
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(new_badge, Style::default().fg(Color::Yellow)),
                 ]));
 
@@ -3051,7 +3625,9 @@ impl App {
                 }) {
                     lines.push(Line::from(Span::styled(
                         " Original Session",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     )));
                     lines.push(Line::from(vec![
                         Span::styled(" Title: ", Style::default().fg(Color::DarkGray)),
@@ -3345,7 +3921,9 @@ impl App {
                 format!("⏳ {}/{} ", done, total),
                 Style::default().fg(Color::Yellow),
             ),
-            crate::search::SemanticStatus::Failed(_) => Span::styled("⚠ Semantic failed ", Style::default().fg(Color::Red)),
+            crate::search::SemanticStatus::Failed(_) => {
+                Span::styled("⚠ Semantic failed ", Style::default().fg(Color::Red))
+            }
             crate::search::SemanticStatus::Unavailable => Span::raw(""),
         };
         let status = Paragraph::new(Line::from(vec![
@@ -3409,10 +3987,7 @@ fn build_semantic_chunks(session: &Session, _registry: &ProviderRegistry) -> Vec
             let signals = extract_semantic_signals(&events_path);
             for (label, text) in signals {
                 if !text.is_empty() {
-                    chunks.push((
-                        format!("search_document: {}", text),
-                        label,
-                    ));
+                    chunks.push((format!("search_document: {}", text), label));
                 }
             }
         }
@@ -3448,7 +4023,11 @@ fn extract_semantic_signals(path: &std::path::Path) -> Vec<(String, String)> {
         if line.contains("session.compaction_complete") {
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
                 if obj.get("type").and_then(|v| v.as_str()) == Some("session.compaction_complete") {
-                    if let Some(s) = obj.get("data").and_then(|d| d.get("summaryContent")).and_then(|v| v.as_str()) {
+                    if let Some(s) = obj
+                        .get("data")
+                        .and_then(|d| d.get("summaryContent"))
+                        .and_then(|v| v.as_str())
+                    {
                         if !s.is_empty() {
                             // Keep only the last compaction (most recent overview)
                             last_compaction = s.chars().take(800).collect();
@@ -3459,7 +4038,11 @@ fn extract_semantic_signals(path: &std::path::Path) -> Vec<(String, String)> {
         } else if line.contains("session.task_complete") {
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
                 if obj.get("type").and_then(|v| v.as_str()) == Some("session.task_complete") {
-                    if let Some(s) = obj.get("data").and_then(|d| d.get("summary")).and_then(|v| v.as_str()) {
+                    if let Some(s) = obj
+                        .get("data")
+                        .and_then(|d| d.get("summary"))
+                        .and_then(|v| v.as_str())
+                    {
                         if !s.is_empty() {
                             task_summaries.push(s.chars().take(200).collect::<String>());
                         }
@@ -3469,7 +4052,11 @@ fn extract_semantic_signals(path: &std::path::Path) -> Vec<(String, String)> {
         } else if user_msgs.len() < MAX_USER_MSGS && line.contains("\"user.message\"") {
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
                 if obj.get("type").and_then(|v| v.as_str()) == Some("user.message") {
-                    if let Some(c) = obj.get("data").and_then(|d| d.get("content")).and_then(|v| v.as_str()) {
+                    if let Some(c) = obj
+                        .get("data")
+                        .and_then(|d| d.get("content"))
+                        .and_then(|v| v.as_str())
+                    {
                         let trimmed = c.trim();
                         if !trimmed.is_empty() && !trimmed.starts_with('<') {
                             user_msgs.push(trimmed.chars().take(150).collect::<String>());
@@ -3489,8 +4076,13 @@ fn extract_semantic_signals(path: &std::path::Path) -> Vec<(String, String)> {
 
     // Task summaries combined as one chunk (last 5)
     if !task_summaries.is_empty() {
-        let combined: String = task_summaries.iter().rev().take(5)
-            .cloned().collect::<Vec<_>>().join(" | ");
+        let combined: String = task_summaries
+            .iter()
+            .rev()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ");
         results.push(("tasks".to_string(), combined));
     }
 
@@ -3589,7 +4181,11 @@ mod ui_logic_tests {
                 confidence: Confidence::High,
                 reason: "mock".into(),
             },
-            pid: if process == ProcessState::Running { Some(1234) } else { None },
+            pid: if process == ProcessState::Running {
+                Some(1234)
+            } else {
+                None
+            },
             created_at: "2025-01-15T10:00:00Z".into(),
             updated_at: "2025-01-15T10:30:00Z".into(),
             state_dir: None,
@@ -3597,18 +4193,39 @@ mod ui_logic_tests {
     }
 
     fn mock_running(id: &str, title: &str) -> Session {
-        mock_session(id, title, "doing work", "copilot",
-            ProcessState::Running, InteractionState::Busy, PersistenceState::Ephemeral)
+        mock_session(
+            id,
+            title,
+            "doing work",
+            "copilot",
+            ProcessState::Running,
+            InteractionState::Busy,
+            PersistenceState::Ephemeral,
+        )
     }
 
     fn mock_waiting(id: &str, title: &str) -> Session {
-        mock_session(id, title, "needs input", "copilot",
-            ProcessState::Running, InteractionState::WaitingInput, PersistenceState::Ephemeral)
+        mock_session(
+            id,
+            title,
+            "needs input",
+            "copilot",
+            ProcessState::Running,
+            InteractionState::WaitingInput,
+            PersistenceState::Ephemeral,
+        )
     }
 
     fn mock_resumable(id: &str, title: &str) -> Session {
-        mock_session(id, title, "paused work", "copilot",
-            ProcessState::Exited, InteractionState::Idle, PersistenceState::Resumable)
+        mock_session(
+            id,
+            title,
+            "paused work",
+            "copilot",
+            ProcessState::Exited,
+            InteractionState::Idle,
+            PersistenceState::Resumable,
+        )
     }
 
     fn make_app(sessions: Vec<Session>) -> App {
@@ -3660,13 +4277,21 @@ mod ui_logic_tests {
     fn format_age_naive_timestamp_parses() {
         // Should parse and return a duration string (not the raw input)
         let result = format_age("2020-01-01 00:00:00");
-        assert!(result.ends_with(" ago"), "expected duration, got: {}", result);
+        assert!(
+            result.ends_with(" ago"),
+            "expected duration, got: {}",
+            result
+        );
     }
 
     #[test]
     fn format_age_rfc3339_parses() {
         let result = format_age("2020-01-01T00:00:00Z");
-        assert!(result.ends_with(" ago"), "expected duration, got: {}", result);
+        assert!(
+            result.ends_with(" ago"),
+            "expected duration, got: {}",
+            result
+        );
     }
 
     // ── state_color ──────────────────────────────────────────────────
@@ -3742,13 +4367,21 @@ mod ui_logic_tests {
         ]);
         app.search_query = "auth".into();
         app.apply_filter();
-        assert!(app.filtered_indices.len() < 3, "search should filter sessions");
+        assert!(
+            app.filtered_indices.len() < 3,
+            "search should filter sessions"
+        );
         // The "Fix auth bug" session should be in results
         let view = app.current_view_sessions();
-        let matched: Vec<_> = app.filtered_indices.iter()
+        let matched: Vec<_> = app
+            .filtered_indices
+            .iter()
             .map(|&i| view[i].title.as_str())
             .collect();
-        assert!(matched.contains(&"Fix auth bug"), "auth session should match");
+        assert!(
+            matched.contains(&"Fix auth bug"),
+            "auth session should match"
+        );
     }
 
     #[test]
@@ -3772,7 +4405,10 @@ mod ui_logic_tests {
         app.selected_index = 2;
         app.search_query = "A".into();
         app.apply_filter();
-        assert_eq!(app.selected_index, 0, "filter should reset selection to top");
+        assert_eq!(
+            app.selected_index, 0,
+            "filter should reset selection to top"
+        );
     }
 
     // ── Navigation ───────────────────────────────────────────────────
@@ -3792,10 +4428,7 @@ mod ui_logic_tests {
 
     #[test]
     fn navigate_up_at_top_stays_at_zero() {
-        let mut app = make_app(vec![
-            mock_running("1", "A"),
-            mock_waiting("2", "B"),
-        ]);
+        let mut app = make_app(vec![mock_running("1", "A"), mock_waiting("2", "B")]);
         let (tx, _rx) = mpsc::unbounded_channel();
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &tx);
         assert_eq!(app.selected_index, 0);
@@ -3803,9 +4436,7 @@ mod ui_logic_tests {
 
     #[test]
     fn navigate_down_at_bottom_stays() {
-        let mut app = make_app(vec![
-            mock_running("1", "A"),
-        ]);
+        let mut app = make_app(vec![mock_running("1", "A")]);
         let (tx, _rx) = mpsc::unbounded_channel();
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
         assert_eq!(app.selected_index, 0, "can't go below last item");
@@ -3925,6 +4556,7 @@ mod ui_logic_tests {
             }
             other => panic!("expected FocusSession, got {:?}", other),
         }
+        assert!(app.status_message.contains("press Enter again"));
     }
 
     #[test]
@@ -3944,7 +4576,56 @@ mod ui_logic_tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
         match rx.try_recv() {
-            Ok(SupervisorCommand::ResumeSession { provider_session_id, .. }) => {
+            Ok(SupervisorCommand::ResumeSession {
+                provider_session_id,
+                ..
+            }) => {
+                assert_eq!(provider_session_id, "1");
+            }
+            other => panic!("expected ResumeSession, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn double_enter_on_running_forces_resume() {
+        let mut session = mock_running("1", "Active task");
+        session.tab_title = Some("Fixing auth".into());
+        let mut app = make_app(vec![session]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        match rx.try_recv() {
+            Ok(SupervisorCommand::FocusSession { .. }) => {}
+            other => panic!("expected first Enter to focus, got {:?}", other),
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        match rx.try_recv() {
+            Ok(SupervisorCommand::ResumeSession {
+                provider_session_id,
+                ..
+            }) => {
+                assert_eq!(provider_session_id, "1");
+            }
+            other => panic!("expected ResumeSession, got {:?}", other),
+        }
+        assert!(app.status_message.contains("Force resuming"));
+    }
+
+    #[test]
+    fn second_enter_without_tab_title_forces_resume() {
+        let app_session = mock_running("1", "Active task");
+        let mut app = make_app(vec![app_session]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "first Enter should not send a command"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tx);
+        match rx.try_recv() {
+            Ok(SupervisorCommand::ResumeSession {
+                provider_session_id,
+                ..
+            }) => {
                 assert_eq!(provider_session_id, "1");
             }
             other => panic!("expected ResumeSession, got {:?}", other),
@@ -3973,7 +4654,10 @@ mod ui_logic_tests {
     fn ctrl_c_sets_should_quit() {
         let mut app = make_app(vec![]);
         let (tx, _rx) = mpsc::unbounded_channel();
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &tx);
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+        );
         assert!(app.should_quit);
     }
 
@@ -3982,7 +4666,10 @@ mod ui_logic_tests {
         let mut app = make_app(vec![]);
         app.search_active = true;
         let (tx, _rx) = mpsc::unbounded_channel();
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &tx);
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &tx,
+        );
         assert!(app.should_quit);
     }
 
@@ -4081,14 +4768,14 @@ mod ui_logic_tests {
 
     #[test]
     fn navigate_resets_detail_scroll() {
-        let mut app = make_app(vec![
-            mock_running("1", "A"),
-            mock_waiting("2", "B"),
-        ]);
+        let mut app = make_app(vec![mock_running("1", "A"), mock_waiting("2", "B")]);
         let (tx, _rx) = mpsc::unbounded_channel();
         app.detail_scroll = 10;
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tx);
-        assert_eq!(app.detail_scroll, 0, "navigating should reset detail scroll");
+        assert_eq!(
+            app.detail_scroll, 0,
+            "navigating should reset detail scroll"
+        );
     }
 
     // ── New session command ──────────────────────────────────────────
@@ -4114,8 +4801,8 @@ mod ui_logic_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod ui_invariant_tests {
-    use std::fs;
     use super::{clamp_cursor_after_removal, empty_provider_bootstrap};
+    use std::fs;
 
     fn ui_source() -> String {
         fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/mod.rs"))
@@ -4141,6 +4828,66 @@ mod ui_invariant_tests {
             no_providers,
             "With zero providers, initial_load_complete must start true — \
              supervisor will never emit scan events to flip it later."
+        );
+    }
+
+    /// Regression: `[acp] auto_suggest` defaults to false, and it used to gate
+    /// *every* engine. That meant the fast remote/local engines silently never
+    /// ran on startup and the user had to press `s` by hand. The flag must
+    /// apply to the ACP engine only, since that is the one that spawns a CLI
+    /// and costs quota.
+    #[test]
+    fn auto_suggest_flag_gates_only_the_acp_engine() {
+        let src = code_section();
+        assert!(
+            src.contains("if is_acp && !self.acp_config.auto_suggest"),
+            "auto_suggest must be gated behind is_acp — an unconditional \
+             `if !self.acp_config.auto_suggest` check stops the default \
+             engine from ever auto-running."
+        );
+    }
+
+    /// Regression: grouping results used to be sent via `cmd_tx` to the
+    /// supervisor, which forwards them back as events. But the supervisor runs
+    /// its initial full scan BEFORE entering its command loop, so on a large
+    /// store a result produced during startup sat unforwarded until that scan
+    /// finished. Measured on 3169 sessions: suggestions ready at 1.4s, shown at
+    /// 29s. Results must go straight to the UI's own event queue.
+    #[test]
+    fn grouping_results_bypass_the_supervisor() {
+        let src = code_section();
+        assert!(
+            src.contains("group_event_tx"),
+            "the UI must hold a direct SupervisorEvent sender for grouping \
+             results, or they stall behind the supervisor's initial scan"
+        );
+        assert!(
+            src.contains("self.group_event_tx = Some(event_tx)"),
+            "run() must install the direct grouping event sender"
+        );
+    }
+
+    /// Regression: supervisor events were drained in strict arrival order, so a
+    /// grouping result that landed mid-scan queued behind `SessionsUpdated`
+    /// events carrying thousands of sessions. Observed on a real 3169-session
+    /// store: grouping finished in 1.5s but the result — and the "analyzing"
+    /// spinner — did not clear for another 24s. Grouping results must be
+    /// partitioned to the front of each drained batch.
+    #[test]
+    fn grouping_results_are_processed_before_session_updates() {
+        let src = code_section();
+        assert!(
+            src.contains(".partition(|e| {"),
+            "the event drain must partition grouping results ahead of other \
+             events, or a slow scan will stall the suggestion result"
+        );
+        let partition_idx = src
+            .find(".partition(|e| {")
+            .expect("partition call must exist");
+        let tail = &src[partition_idx..];
+        assert!(
+            tail.contains("SupervisorEvent::AcpResult(_) | SupervisorEvent::AcpError(_)"),
+            "the partition predicate must select grouping result/error events"
         );
     }
 
@@ -4566,12 +5313,10 @@ mod ui_invariant_tests {
         let sessions_updated_start = full
             .find("SupervisorEvent::SessionsUpdated {")
             .expect("SessionsUpdated handler must exist");
-        let snap_hidden = full[sessions_updated_start..]
-            .find("scan_hidden_keys");
-        let snap_active = full[sessions_updated_start..]
-            .find("scan_active_keys");
-        let filter_apply = full[sessions_updated_start..]
-            .find("if !self.pending_archives.is_empty()");
+        let snap_hidden = full[sessions_updated_start..].find("scan_hidden_keys");
+        let snap_active = full[sessions_updated_start..].find("scan_active_keys");
+        let filter_apply =
+            full[sessions_updated_start..].find("if !self.pending_archives.is_empty()");
         assert!(
             snap_hidden.is_some() && snap_active.is_some(),
             "SessionsUpdated must snapshot both scan_hidden_keys and \
@@ -4588,6 +5333,44 @@ mod ui_invariant_tests {
              the pending filter runs. Building them after would let the \
              filter's own moves satisfy the drain gate, defeating the \
              purpose."
+        );
+    }
+
+    #[test]
+    fn supervisor_event_drain_is_capped_per_tick() {
+        // Regression: unbounded event draining can lock the UI for seconds
+        // under refresh bursts. Keep an explicit per-tick cap.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        assert!(
+            full.contains("MAX_SUPERVISOR_EVENTS_PER_TICK"),
+            "UI loop must cap supervisor event draining per tick."
+        );
+        assert!(
+            full.contains("while drained_events < MAX_SUPERVISOR_EVENTS_PER_TICK"),
+            "UI loop must break event draining after the per-tick cap."
+        );
+    }
+
+    #[test]
+    fn semantic_precheck_does_not_run_on_ui_thread() {
+        // Regression: stale-count precheck in the UI thread caused 2-5s
+        // freezes while navigating. Keep precheck out of the event loop.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        let forbidden = format!("{}{}", "sem.count_needing_", "embedding");
+        assert!(
+            !full.contains(&forbidden),
+            "UI thread must not call count_needing_embedding during event handling."
+        );
+    }
+
+    #[test]
+    fn grouped_selection_snaps_to_real_session_rows() {
+        // Group headers are visual rows only; selection must land on real
+        // session rows so highlight and Enter target always match.
+        let full = fs::read_to_string(file!()).expect("should read ui/mod.rs");
+        assert!(
+            full.contains("nearest_selectable_row(self.selected_index)"),
+            "Grouped list rebuild must normalize selection onto a selectable session row."
         );
     }
 }

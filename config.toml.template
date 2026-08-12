@@ -32,16 +32,50 @@ log_max_lines = 500
 # No configuration needed. Drop the semantic_search_plugin library next to
 # the TUI binary (already included in the "-semantic" release zip).
 
-# ─── AI Auto-Grouping (ACP / Agent Client Protocol) — OPT-IN ───
-# Lets the TUI ask an AI agent to suggest thematic groups for ungrouped
-# sessions. The whole feature is **off by default**: when this entire
-# section is absent or commented out, the `s` shortcut is hidden, no
-# `copilot` process is ever spawned, and the AI feature is invisible.
+# ─── Grouping engine ───
+# Picks HOW thematic groups are suggested for ungrouped sessions. Suggestions
+# render as a dim "· ⟨group⟩" shadow under the session row in the Active view;
+# press `y` to accept, `n` to dismiss, `e` to edit. Press `s` in the Grouped
+# view to run on demand.
 #
-# To turn it on: uncomment the [acp] block below. Press `s` in the Grouped
-# view to run on demand, or set `auto_suggest = true` for background runs.
-# Suggestions render as a dim "· ⟨group⟩" shadow under the session row in
-# the Active view; press `y` to accept, `n` to dismiss, `e` to edit.
+#   engine = "remote"  DEFAULT. Sends session titles and working directories to
+#                      a hosted tab auto-grouping service, which returns natural
+#                      names like "System Maintenance". ~2s for 30 sessions.
+#                      Nothing to install or authenticate. See the note below on
+#                      what is sent.
+#
+#   engine = "local"   No network. NOT a local AI model — it just compares how
+#                      many words two titles share, and names each group after
+#                      its most common words (e.g. "benchmark-prompt-files"), so
+#                      expect to rename some. ~0.2s. Also the automatic fallback
+#                      whenever the remote engine fails.
+#
+#   engine = "acp"     LEGACY. Spawns the CLI configured in [acp] below. Best
+#                      names, but 25-45s per batch and uses your Copilot quota.
+#
+# [grouping]
+# engine = "remote"
+# language = "en-US"        # language for generated group names
+# timeout_secs = 20         # remote call timeout; the service answers in ~2s
+#
+# ─── What the "remote" engine sends ───
+# Sent:       session titles and working directories (as file:/// URIs), for one
+#             representative per cluster of near-duplicate sessions. The working
+#             directory is included because it measurably improves grouping.
+# Never sent: session summaries, file contents, chat transcripts.
+# On failure: silently falls back to the local engine — grouping never breaks.
+#
+# The grouping service is Microsoft-hosted and its endpoint is undocumented:
+# no published contract or data-handling terms, and it can change without
+# notice. Titles and folder paths can contain repository and project names, and
+# they do leave your machine. If that is not acceptable, set engine = "local".
+
+# ─── AI Auto-Grouping (ACP / Agent Client Protocol) ───
+# Only used when `engine = "acp"` above. Lets the TUI ask an AI agent to
+# suggest thematic groups for ungrouped sessions. When this section is absent
+# or commented out, no `copilot` process is ever spawned.
+#
+# Set `auto_suggest = true` for background runs.
 #
 # Requirements (only relevant once you uncomment):
 #   - `copilot` CLI installed on PATH and authenticated (`copilot login`)
@@ -51,9 +85,7 @@ log_max_lines = 500
 #   - ~30 sessions per batch, ~25-45s per batch on Copilot CLI
 #   - Counts against your Copilot CLI usage quota
 #
-# Privacy:
-#   - Only session titles, summaries, and updated_at timestamps are sent.
-#   - Full file contents and chat transcripts are NEVER included.
+# A run that exceeds timeout_secs is TERMINATED, not just abandoned.
 #
 # [acp]
 # command = "copilot"
@@ -61,6 +93,26 @@ log_max_lines = 500
 # auto_suggest = false               # set true for background mode
 # timeout_secs = 180
 # # prompt_template = '~/.config/agent-session-tui/group-suggest.md'
+
+# ─── Remote boxes: view/resume ANOTHER machine's sessions (OPT-IN) ───
+# Run the TUI with `--remote <box>` to stream that box's WHOLE session list
+# (all agents) over a tunnel and resume any of them ON the box in a new host tab:
+#
+#   agent-session-tui                      → local sessions (this machine)
+#   agent-session-tui --remote=<box>       → <box>'s sessions; Enter resumes there
+#
+# Configure it once with a [remote_defaults] TEMPLATE at the bottom of this file.
+# `{box}` is replaced with the name you pass to --remote, so every box that
+# shares the same layout needs ZERO extra config. Add a [remotes.<box>] section
+# only to OVERRIDE the template for a specific box. See the block at EOF.
+#
+# The box side runs `<tui> --serve-json`, which ALWAYS reads local disk (it
+# ignores remote settings) — so the host and box can share the SAME exe AND the
+# SAME config.toml; only the launch differs (host: plain; box: --serve-json,
+# invoked for you by --remote over the tunnel).
+#
+# (Legacy per-provider `remote_stream_cmd` / `remote_list_cmd` fields still work
+# but --remote + [remote_defaults] is the recommended, box-agnostic way.)
 
 # ─── Copilot CLI ───
 [providers.copilot]
@@ -78,8 +130,6 @@ launch_fallback = "{{LAUNCH_FALLBACK}}"
 {{LAUNCH_CMD_LINE}}
 {{LAUNCH_ARGS_LINE}}
 # wt_profile = "PowerShell"
-
-# ─── Claude Code ───
 [providers.claude]
 enabled = true
 command = "claude"
@@ -152,3 +202,18 @@ launch_fallback = "{{LAUNCH_FALLBACK}}"
 {{LAUNCH_CMD_LINE}}
 {{LAUNCH_ARGS_LINE}}
 # wt_profile = "PowerShell"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Remote boxes — used ONLY with `--remote=<box>`. Plain launch stays local.
+# [remote_defaults] is a TEMPLATE shared by every box; `{box}` → the --remote
+# name, `{command}` → the built resume command. A new box needs NO extra config.
+# Add [remotes.<box>] only to override the template for one box.
+# (Example uses the `devbox` CLI to reach an Azure Dev Box / VM over a tunnel.)
+# ═══════════════════════════════════════════════════════════════════════════
+# [remote_defaults]
+# stream_cmd = ["devbox", "exec", "{box}", "agent-session-tui --serve-json 50 --interval 5"]
+# launch_cmd = "wt"
+# launch_args = ["-w", "0", "new-tab", "--title", "devbox {box}", "powershell", "-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& 'C:\\Users\\you\\OneDrive - Microsoft\\Documents\\.copilot\\tools\\devbox\\devbox.ps1' vsterm {box} -Cwd '{cwd}' -Exec '{command}'"]
+#
+# [remotes.special-box]           # override example (only if a box differs)
+# stream_cmd = ["devbox", "exec", "special-box", "agent-session-tui --serve-json 30 --interval 10"]

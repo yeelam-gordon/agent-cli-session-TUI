@@ -99,10 +99,7 @@ impl ArchiveStore {
                 was_new,
                 self.archived.len()
             )),
-            Err(e) => crate::log::warn(&format!(
-                "archive: {} buffer/save FAILED: {}",
-                key, e
-            )),
+            Err(e) => crate::log::warn(&format!("archive: {} buffer/save FAILED: {}", key, e)),
         }
         result
     }
@@ -119,10 +116,7 @@ impl ArchiveStore {
                 was_present,
                 self.archived.len()
             )),
-            Err(e) => crate::log::warn(&format!(
-                "unarchive: {} buffer/save FAILED: {}",
-                key, e
-            )),
+            Err(e) => crate::log::warn(&format!("unarchive: {} buffer/save FAILED: {}", key, e)),
         }
         result
     }
@@ -152,10 +146,7 @@ impl ArchiveStore {
                 "archive: flush_blocking total={} saved",
                 self.archived.len()
             )),
-            Err(e) => crate::log::warn(&format!(
-                "archive: flush_blocking FAILED: {}",
-                e
-            )),
+            Err(e) => crate::log::warn(&format!("archive: flush_blocking FAILED: {}", e)),
         }
         save_result
     }
@@ -229,7 +220,9 @@ fn persist_worker_loop(weak: Weak<Mutex<ArchiveStore>>, signal: Arc<PersistSigna
 
         // Upgrade to a strong reference. If the store has been dropped
         // (process shutting down without calling flush_blocking), bail.
-        let Some(arc) = weak.upgrade() else { break; };
+        let Some(arc) = weak.upgrade() else {
+            break;
+        };
 
         // Brief lock to snapshot both the path and the current set.
         let (path, snap) = {

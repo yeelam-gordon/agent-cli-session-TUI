@@ -11,7 +11,8 @@ fn kimi_lifecycle() {
     let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("providers")
         .join("kimi.yaml");
-    let provider = ConfigDrivenProvider::load_from_yaml(&yaml, pc).expect("load kimi provider yaml");
+    let provider =
+        ConfigDrivenProvider::load_from_yaml(&yaml, pc).expect("load kimi provider yaml");
     let mut runner = TestRunner::new("Kimi");
 
     scenarios::discover(&mut runner, &provider);

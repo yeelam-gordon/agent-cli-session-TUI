@@ -479,10 +479,7 @@ pub enum TabTitleConfig {
         iterate_path: Option<String>,
     },
     /// Use the value of some field in the latest matching event.
-    FromField {
-        r#where: String,
-        path: String,
-    },
+    FromField { r#where: String, path: String },
     /// Reuse the already-extracted session title (from `fields.title`) as the
     /// tab title. Used for Claude Code, which sets its own terminal tab title
     /// to `"✳ <first words of the first user message>"` — the same source
@@ -1079,7 +1076,9 @@ fn translate_state(state: &V3State) -> StateSignalsConfig {
     StateSignalsConfig {
         last_event_map,
         event_predicates,
-        idle_threshold_seconds: state.idle_threshold_seconds.unwrap_or_else(default_idle_secs),
+        idle_threshold_seconds: state
+            .idle_threshold_seconds
+            .unwrap_or_else(default_idle_secs),
         unfinished_turn_when: state.unfinished_turn_when.clone(),
         recent_tool_activity_when: state.recent_tool_activity_when.clone(),
     }
@@ -1221,7 +1220,10 @@ mod expand_path_tests {
 
     #[test]
     fn does_not_expand_embedded_tilde() {
-        assert_eq!(expand_path("/tmp/~something"), PathBuf::from("/tmp/~something"));
+        assert_eq!(
+            expand_path("/tmp/~something"),
+            PathBuf::from("/tmp/~something")
+        );
     }
 
     #[test]

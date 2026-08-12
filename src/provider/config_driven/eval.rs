@@ -120,17 +120,17 @@ enum Token {
     Ident(String), // path segment or keyword
     Number(f64),
     Str(String),
-    Eq,      // ==
-    Ne,      // !=
-    Gt,      // >
-    Lt,      // <
-    Ge,      // >=
-    Le,      // <=
-    And,     // 'and'
-    Or,      // 'or'
-    Not,     // 'not'
+    Eq,       // ==
+    Ne,       // !=
+    Gt,       // >
+    Lt,       // <
+    Ge,       // >=
+    Le,       // <=
+    And,      // 'and'
+    Or,       // 'or'
+    Not,      // 'not'
     DblSlash, // //
-    Dot,     // .
+    Dot,      // .
     LParen,
     RParen,
 }
@@ -142,17 +142,49 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
     while i < bytes.len() {
         let c = bytes[i];
         match c {
-            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
-            b'(' => { out.push(Token::LParen); i += 1; }
-            b')' => { out.push(Token::RParen); i += 1; }
-            b'.' => { out.push(Token::Dot); i += 1; }
-            b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Eq); i += 2; }
-            b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Ne); i += 2; }
-            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Ge); i += 2; }
-            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => { out.push(Token::Le); i += 2; }
-            b'>' => { out.push(Token::Gt); i += 1; }
-            b'<' => { out.push(Token::Lt); i += 1; }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => { out.push(Token::DblSlash); i += 2; }
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                i += 1;
+            }
+            b'(' => {
+                out.push(Token::LParen);
+                i += 1;
+            }
+            b')' => {
+                out.push(Token::RParen);
+                i += 1;
+            }
+            b'.' => {
+                out.push(Token::Dot);
+                i += 1;
+            }
+            b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Token::Eq);
+                i += 2;
+            }
+            b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Token::Ne);
+                i += 2;
+            }
+            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Token::Ge);
+                i += 2;
+            }
+            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
+                out.push(Token::Le);
+                i += 2;
+            }
+            b'>' => {
+                out.push(Token::Gt);
+                i += 1;
+            }
+            b'<' => {
+                out.push(Token::Lt);
+                i += 1;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                out.push(Token::DblSlash);
+                i += 2;
+            }
             b'"' => {
                 // string literal, no escape support (keep it simple)
                 let start = i + 1;
@@ -195,12 +227,19 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                 }
                 let slice = std::str::from_utf8(&bytes[start..i])
                     .map_err(|e| format!("invalid utf8 in number: {e}"))?;
-                let n: f64 = slice.parse().map_err(|e| format!("bad number '{slice}': {e}"))?;
+                let n: f64 = slice
+                    .parse()
+                    .map_err(|e| format!("bad number '{slice}': {e}"))?;
                 out.push(Token::Number(n));
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
                 let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-' || bytes[i] == b'$') {
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric()
+                        || bytes[i] == b'_'
+                        || bytes[i] == b'-'
+                        || bytes[i] == b'$')
+                {
                     i += 1;
                 }
                 let word = std::str::from_utf8(&bytes[start..i])
@@ -215,7 +254,12 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                     _ => out.push(Token::Ident(word.to_string())),
                 }
             }
-            _ => return Err(format!("unexpected character '{}' at position {i}", c as char)),
+            _ => {
+                return Err(format!(
+                    "unexpected character '{}' at position {i}",
+                    c as char
+                ))
+            }
         }
     }
     Ok(out)
@@ -229,14 +273,21 @@ struct Parser {
 }
 
 impl Parser {
-    fn peek(&self) -> Option<&Token> { self.tokens.get(self.pos) }
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
     fn bump(&mut self) -> Option<Token> {
         let t = self.tokens.get(self.pos).cloned();
         self.pos += 1;
         t
     }
     fn eat(&mut self, t: &Token) -> bool {
-        if self.peek() == Some(t) { self.pos += 1; true } else { false }
+        if self.peek() == Some(t) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
     }
 
     // precedence: or < and < not < eq/ne < alt < atom
@@ -309,7 +360,10 @@ impl Parser {
                 }
                 Ok(n)
             }
-            Some(Token::Str(s)) => { self.bump(); Ok(Node::Literal(Value::String(s))) }
+            Some(Token::Str(s)) => {
+                self.bump();
+                Ok(Node::Literal(Value::String(s)))
+            }
             Some(Token::Number(n)) => {
                 self.bump();
                 let v = serde_json::Number::from_f64(n)
@@ -358,7 +412,11 @@ fn eval(node: &Node, input: &Value) -> Value {
         Node::Path(parts) => walk_path(input, parts),
         Node::Alt(a, b) => {
             let va = eval(a, input);
-            if va.is_null() { eval(b, input) } else { va }
+            if va.is_null() {
+                eval(b, input)
+            } else {
+                va
+            }
         }
         Node::Literal(v) => v.clone(),
         Node::Eq(a, b) => Value::Bool(value_eq(&eval(a, input), &eval(b, input))),
@@ -396,9 +454,9 @@ fn eval(node: &Node, input: &Value) -> Value {
 
 fn value_cmp(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            x.as_f64().and_then(|xf| y.as_f64().map(|yf| xf.partial_cmp(&yf)))?
-        }
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .and_then(|xf| y.as_f64().map(|yf| xf.partial_cmp(&yf)))?,
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         _ => None,
     }
@@ -437,12 +495,10 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Value::Null, Value::Null) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::String(x), Value::String(y)) => x == y,
-        (Value::Number(x), Value::Number(y)) => {
-            match (x.as_f64(), y.as_f64()) {
-                (Some(xf), Some(yf)) => xf.partial_cmp(&yf) == Some(Ordering::Equal),
-                _ => x.to_string() == y.to_string(),
-            }
-        }
+        (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(xf), Some(yf)) => xf.partial_cmp(&yf) == Some(Ordering::Equal),
+            _ => x.to_string() == y.to_string(),
+        },
         // cross-type: coerce numbers from strings for convenience
         (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) => {
             // numeric text may appear in logs — treat cross-type as non-equal for now
@@ -477,8 +533,14 @@ mod tests {
     #[test]
     fn path_alt() {
         let e = Expr::parse("message.content // data.content").unwrap();
-        assert_eq!(e.eval(&json!({"data":{"content":"fallback"}})), json!("fallback"));
-        assert_eq!(e.eval(&json!({"message":{"content":"primary"}})), json!("primary"));
+        assert_eq!(
+            e.eval(&json!({"data":{"content":"fallback"}})),
+            json!("fallback")
+        );
+        assert_eq!(
+            e.eval(&json!({"message":{"content":"primary"}})),
+            json!("primary")
+        );
     }
 
     #[test]
@@ -528,7 +590,10 @@ mod tests {
         let mut c = ExprCache::new();
         let e1 = c.get("a.b").unwrap().clone();
         let e2 = c.get("a.b").unwrap().clone();
-        assert_eq!(e1.eval(&json!({"a":{"b":1}})), e2.eval(&json!({"a":{"b":1}})));
+        assert_eq!(
+            e1.eval(&json!({"a":{"b":1}})),
+            e2.eval(&json!({"a":{"b":1}}))
+        );
     }
 
     #[test]

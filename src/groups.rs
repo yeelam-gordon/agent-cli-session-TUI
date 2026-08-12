@@ -219,7 +219,9 @@ impl GroupManager {
 
     /// Set description for a group.
     pub fn set_group_description(&mut self, group: &str, desc: &str) {
-        self.store.descriptions.insert(group.to_string(), desc.to_string());
+        self.store
+            .descriptions
+            .insert(group.to_string(), desc.to_string());
         self.save();
     }
 
@@ -300,8 +302,12 @@ mod tests {
         mgr.assign_human("claude:def", "old-name");
         mgr.rename_group("old-name", "new-name");
 
-        assert!(mgr.groups_for("copilot:abc").contains(&"new-name".to_string()));
-        assert!(mgr.groups_for("claude:def").contains(&"new-name".to_string()));
+        assert!(mgr
+            .groups_for("copilot:abc")
+            .contains(&"new-name".to_string()));
+        assert!(mgr
+            .groups_for("claude:def")
+            .contains(&"new-name".to_string()));
         assert!(mgr.all_groups().iter().all(|(n, _)| n != "old-name"));
     }
 
@@ -327,7 +333,9 @@ mod tests {
         }
 
         let mgr2 = GroupManager::open(&path);
-        assert!(mgr2.groups_for("copilot:abc").contains(&"agent-tui".to_string()));
+        assert!(mgr2
+            .groups_for("copilot:abc")
+            .contains(&"agent-tui".to_string()));
     }
 
     #[test]
@@ -339,7 +347,10 @@ mod tests {
 
         let mgr = GroupManager::open(tmp.path());
         // Should not panic — just returns groups for a key that won't match any live session.
-        assert_eq!(mgr.groups_for("copilot:gone"), vec!["old-project".to_string()]);
+        assert_eq!(
+            mgr.groups_for("copilot:gone"),
+            vec!["old-project".to_string()]
+        );
         assert!(mgr.groups_for("copilot:nonexistent").is_empty());
     }
 

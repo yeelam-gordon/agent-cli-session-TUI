@@ -106,9 +106,9 @@ impl MockPlugin {
         };
 
         let abi: u32 = unsafe {
-            match lib.get::<libloading::Symbol<unsafe extern "C" fn() -> u32>>(
-                b"mock_data_abi_version",
-            ) {
+            match lib
+                .get::<libloading::Symbol<unsafe extern "C" fn() -> u32>>(b"mock_data_abi_version")
+            {
                 Ok(f) => f(),
                 Err(_) => 0,
             }
@@ -182,9 +182,10 @@ impl MockPlugin {
         let mut sessions = self.sessions_inner();
 
         if let Some((real_id, real_cwd)) = find_real_copilot_session() {
-            if let Some(s) = sessions.iter_mut().find(|s| {
-                s.provider_name == "copilot" && s.state.process == ProcessState::Exited
-            }) {
+            if let Some(s) = sessions
+                .iter_mut()
+                .find(|s| s.provider_name == "copilot" && s.state.process == ProcessState::Exited)
+            {
                 crate::log::info(&format!(
                     "Mock: wired real copilot session {} (cwd={}) into row '{}' — Enter/r will resume",
                     real_id, real_cwd, s.title
@@ -334,7 +335,11 @@ fn build_session(idx: usize, m: &MockSession, now: DateTime<Utc>) -> Session {
 }
 
 fn mock_session_id(idx: usize) -> String {
-    format!("{:08x}-mock-{:04}", 0xDEC0DE00u32.wrapping_add(idx as u32), idx)
+    format!(
+        "{:08x}-mock-{:04}",
+        0xDEC0DE00u32.wrapping_add(idx as u32),
+        idx
+    )
 }
 
 fn parse_state(s: &str) -> SessionState {
@@ -407,7 +412,11 @@ fn parse_age_hint(s: &str) -> Duration {
         found = true;
     }
 
-    if found { total } else { Duration::hours(1) }
+    if found {
+        total
+    } else {
+        Duration::hours(1)
+    }
 }
 
 #[cfg(test)]
@@ -455,7 +464,10 @@ mod tests {
         assert!(matches!(s0.state.process, ProcessState::Running));
         assert!(matches!(s0.state.interaction, InteractionState::Busy));
         let s1 = build_session(1, &f.sessions[1], now);
-        assert!(matches!(s1.state.interaction, InteractionState::WaitingInput));
+        assert!(matches!(
+            s1.state.interaction,
+            InteractionState::WaitingInput
+        ));
         let s2 = build_session(2, &f.sessions[2], now);
         assert!(matches!(s2.state.process, ProcessState::Exited));
     }

@@ -1,13 +1,16 @@
 use agent_session_tui::config::AppConfig;
 use agent_session_tui::provider::gemini::GeminiProvider;
-use agent_session_tui::testing::TestRunner;
 use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::TestRunner;
 
 #[test]
 fn gemini_lifecycle() {
     let config = AppConfig::load().expect("config");
-    let pc = config.providers.get("gemini").expect("'gemini' not in config");
-    
+    let pc = config
+        .providers
+        .get("gemini")
+        .expect("'gemini' not in config");
+
     let provider = GeminiProvider::new(pc);
     let mut runner = TestRunner::new("Gemini");
 

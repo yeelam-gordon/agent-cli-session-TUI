@@ -40,6 +40,72 @@ pub struct AppConfig {
     /// feature on.
     #[serde(default)]
     pub acp: Option<AcpConfig>,
+    /// Grouping engine selection. Absent (the common case) means the
+    /// zero-egress local engine.
+    #[serde(default)]
+    pub grouping: GroupingConfig,
+    /// Shared template for `--remote <box>` mode. When you run the TUI with
+    /// `--remote <box>`, it streams that box's whole session list over the
+    /// tunnel and wraps resume so it opens on the box. Because every box has
+    /// the same layout, this ONE template (with a `{box}` placeholder) covers
+    /// every box — a new box needs no config at all.
+    #[serde(default)]
+    pub remote_defaults: Option<RemoteConfig>,
+    /// Per-box overrides. Only add a `[remotes.<box>]` section when a specific
+    /// box needs different settings than `remote_defaults`. Any field left out
+    /// falls back to the template.
+    #[serde(default)]
+    pub remotes: HashMap<String, RemoteConfig>,
+}
+
+/// How to reach a remote box in `--remote` mode. Strings may contain a `{box}`
+/// placeholder (replaced with the box name) and, for `launch_args`, `{command}`
+/// (replaced with the built resume command).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoteConfig {
+    /// Command that returns the box's session list as JSON (an array of
+    /// sessions) — re-run each refresh. Typically a `devbox exec <box>
+    /// "am --dump-json 50"` invocation. NOTE: a one-shot command that EXITS is
+    /// required (not a persistent stream) — the VS Code tunnel only flushes a
+    /// spawned command's output when it exits.
+    #[serde(default, alias = "stream_cmd")]
+    pub list_cmd: Vec<String>,
+    /// Launcher used to resume a session on the box (opens a host terminal tab
+    /// that dials the box). `{command}` = the built resume command.
+    #[serde(default)]
+    pub launch_cmd: Option<String>,
+    #[serde(default)]
+    pub launch_args: Option<Vec<String>>,
+}
+
+impl AppConfig {
+    /// Resolve the effective [`RemoteConfig`] for a box: start from
+    /// `remote_defaults`, overlay any `[remotes.<box>]` overrides, then
+    /// substitute the `{box}` placeholder. Returns `None` if neither a template
+    /// nor an override exists.
+    pub fn resolve_remote(&self, box_name: &str) -> Option<RemoteConfig> {
+        let has_override = self.remotes.contains_key(box_name);
+        if self.remote_defaults.is_none() && !has_override {
+            return None;
+        }
+        let mut rc = self.remote_defaults.clone().unwrap_or_default();
+        if let Some(over) = self.remotes.get(box_name) {
+            if !over.list_cmd.is_empty() {
+                rc.list_cmd = over.list_cmd.clone();
+            }
+            if over.launch_cmd.is_some() {
+                rc.launch_cmd = over.launch_cmd.clone();
+            }
+            if over.launch_args.is_some() {
+                rc.launch_args = over.launch_args.clone();
+            }
+        }
+        let sub = |s: &String| s.replace("{box}", box_name);
+        rc.list_cmd = rc.list_cmd.iter().map(sub).collect();
+        rc.launch_cmd = rc.launch_cmd.as_ref().map(sub);
+        rc.launch_args = rc.launch_args.as_ref().map(|v| v.iter().map(sub).collect());
+        Some(rc)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,16 +142,97 @@ pub struct ProviderConfig {
     pub launch_fallback: Option<String>,
     #[serde(default)]
     pub wt_profile: Option<String>,
+    /// OPT-IN remote mode. When set, this provider does NOT read a local
+    /// `state_dir`; instead it runs this command, captures stdout, and parses it
+    /// as the JSON produced by `agent-session-tui --dump-json` (an array of
+    /// Session objects) to obtain the session list from another machine.
+    ///
+    /// Example (resume Copilot sessions living on a remote box via devbox):
+    ///   remote_list_cmd = ["devbox", "exec", "gordon-devbox1",
+    ///                      "agent-session-tui --dump-json 50"]
+    ///
+    /// When `None` (the default), the provider behaves exactly as before:
+    /// local filesystem discovery via the YAML `ConfigDrivenProvider`.
+    #[serde(default)]
+    pub remote_list_cmd: Option<Vec<String>>,
+    /// OPT-IN streaming remote mode (preferred over `remote_list_cmd`). When
+    /// set, this command is spawned ONCE and kept running; it must emit a
+    /// persistent NDJSON stream — one compact JSON line per snapshot, each an
+    /// array of Session objects (exactly what `agent-session-tui --serve-json`
+    /// prints every few seconds). The host caches the latest line and reconnects
+    /// if the stream drops. This gives a live, low-overhead remote view over a
+    /// single connection instead of re-spawning a one-shot each refresh.
+    ///
+    /// Example (stream Copilot sessions from a remote box via devbox):
+    ///   remote_stream_cmd = ["devbox", "exec", "gordon-devbox1",
+    ///                        "agent-session-tui --serve-json 50 --interval 5"]
+    ///
+    /// Selection order: `remote_stream_cmd` > `remote_list_cmd` > local disk.
+    #[serde(default)]
+    pub remote_stream_cmd: Option<Vec<String>>,
 }
 
 fn default_launch_method() -> String {
     "wt".into()
 }
 
+/// Which engine produces group suggestions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupingEngine {
+    /// Hosted tab auto-grouping service. The default: it answers a 30-session
+    /// batch in ~2s and produces natural group names. Sends session titles and
+    /// working directories; see `src/grouping/remote.rs` for the full note on
+    /// what is transmitted and the stability caveats.
+    #[default]
+    Remote,
+    /// Word-overlap matching on titles. No network, ~0.2s, keyword-derived
+    /// names. Not a local model. Also the automatic fallback whenever `Remote`
+    /// fails.
+    Local,
+    /// Legacy: spawn the configured CLI (`[acp]`) as a one-shot subprocess.
+    Acp,
+}
+
+/// Configuration for group suggestions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupingConfig {
+    /// Engine to use. Defaults to `local` — no session data leaves the machine
+    /// unless the user explicitly opts into a remote engine.
+    #[serde(default)]
+    pub engine: GroupingEngine,
+    /// Language tag passed to a remote engine; controls the language generated
+    /// group names are written in.
+    #[serde(default = "default_grouping_language")]
+    pub language: String,
+    /// Maximum seconds to wait for a remote grouping call. Far lower than the
+    /// ACP default because the remote endpoint answers a 30-item batch in ~2s;
+    /// anything slower is a fault, not slow progress.
+    #[serde(default = "default_grouping_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_grouping_language() -> String {
+    "en-US".into()
+}
+
+fn default_grouping_timeout_secs() -> u64 {
+    20
+}
+
+impl Default for GroupingConfig {
+    fn default() -> Self {
+        Self {
+            engine: GroupingEngine::default(),
+            language: default_grouping_language(),
+            timeout_secs: default_grouping_timeout_secs(),
+        }
+    }
+}
+
 /// Configuration for ACP-based AI group suggestions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpConfig {
-    /// The CLI command to use for AI suggestions (e.g., "codex", "qwen", "copilot").
+pub struct AcpConfig {    /// The CLI command to use for AI suggestions (e.g., "codex", "qwen", "copilot").
     #[serde(default = "default_acp_command")]
     pub command: String,
     /// Extra args appended to the command (e.g., ["--model", "gpt-4o-mini"] for cost control).
@@ -191,6 +338,8 @@ impl Default for AppConfig {
                 launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
+                remote_list_cmd: None,
+                remote_stream_cmd: None,
             },
         );
 
@@ -212,6 +361,8 @@ impl Default for AppConfig {
                 launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
+                remote_list_cmd: None,
+                remote_stream_cmd: None,
             },
         );
 
@@ -233,6 +384,8 @@ impl Default for AppConfig {
                 launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
+                remote_list_cmd: None,
+                remote_stream_cmd: None,
             },
         );
 
@@ -254,6 +407,8 @@ impl Default for AppConfig {
                 launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
+                remote_list_cmd: None,
+                remote_stream_cmd: None,
             },
         );
 
@@ -275,6 +430,8 @@ impl Default for AppConfig {
                 launch_fallback_args: None,
                 launch_fallback: Some("cmd".into()),
                 wt_profile: None,
+                remote_list_cmd: None,
+                remote_stream_cmd: None,
             },
         );
 
@@ -286,6 +443,9 @@ impl Default for AppConfig {
             log_max_lines: default_log_lines(),
             providers,
             acp: None,
+            grouping: GroupingConfig::default(),
+            remote_defaults: None,
+            remotes: HashMap::new(),
         }
     }
 }
@@ -416,6 +576,64 @@ mod tests {
         let cfg = AppConfig::default();
         assert!(cfg.acp.is_none(), "default AppConfig must not opt into AI");
     }
+
+    /// With no `[grouping]` section, the remote engine is used — it is the
+    /// default because it produces far better group names than word matching.
+    #[test]
+    fn grouping_defaults_to_remote_when_section_absent() {
+        let toml_str = r#"
+            poll_interval_ms = 2000
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.grouping.engine, GroupingEngine::Remote);
+        assert_eq!(cfg.grouping.language, "en-US");
+        assert_eq!(cfg.grouping.timeout_secs, 20);
+    }
+
+    #[test]
+    fn default_app_config_uses_remote_grouping() {
+        assert_eq!(AppConfig::default().grouping.engine, GroupingEngine::Remote);
+    }
+
+    /// An empty `[grouping]` section must behave exactly like an absent one.
+    #[test]
+    fn empty_grouping_section_matches_the_default() {
+        let cfg: AppConfig = toml::from_str("[grouping]\n").expect("parse");
+        assert_eq!(cfg.grouping.engine, GroupingEngine::Remote);
+    }
+
+    /// Opting out to the offline engine must be possible and must stick.
+    #[test]
+    fn local_engine_can_be_selected_explicitly() {
+        let cfg: AppConfig =
+            toml::from_str("[grouping]\nengine = \"local\"\n").expect("parse");
+        assert_eq!(cfg.grouping.engine, GroupingEngine::Local);
+    }
+
+    #[test]
+    fn grouping_engine_parses_each_variant() {
+        for (s, want) in [
+            ("local", GroupingEngine::Local),
+            ("remote", GroupingEngine::Remote),
+            ("acp", GroupingEngine::Acp),
+        ] {
+            let cfg: AppConfig =
+                toml::from_str(&format!("[grouping]\nengine = \"{s}\"\n")).expect("parse");
+            assert_eq!(cfg.grouping.engine, want, "engine = {s}");
+        }
+    }
+
+    #[test]
+    fn populated_grouping_section_round_trips() {
+        let toml_str = r#"
+            [grouping]
+            engine = "remote"
+            language = "zh-CN"
+            timeout_secs = 45
+        "#;
+        let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.grouping.engine, GroupingEngine::Remote);
+        assert_eq!(cfg.grouping.language, "zh-CN");
+        assert_eq!(cfg.grouping.timeout_secs, 45);
+    }
 }
-
-

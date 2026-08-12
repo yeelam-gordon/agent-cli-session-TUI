@@ -44,7 +44,9 @@ const WMI_BACKOFF_SECS: u64 = 300; // 5 minutes
 
 /// Known provider executables for the combined WMI fallback query.
 #[cfg(windows)]
-const KNOWN_EXECUTABLES: &[&str] = &["copilot", "claude", "codex", "qwen", "gemini", "kimi", "node", "agency"];
+const KNOWN_EXECUTABLES: &[&str] = &[
+    "copilot", "claude", "codex", "qwen", "gemini", "kimi", "node", "agency",
+];
 
 /// WMI timeout in seconds. If WMI doesn't respond in this time, fall back to sysinfo.
 #[cfg(windows)]
@@ -53,29 +55,25 @@ const WMI_TIMEOUT_SECS: u64 = 3;
 /// Invalidate the global process cache so the next `discover_processes` call
 /// re-queries the OS. Call this at the START of each scan cycle.
 ///
-/// Respects TTL: only actually clears if the cache is older than CACHE_TTL_SECS.
-/// WMI backoff state is always preserved.
+/// Providers within that cycle still share the first refreshed snapshot.
+/// WMI backoff state is preserved across cycles.
 pub fn invalidate_process_cache() {
     if let Ok(mut guard) = PROCESS_CACHE.lock() {
-        if let Some(ref state) = *guard {
-            if state.captured_at.elapsed().as_secs() < CACHE_TTL_SECS {
-                return; // Still fresh — keep it
-            }
-        }
-        // Preserve WMI backoff timestamp across invalidations
-        let wmi_timeout = guard.as_ref().and_then(|s| s.last_wmi_timeout);
-        if wmi_timeout.is_some() {
-            if let Some(ref mut state) = *guard {
-                // Clear snapshot but keep backoff
-                state.snapshot.clear();
-                state.captured_at = std::time::Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS + 1);
-            } else {
-                *guard = None;
-            }
-        } else {
-            *guard = None;
-        }
+        invalidate_cache_state(&mut guard);
     }
+}
+
+fn invalidate_cache_state(cache: &mut Option<ProcessCacheState>) {
+    if let Some(state) = cache.as_mut() {
+        state.snapshot.clear();
+        state.captured_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS + 1);
+        state.has_wmi_data = false;
+    }
+}
+
+fn cache_is_fresh(state: &ProcessCacheState) -> bool {
+    state.captured_at.elapsed().as_secs() < CACHE_TTL_SECS
 }
 
 /// Discover processes whose name matches the filter (case-insensitive substring).
@@ -89,16 +87,15 @@ pub fn discover_processes(name_filter: &str) -> HashMap<u32, ProcessEntry> {
         let mut guard = PROCESS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
 
         // Return cached if still fresh
-        let use_cached = guard.as_ref()
-            .map(|s| !s.snapshot.is_empty() && s.captured_at.elapsed().as_secs() < CACHE_TTL_SECS)
-            .unwrap_or(false);
+        let use_cached = guard.as_ref().map(cache_is_fresh).unwrap_or(false);
         if use_cached {
             guard.as_ref().unwrap().snapshot.clone()
         } else {
             // Check WMI backoff state — only meaningful on Windows where WMI
             // is actually invoked. On non-Windows the variable would be unused.
             #[cfg(windows)]
-            let wmi_backed_off = guard.as_ref()
+            let wmi_backed_off = guard
+                .as_ref()
                 .and_then(|s| s.last_wmi_timeout)
                 .map(|t| t.elapsed().as_secs() < WMI_BACKOFF_SECS)
                 .unwrap_or(false);
@@ -107,12 +104,14 @@ pub fn discover_processes(name_filter: &str) -> HashMap<u32, ProcessEntry> {
             let snapshot = discover_all_sysinfo();
             crate::log::info(&format!(
                 "Process snapshot: {} processes in {:?} (sysinfo)",
-                snapshot.len(), start.elapsed()
+                snapshot.len(),
+                start.elapsed()
             ));
 
             #[cfg(windows)]
             let (snapshot, has_wmi, wmi_timed_out) = {
-                let has_cmdlines = snapshot.values()
+                let has_cmdlines = snapshot
+                    .values()
                     .take(20)
                     .filter(|e| !e.command_line.is_empty())
                     .count();
@@ -126,7 +125,8 @@ pub fn discover_processes(name_filter: &str) -> HashMap<u32, ProcessEntry> {
                         Some(wmi_result) => {
                             crate::log::info(&format!(
                                 "WMI OK: {} processes in {:?}",
-                                wmi_result.len(), wmi_start.elapsed()
+                                wmi_result.len(),
+                                wmi_start.elapsed()
                             ));
                             (wmi_result, true, false)
                         }
@@ -198,11 +198,14 @@ fn discover_wmi_with_timeout() -> Option<HashMap<u32, ProcessEntry>> {
     use std::io::Read;
 
     // Build combined filter for all known executables
-    let conditions: Vec<String> = KNOWN_EXECUTABLES.iter()
-        .flat_map(|exe| vec![
-            format!("$_.Name -like '*{}*'", exe),
-            format!("$_.CommandLine -like '*{}*'", exe),
-        ])
+    let conditions: Vec<String> = KNOWN_EXECUTABLES
+        .iter()
+        .flat_map(|exe| {
+            vec![
+                format!("$_.Name -like '*{}*'", exe),
+                format!("$_.CommandLine -like '*{}*'", exe),
+            ]
+        })
         .collect();
     let where_clause = conditions.join(" -or ");
 
@@ -265,10 +268,24 @@ fn discover_wmi_with_timeout() -> Option<HashMap<u32, ProcessEntry>> {
     let mut result = HashMap::new();
     for entry in entries {
         let pid = entry.get("ProcessId").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let name = entry.get("Name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let cmd = entry.get("CommandLine").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = entry
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cmd = entry
+            .get("CommandLine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if pid != 0 {
-            result.insert(pid, ProcessEntry { name, command_line: cmd });
+            result.insert(
+                pid,
+                ProcessEntry {
+                    name,
+                    command_line: cmd,
+                },
+            );
         }
     }
     Some(result)
@@ -312,4 +329,68 @@ fn discover_all_sysinfo() -> HashMap<u32, ProcessEntry> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidate_process_cache_forces_next_scan_to_refresh() {
+        // Regression: the 30-second TTL masked resume/close transitions across
+        // periodic scans by retaining the previous scan cycle's process list.
+        let mut snapshot = HashMap::new();
+        snapshot.insert(
+            42,
+            ProcessEntry {
+                name: "copilot.exe".into(),
+                command_line: "copilot --resume session-id".into(),
+            },
+        );
+        let mut cache = Some(ProcessCacheState {
+            snapshot,
+            captured_at: std::time::Instant::now(),
+            has_wmi_data: true,
+            last_wmi_timeout: None,
+        });
+
+        invalidate_cache_state(&mut cache);
+
+        let state = cache.expect("cache state remains available");
+        assert!(state.snapshot.is_empty());
+        assert!(!cache_is_fresh(&state));
+        assert!(!state.has_wmi_data);
+    }
+
+    #[test]
+    fn fresh_empty_process_snapshot_is_shared_within_scan_cycle() {
+        let mut cache = Some(ProcessCacheState {
+            snapshot: HashMap::new(),
+            captured_at: std::time::Instant::now(),
+            has_wmi_data: true,
+            last_wmi_timeout: None,
+        });
+
+        assert!(cache.as_ref().is_some_and(cache_is_fresh));
+        invalidate_cache_state(&mut cache);
+        assert!(!cache.as_ref().is_some_and(cache_is_fresh));
+    }
+
+    #[test]
+    fn invalidate_process_cache_preserves_wmi_backoff() {
+        let timeout = std::time::Instant::now();
+        let mut cache = Some(ProcessCacheState {
+            snapshot: HashMap::new(),
+            captured_at: std::time::Instant::now(),
+            has_wmi_data: false,
+            last_wmi_timeout: Some(timeout),
+        });
+
+        invalidate_cache_state(&mut cache);
+
+        assert_eq!(
+            cache.and_then(|state| state.last_wmi_timeout),
+            Some(timeout)
+        );
+    }
 }

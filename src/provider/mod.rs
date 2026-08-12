@@ -281,3 +281,4 @@ impl ProviderRegistry {
 // and instantiated via `ConfigDrivenProvider`. The legacy per-provider
 // Rust modules have been removed — see git history if you need them.
 pub mod config_driven;
+pub mod remote_json;

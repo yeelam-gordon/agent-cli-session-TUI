@@ -11,10 +11,10 @@
 
 use anyhow::Result;
 use std::ptr;
+use windows::core::BSTR;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::Accessibility::*;
-use windows::core::BSTR;
 
 /// Return the `Name` (tab title) of every `TabItem` inside any Windows-Terminal
 /// class window currently open on the desktop. Order is undefined.

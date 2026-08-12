@@ -34,7 +34,11 @@ agent-session-tui/
 │   ├── models.rs           # Core types: Session, SessionState (4-axis), StateSignals
 │   ├── archive.rs          # JSON-based archive store
 │   ├── groups.rs           # GroupManager: assign sessions to thematic groups (groups.json)
-│   ├── acp.rs              # ACP-based AI grouping suggestions (spawns Copilot CLI)
+│   ├── acp.rs              # Legacy grouping engine: spawns configured CLI one-shot (kills on timeout)
+│   ├── grouping/
+│   │   ├── mod.rs          # Grouping engine dispatch (remote | local | acp) + cluster expansion
+│   │   ├── local.rs        # Zero-egress word-overlap clustering + heuristic names
+│   │   └── remote.rs       # Client for the hosted tab auto-grouping service (default engine)
 │   ├── log.rs              # File-based logging (%TEMP%/agent-session-tui.log)
 │   ├── log_search.rs       # Tantivy full-text index over session content (head/tail/compaction/user)
 │   ├── process_info.rs     # Shared process discovery (sysinfo + WMI fallback with cooldown)
@@ -168,6 +172,8 @@ Quick summary:
 | **Parallel provider scans** | All providers scan concurrently via `std::thread::scope` for fast refresh |
 | **Provider trait** | Each CLI is a plugin. Discovery, state inference, and launch are provider-specific. Common test scenarios validate any provider. |
 | **File-based logging** | `%TEMP%/agent-session-tui.log`. Panics are logged with file:line before terminal restore. |
+| **Remote-first grouping** | `[grouping] engine` defaults to `remote`. It sends session titles + cwd (as `file:///` URIs) for one representative per local cluster (measured: 40 sessions → 8 entries), never summaries or file contents, and falls back to `local` on any failure. `local` is word-overlap matching, **not** a local model. |
+| **Subprocess timeouts must kill** | `tokio::time::timeout` only drops the future; it cannot reap an OS process. `acp::wait_with_timeout` polls `try_wait` and calls `child.kill()` at the limit. Any future subprocess work must do the same. |
 
 ## Common Pitfalls
 

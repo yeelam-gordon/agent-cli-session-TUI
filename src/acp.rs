@@ -81,7 +81,10 @@ fn render_prompt(
             .map(|(name, count, desc)| {
                 if let Some(d) = desc {
                     let d_escaped = d.replace('"', r#"\""#);
-                    format!(r#"{{"name":"{}","count":{},"description":"{}"}}"#, name, count, d_escaped)
+                    format!(
+                        r#"{{"name":"{}","count":{},"description":"{}"}}"#,
+                        name, count, d_escaped
+                    )
                 } else {
                     format!(r#"{{"name":"{}","count":{}}}"#, name, count)
                 }
@@ -213,11 +216,9 @@ pub async fn run_acp_suggest(
 ) -> Result<Vec<AiSuggestion>, String> {
     // Use std::process (synchronous) inside spawn_blocking because
     // tokio::process async pipe reads hang on Windows for ACP stdio.
-    let result = tokio::task::spawn_blocking(move || {
-        run_acp_sync(cfg, prompt, session_id)
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?;
+    let result = tokio::task::spawn_blocking(move || run_acp_sync(cfg, prompt, session_id))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?;
     result
 }
 
@@ -278,22 +279,53 @@ fn run_acp_sync(
     ));
 
     let start = std::time::Instant::now();
-    let output = Command::new(&cfg.command)
+    let mut child = Command::new(&cfg.command)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
         .envs(clean_env)
-        .output()
+        .spawn()
         .map_err(|e| format!("Failed to run '{}': {}", cfg.command, e))?;
+
+    // Drain both pipes on dedicated threads. Without this, polling `try_wait`
+    // while the child fills a pipe buffer deadlocks: the child blocks on write,
+    // we block waiting for it to exit.
+    let mut child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = child_stdout.as_mut() {
+            let _ = std::io::Read::read_to_end(s, &mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(s) = child_stderr.as_mut() {
+            let _ = std::io::Read::read_to_end(s, &mut buf);
+        }
+        buf
+    });
+
+    // Poll for exit, killing the child once `timeout_secs` elapses. The caller
+    // also wraps this in `tokio::time::timeout`, but that only abandons the
+    // future — it can NOT reap the OS process. Killing here is what actually
+    // stops a hung agent from running on for minutes after the UI gave up.
+    let status = wait_with_timeout(
+        &mut child,
+        start,
+        std::time::Duration::from_secs(cfg.timeout_secs),
+        &cfg.command,
+    )?;
     let elapsed = start.elapsed();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).to_string();
+    let stderr = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).to_string();
     crate::log::info(&format!(
         "ACP: copilot exited (status={}, elapsed={:.1}s, stdout={}b, stderr={}b)",
-        output.status,
+        status,
         elapsed.as_secs_f64(),
         stdout.len(),
         stderr.len()
@@ -304,17 +336,21 @@ fn run_acp_sync(
         crate::log::info(&format!("ACP: stderr preview: {}", stderr_preview));
     }
 
-    if !output.status.success() {
+    if !status.success() {
         return Err(format!(
             "Command failed ({}, {:.1}s): stderr={}",
-            output.status,
+            status,
             elapsed.as_secs_f64(),
             stderr.chars().take(400).collect::<String>()
         ));
     }
 
     let stdout_preview: String = stdout.chars().take(800).collect();
-    crate::log::info(&format!("ACP: stdout preview ({} chars total): {}", stdout.len(), stdout_preview));
+    crate::log::info(&format!(
+        "ACP: stdout preview ({} chars total): {}",
+        stdout.len(),
+        stdout_preview
+    ));
 
     match parse_suggestions(&stdout) {
         Ok(s) => {
@@ -328,6 +364,47 @@ fn run_acp_sync(
                 stdout
             ));
             Err(e)
+        }
+    }
+}
+
+/// Wait for `child` to exit, killing it if `limit` elapses first.
+///
+/// This exists because `tokio::time::timeout` around a blocking subprocess only
+/// abandons the *future* — the OS process keeps running. Historically that let a
+/// hung agent burn CPU for minutes after the UI had already given up and shown
+/// a timeout error. Killing the child here is what actually bounds the work.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    start: std::time::Instant,
+    limit: std::time::Duration,
+    command: &str,
+) -> Result<std::process::ExitStatus, String> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if start.elapsed() >= limit {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    crate::log::warn(&format!(
+                        "ACP: killed '{}' after exceeding {}s",
+                        command,
+                        limit.as_secs()
+                    ));
+                    return Err(format!(
+                        "'{}' exceeded {}s and was terminated",
+                        command,
+                        limit.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed waiting on '{}': {}", command, e));
+            }
         }
     }
 }
@@ -390,5 +467,81 @@ mod tests {
     fn parse_garbage_returns_error() {
         let input = "I don't understand your question.";
         assert!(parse_suggestions(input).is_err());
+    }
+
+    /// Spawn a process that sleeps far longer than the limit.
+    fn spawn_sleeper() -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            // `timeout` needs a console; ping is the reliable sleep on Windows.
+            c.args(["/C", "ping -n 30 127.0.0.1 > NUL"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// Regression: a hung agent used to keep running for minutes after the UI
+    /// timed out, because `tokio::time::timeout` only drops the future and
+    /// never reaps the OS process. `wait_with_timeout` must kill it.
+    #[test]
+    fn hung_child_is_killed_at_the_timeout() {
+        let mut child = spawn_sleeper();
+        let start = std::time::Instant::now();
+        let result = wait_with_timeout(
+            &mut child,
+            start,
+            std::time::Duration::from_millis(300),
+            "sleeper",
+        );
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "must report the timeout");
+        assert!(
+            result.unwrap_err().contains("terminated"),
+            "error must say the process was terminated"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "must return promptly at the limit, took {elapsed:?}"
+        );
+        // The process must be reaped, not merely abandoned. try_wait on an
+        // already-waited child returns the recorded status, never None.
+        assert!(
+            child.try_wait().ok().flatten().is_some(),
+            "child must be dead and reaped"
+        );
+    }
+
+    /// A process that finishes before the limit must be reported normally.
+    #[test]
+    fn child_exiting_before_timeout_returns_its_status() {
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit 0"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn")
+        } else {
+            std::process::Command::new("true")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn")
+        };
+        let status = wait_with_timeout(
+            &mut child,
+            std::time::Instant::now(),
+            std::time::Duration::from_secs(30),
+            "quick",
+        )
+        .expect("should not time out");
+        assert!(status.success());
     }
 }

@@ -33,6 +33,15 @@ unicode-width = "0.2"
 libloading = "0.9.0"
 uuid = { version = "1", default-features = false, features = ["v4", "fast-rng"] }
 
+# HTTP client for the remote grouping engine (src/grouping/remote.rs).
+# `native-tls` deliberately over `rustls`: it uses the OS TLS stack (schannel /
+# Security.framework / openssl). Measured in an isolated probe crate with this
+# same release profile, the HTTP stack cost +445 KB over a serde-only baseline
+# vs +1.26 MB for rustls — and native-tls avoids pulling in `ring`, whose build
+# needs a C toolchain (it fails outright on the windows-gnu toolchain).
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
+
 # Full-text search over session logs (Lucene-like, MIT-licensed)
 tantivy = { version = "0.22", default-features = false, features = ["mmap", "stopwords"] }
 

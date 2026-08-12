@@ -1,8 +1,9 @@
+mod acp;
 mod archive;
 mod config;
 mod focus;
+mod grouping;
 mod groups;
-mod acp;
 mod log;
 mod log_search;
 mod mock;
@@ -41,10 +42,121 @@ use ui::App;
 /// declaratively in YAML and driven by `ConfigDrivenProvider`. If the
 /// YAML file for a given key is missing or fails to parse, the provider
 /// is skipped with a log line — same behaviour as an unknown provider.
+/// Parse `--remote <box>`, `--remote=<box>`, `-remote <box>`, or `-remote=<box>`.
+/// Returns the box name, or None if the flag is absent.
+fn parse_remote_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let a = a.as_str();
+        if a == "--remote" || a == "-remote" {
+            return it.next().map(|s| s.to_string()).filter(|s| !s.is_empty());
+        }
+        for pfx in ["--remote=", "-remote="] {
+            if let Some(v) = a.strip_prefix(pfx) {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Run discovery on every registered provider, merge all Session objects,
+/// sort newest-first by `updated_at` (ISO-8601 sorts lexically), and return the
+/// global slice `[offset .. offset+limit)`.
+///
+/// This mirrors the local TUI's phase-1 strategy: ask each provider for only
+/// the first `(offset+limit)` most-recent candidates (cheap for providers with
+/// optimized paging), then merge/sort globally. For large stores this is far
+/// faster than forcing every provider to enumerate everything just to return
+/// the first page.
+fn collect_sessions_sorted_paged(
+    registry: &provider::ProviderRegistry,
+    offset: usize,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    // Match the real TUI's discovery more closely: invalidate the shared
+    // process cache once, then let each provider enrich its discovered sessions
+    // with live-process / tab-title state before we serialize them.
+    crate::process_info::invalidate_process_cache();
+    let per_provider_take = offset.saturating_add(limit).max(1);
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    for prov in registry.providers() {
+        match prov.discover_sessions_paged(0, per_provider_take) {
+            Ok(sessions) => {
+                let mut sessions = sessions.sessions;
+                let _ = prov.match_processes(&mut sessions);
+                for session in &mut sessions {
+                    if session.state.process == crate::models::ProcessState::Running {
+                        session.tab_title = prov.tab_title(session);
+                    }
+                }
+                for s in sessions {
+                    all.push(serde_json::to_value(&s).unwrap_or(serde_json::Value::Null));
+                }
+            }
+            Err(e) => {
+                eprintln!("discover failed for {}: {}", prov.name(), e);
+            }
+        }
+    }
+    all.sort_by(|a, b| {
+        let ka = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let kb = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        kb.cmp(ka)
+    });
+    all.into_iter().skip(offset).take(limit).collect()
+}
+
+fn collect_sessions_sorted(
+    registry: &provider::ProviderRegistry,
+    n: usize,
+) -> Vec<serde_json::Value> {
+    collect_sessions_sorted_paged(registry, 0, n)
+}
+
 fn create_provider(
     key: &str,
     config: &config::ProviderConfig,
+    force_local: bool,
 ) -> Option<Box<dyn provider::Provider>> {
+    // Headless emitters (--dump-json/--serve-json) always read local disk, so a
+    // machine configured for remote can still act as a local data source.
+    if !force_local {
+        // OPT-IN streaming remote mode (preferred): keep a single persistent
+        // connection open and cache the latest NDJSON snapshot the target emits.
+        if let Some(cmd) = &config.remote_stream_cmd {
+            if !cmd.is_empty() {
+                log::info(&format!(
+                    "Provider '{}' using REMOTE STREAM command: {:?}",
+                    key, cmd
+                ));
+                return Some(Box::new(provider::remote_json::RemoteStreamProvider::new(
+                    key,
+                    cmd.clone(),
+                )));
+            }
+        }
+
+        // OPT-IN one-shot remote mode: run `remote_list_cmd` each refresh and
+        // parse its JSON output (another machine over a tunnel) instead of local
+        // disk. Everything else (resume flag, launch_cmd/args) still comes from
+        // this same provider config section.
+        if let Some(cmd) = &config.remote_list_cmd {
+            if !cmd.is_empty() {
+                log::info(&format!(
+                    "Provider '{}' using REMOTE list command: {:?}",
+                    key, cmd
+                ));
+                return Some(Box::new(provider::remote_json::RemoteJsonProvider::new(
+                    key,
+                    cmd.clone(),
+                )));
+            }
+        }
+    }
+
     // Candidate search paths for `providers/<key>.yaml`, tried in order.
     // Priority: installed layout (next to exe) > crate-root > cwd (last-resort,
     // since the cwd may contain a stale copy from a prior build).
@@ -139,6 +251,7 @@ async fn main() -> Result<()> {
 
     let config = AppConfig::load()?;
     config.write_default_if_missing()?;
+    let mut config = config;
     log::info(&format!(
         "Config loaded from {:?}",
         AppConfig::config_path()
@@ -150,12 +263,14 @@ async fn main() -> Result<()> {
     // no-op so end-users of distributed builds never see mock behaviour.
     let args: Vec<String> = std::env::args().collect();
     let mock_flag = args.iter().any(|a| a == "--mock-data");
-    let mock_plugin = if mock_flag { mock::MockPlugin::try_load() } else { None };
+    let mock_plugin = if mock_flag {
+        mock::MockPlugin::try_load()
+    } else {
+        None
+    };
     let mock_data = mock_plugin.is_some();
     if mock_flag && !mock_data {
-        log::warn(
-            "--mock-data: mock_data plugin DLL not found next to executable; flag ignored",
-        );
+        log::warn("--mock-data: mock_data plugin DLL not found next to executable; flag ignored");
     }
     if mock_data {
         log::info("MOCK MODE: --mock-data flag detected and plugin loaded; skipping provider registry + semantic preload (supervisor stays alive for resume actions)");
@@ -188,12 +303,78 @@ async fn main() -> Result<()> {
     let mut registry = ProviderRegistry::new();
     let mut enabled_keys = Vec::new();
 
-    if !mock_data {
+    // Headless data-emitter modes (`--dump-json`, `--serve-json`) must ALWAYS
+    // read local disk, even if this machine's config sets `remote_*` — a data
+    // emitter is never itself a remote proxy. This is what lets the HOST and
+    // TARGET share the SAME exe AND the SAME config.toml: the host runs the TUI
+    // (honors remote_stream_cmd → pulls from target), the target runs
+    // `--serve-json` (forced local → emits its own sessions).
+    let headless_emit = args
+        .iter()
+        .any(|a| a == "--dump-json" || a == "--serve-json");
+
+    // `--remote <box>` / `--remote=<box>`: show ANOTHER machine's whole session
+    // list (all agents), streamed over the tunnel, and wrap resume so it opens
+    // ON that box. Uses `[remote_defaults]` (a `{box}` template) unless a
+    // `[remotes.<box>]` override exists. Ignored for headless emit modes, which
+    // always run local.
+    let remote_box: Option<String> = if headless_emit {
+        None
+    } else {
+        parse_remote_arg(&args)
+    };
+
+    if let Some(box_name) = remote_box.clone() {
+        match config.resolve_remote(&box_name) {
+            Some(rc) if !rc.list_cmd.is_empty() => {
+                log::info(&format!(
+                    "Remote mode: box '{}' via {:?}",
+                    box_name, rc.list_cmd
+                ));
+                // Wrap resume for EVERY provider so any of the box's sessions
+                // (copilot/claude/…) open on the box. The per-agent command is
+                // still built from that provider's command/default_args.
+                if let (Some(lc), Some(la)) = (&rc.launch_cmd, &rc.launch_args) {
+                    for pc in config.providers.values_mut() {
+                        pc.launch_cmd = Some(lc.clone());
+                        pc.launch_args = Some(la.clone());
+                    }
+                }
+                if !mock_data {
+                    // One-shot per refresh (not a persistent stream): the VS Code
+                    // tunnel only flushes a spawned command's stdout when it
+                    // EXITS, so `--dump-json` (exits) is reliable where
+                    // `--serve-json` (never exits) would buffer indefinitely.
+                    registry.register(Box::new(
+                        provider::remote_json::RemoteJsonProvider::new_whole_box(
+                            &box_name,
+                            rc.list_cmd.clone(),
+                        ),
+                    ));
+                    enabled_keys.push(box_name.clone());
+                }
+            }
+            Some(_) => {
+                eprintln!(
+                    "--remote '{0}': no list_cmd. Set [remote_defaults].list_cmd or [remotes.{0}].list_cmd.",
+                    box_name
+                );
+                return Ok(());
+            }
+            None => {
+                eprintln!(
+                    "--remote '{0}': no [remotes.{0}] override and no [remote_defaults] template in config.",
+                    box_name
+                );
+                return Ok(());
+            }
+        }
+    } else if !mock_data {
         for (key, provider_config) in &config.providers {
             if !provider_config.enabled {
                 continue;
             }
-            match create_provider(key, provider_config) {
+            match create_provider(key, provider_config, headless_emit) {
                 Some(provider) => {
                     log::info(&format!("Provider '{}' registered", key));
                     registry.register(provider);
@@ -208,43 +389,71 @@ async fn main() -> Result<()> {
         // Mock mode: synthesize the enabled-keys list from what providers the
         // mock dataset uses, so the title-bar provider count matches reality.
         enabled_keys = vec![
-            "copilot".into(), "claude".into(), "codex".into(),
-            "qwen".into(), "gemini".into(), "kimi".into(),
+            "copilot".into(),
+            "claude".into(),
+            "codex".into(),
+            "qwen".into(),
+            "gemini".into(),
+            "kimi".into(),
         ];
     }
 
     // --- dump-json comparison hook -----------------------------------------
-    // `--dump-json [N]` runs discovery on every registered provider, merges
-    // all Session objects, sorts by updated_at desc, and prints the top N
-    // (default 20) as JSON. Skips the TUI entirely — used for side-by-side
-    // golden comparison vs the legacy branch.
+    // `--dump-json [N] [--offset M] [--limit N]` runs discovery on every
+    // registered provider, merges all Session objects, sorts by updated_at
+    // desc, and prints the requested global slice as pretty JSON. Skips the
+    // TUI entirely.
     if let Some(pos) = args.iter().position(|a| a == "--dump-json") {
-        let n: usize = args
+        let positional_n: Option<usize> = args
             .get(pos + 1)
+            .filter(|s| !s.starts_with('-'))
+            .and_then(|s| s.parse().ok());
+        let limit: usize = args
+            .iter()
+            .position(|a| a == "--limit")
+            .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse().ok())
+            .or(positional_n)
             .unwrap_or(20);
-        let mut all: Vec<serde_json::Value> = Vec::new();
-        for prov in registry.providers() {
-            match prov.discover_sessions() {
-                Ok(sessions) => {
-                    for s in sessions {
-                        all.push(serde_json::to_value(&s).unwrap_or(serde_json::Value::Null));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("discover failed for {}: {}", prov.name(), e);
-                }
-            }
-        }
-        // Sort newest first by updated_at string (ISO-8601 sorts lexically).
-        all.sort_by(|a, b| {
-            let ka = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
-            let kb = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
-            kb.cmp(ka)
-        });
-        all.truncate(n);
+        let offset: usize = args
+            .iter()
+            .position(|a| a == "--offset")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let all = collect_sessions_sorted_paged(&registry, offset, limit);
         println!("{}", serde_json::to_string_pretty(&all)?);
         return Ok(());
+    }
+    // -----------------------------------------------------------------------
+
+    // --- serve-json streaming hook -----------------------------------------
+    // `--serve-json [N] [--interval S]` — long-running. Every S seconds
+    // (default 5) it runs the SAME discovery as --dump-json and prints ONE
+    // compact JSON line (NDJSON) of the top N (default 50) sessions, flushing
+    // each time. Never exits. This is the persistent data source a remote HOST
+    // TUI connects to over a tunnel (see RemoteStreamProvider). Emitting the
+    // full latest snapshot each tick is intentional — no delta protocol.
+    if let Some(pos) = args.iter().position(|a| a == "--serve-json") {
+        let n: usize = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(50);
+        let interval: u64 = args
+            .iter()
+            .position(|a| a == "--interval")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        use std::io::Write as _;
+        loop {
+            let all = collect_sessions_sorted(&registry, n);
+            let line = serde_json::to_string(&all)?; // compact, single line
+            {
+                let out = std::io::stdout();
+                let mut lock = out.lock();
+                let _ = writeln!(lock, "{}", line);
+                let _ = lock.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        }
     }
     // -----------------------------------------------------------------------
 
@@ -318,6 +527,7 @@ async fn main() -> Result<()> {
         config.poll_interval_ms,
         config.providers.clone(),
     );
+    let group_event_tx = event_tx.clone();
     let supervisor_handle = Some(tokio::spawn(async move {
         supervisor.run(event_tx, cmd_rx).await;
     }));
@@ -339,9 +549,7 @@ async fn main() -> Result<()> {
     // Skipped entirely in mock mode — semantic search has no embeddings to
     // compare against synthetic data, and we don't want to trigger a 550 MB
     // model download when somebody is just trying to record a GIF.
-    let semantic = std::sync::Arc::new(std::sync::Mutex::new(
-        search::SemanticPlugin::new(),
-    ));
+    let semantic = std::sync::Arc::new(std::sync::Mutex::new(search::SemanticPlugin::new()));
     if !mock_data {
         let cache_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -373,6 +581,7 @@ async fn main() -> Result<()> {
         config.semantic_index_min_interval_ms,
         group_mgr,
         config.acp.clone(),
+        config.grouping.clone(),
     );
 
     // In mock mode, populate the TUI with the curated demo dataset.
@@ -384,7 +593,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    app.run(event_rx, cmd_tx).await?;
+    app.run(event_rx, cmd_tx, group_event_tx).await?;
 
     // The UI loop just sent `SupervisorCommand::Shutdown` before returning.
     // That command sits in the mpsc channel BEHIND any still-unprocessed
@@ -403,11 +612,7 @@ async fn main() -> Result<()> {
     //
     // In mock mode there is no supervisor — skip the wait entirely.
     if let Some(handle) = supervisor_handle {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
 
     // After the supervisor has drained, the only things still keeping
@@ -463,7 +668,10 @@ fn run_search_bench(
     let start = std::time::Instant::now();
     let searcher = log_search::LogSearcher::open_or_create(&config.data_dir)?;
     if let Err(e) = searcher.refresh(&all_sessions, registry) {
-        eprintln!("  refresh error (continuing with whatever's indexed): {:#}", e);
+        eprintln!(
+            "  refresh error (continuing with whatever's indexed): {:#}",
+            e
+        );
     }
     println!("  refresh: {:?}", start.elapsed());
 
@@ -542,9 +750,15 @@ fn run_search_bench(
                 let s = &all_sessions[*idx];
                 println!("  Found at rank: {}", p + 1);
                 println!("  Title: {:?}", s.title);
-                println!("  Summary (first 120): {:?}", util::truncate_str_safe(&s.summary, 120));
+                println!(
+                    "  Summary (first 120): {:?}",
+                    util::truncate_str_safe(&s.summary, 120)
+                );
                 println!("  Updated: {}", s.updated_at);
-                println!("  Final score: {} (recency={:.2})", bd.final_score, bd.recency);
+                println!(
+                    "  Final score: {} (recency={:.2})",
+                    bd.final_score, bd.recency
+                );
                 println!("  Best pre-recency: {}", bd.best_pre_recency);
                 println!();
                 println!("  Field tier scores:");
@@ -563,8 +777,13 @@ fn run_search_bench(
                 println!("  State label bonus: {}", bd.state_label_bonus);
             }
             None => {
-                println!("  *** NOT FOUND in {} discovered sessions ***", all_sessions.len());
-                println!("  (Check: is this session in an archived state? is the provider enabled?)");
+                println!(
+                    "  *** NOT FOUND in {} discovered sessions ***",
+                    all_sessions.len()
+                );
+                println!(
+                    "  (Check: is this session in an archived state? is the provider enabled?)"
+                );
             }
         }
     }
@@ -588,7 +807,10 @@ fn score_why(bd: &search::ScoreBreakdown) -> String {
         parts.push(format!("bm25={:.2}({})", bd.bm25_raw, bd.bm25_bonus));
     }
     if bd.semantic_boost > 0 || bd.semantic_sim >= 0.3 {
-        parts.push(format!("sem={:.2}(+{})", bd.semantic_sim, bd.semantic_boost));
+        parts.push(format!(
+            "sem={:.2}(+{})",
+            bd.semantic_sim, bd.semantic_boost
+        ));
     }
     if bd.state_label_bonus > 0 {
         parts.push(format!("state(+{})", bd.state_label_bonus));

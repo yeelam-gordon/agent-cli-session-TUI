@@ -52,7 +52,11 @@ pub fn ranked_search(
 ) -> Vec<SearchResult> {
     if query.is_empty() {
         return (0..sessions.len())
-            .map(|i| SearchResult { index: i, score: 0, semantic_match: false })
+            .map(|i| SearchResult {
+                index: i,
+                score: 0,
+                semantic_match: false,
+            })
             .collect();
     }
 
@@ -102,7 +106,11 @@ pub fn ranked_search(
                 // Recency bias — dampens older sessions so "what was I working
                 // on lately" wins over a year-old hit of similar quality.
                 let adjusted = (score as f32 * recency_multiplier(&s.updated_at)) as u32;
-                Some(SearchResult { index: i, score: adjusted, semantic_match })
+                Some(SearchResult {
+                    index: i,
+                    score: adjusted,
+                    semantic_match,
+                })
             } else {
                 None
             }
@@ -208,9 +216,7 @@ pub fn score_breakdown(
         if field_lower.contains(query) {
             fs.exact = *base;
             best_score = best_score.max(*base);
-        } else if query_words.len() > 1
-            && query_words.iter().all(|w| field_lower.contains(w))
-        {
+        } else if query_words.len() > 1 && query_words.iter().all(|w| field_lower.contains(w)) {
             fs.all_words = base / 2;
             best_score = best_score.max(base / 2);
         } else if tier2b_eligible {
@@ -289,7 +295,7 @@ fn score_session(
     log_score: Option<f32>,
 ) -> u32 {
     let fields = [
-        (&session.title, 1000u32),       // title exact match = highest
+        (&session.title, 1000u32), // title exact match = highest
         (&session.provider_session_id, 800),
         (&session.summary, 600),
         (&session.cwd.to_string_lossy().to_string(), 400),
@@ -442,9 +448,7 @@ impl EmbeddingCache {
         // embedding and recomputes them all.
         let tmp = path.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp, json) {
-            crate::log::warn(&format!(
-                "EmbeddingCache::save write {tmp:?} failed: {e}"
-            ));
+            crate::log::warn(&format!("EmbeddingCache::save write {tmp:?} failed: {e}"));
             return;
         }
         if let Err(e) = std::fs::rename(&tmp, path) {
@@ -538,7 +542,10 @@ impl SemanticPlugin {
                 .get(session_id)
                 .map(|chunks| {
                     // Check if the first chunk's hash matches (base text identity)
-                    chunks.first().map(|c| c.text_hash != text_hash).unwrap_or(true)
+                    chunks
+                        .first()
+                        .map(|c| c.text_hash != text_hash)
+                        .unwrap_or(true)
                 })
                 .unwrap_or(true)
     }
@@ -609,34 +616,14 @@ impl SemanticPlugin {
         self.model_loaded && self.lib.is_some()
     }
 
-    /// Count how many sessions would actually need a new embedding.
-    /// Used by the UI to skip spawning the indexer thread entirely when
-    /// everything is already up-to-date.
-    pub fn count_needing_embedding<F>(&self, sessions: &[Session], text_fn: F) -> usize
-    where
-        F: Fn(&Session) -> String,
-    {
-        if self.lib.is_none() || self.dim <= 0 {
-            return 0;
-        }
-        sessions
-            .iter()
-            .filter(|s| {
-                let t = text_fn(s);
-                let h = hash_text(&t);
-                self.needs_embedding(&s.id, h)
-            })
-            .count()
-    }
-
     /// Unload the embedding model to free ~550MB of weights + ONNX state.
     /// `lib` stays loaded so we can call `semantic_init` again cheaply.
     /// Called after indexing completes to keep idle memory low.
     pub fn unload(&mut self) {
         if let Some(ref lib) = self.lib {
             unsafe {
-                if let Ok(unload_fn) = lib
-                    .get::<libloading::Symbol<unsafe extern "C" fn() -> i32>>(b"semantic_unload")
+                if let Ok(unload_fn) =
+                    lib.get::<libloading::Symbol<unsafe extern "C" fn() -> i32>>(b"semantic_unload")
                 {
                     let _ = unload_fn();
                 }
@@ -657,12 +644,11 @@ impl SemanticPlugin {
             None => return false,
         };
         let result: i32 = unsafe {
-            let init: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_char) -> i32,
-            > = match lib.get(b"semantic_init") {
-                Ok(f) => f,
-                Err(_) => return false,
-            };
+            let init: libloading::Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> i32> =
+                match lib.get(b"semantic_init") {
+                    Ok(f) => f,
+                    Err(_) => return false,
+                };
             let c_dir = std::ffi::CString::new(cache_dir).unwrap_or_default();
             init(c_dir.as_ptr())
         };
@@ -774,7 +760,9 @@ impl SemanticPlugin {
 
         let cached_count = self.cache.entries.len();
         let initial = if cached_count > 0 {
-            SemanticStatus::Ready { count: cached_count }
+            SemanticStatus::Ready {
+                count: cached_count,
+            }
         } else {
             SemanticStatus::Indexing { done: 0, total: 0 }
         };
@@ -812,7 +800,11 @@ impl SemanticPlugin {
 
             // Skip if already cached with same hash
             if let Some(cached) = self.cache.entries.get(&session.id) {
-                if cached.first().map(|c| c.text_hash == text_hash).unwrap_or(false) {
+                if cached
+                    .first()
+                    .map(|c| c.text_hash == text_hash)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
             }
@@ -830,10 +822,7 @@ impl SemanticPlugin {
 
                 // Update status periodically
                 if newly_embedded.is_multiple_of(10) {
-                    self.status = SemanticStatus::Indexing {
-                        done: i + 1,
-                        total,
-                    };
+                    self.status = SemanticStatus::Indexing { done: i + 1, total };
                 }
             }
         }
@@ -873,7 +862,8 @@ impl SemanticPlugin {
             .iter()
             .filter_map(|(id, chunks)| {
                 // Max similarity across all chunks for this session
-                let max_sim = chunks.iter()
+                let max_sim = chunks
+                    .iter()
                     .map(|c| cosine_similarity(&query_vec, &c.vector))
                     .fold(0.0f32, f32::max);
                 if max_sim > threshold {
@@ -928,7 +918,11 @@ impl SemanticPlugin {
             cosine_fn(a.as_ptr(), b.as_ptr(), a.len() as i32)
         };
 
-        if sim <= -2.0 { None } else { Some(sim) }
+        if sim <= -2.0 {
+            None
+        } else {
+            Some(sim)
+        }
     }
 
     /// Compute pairwise cosine similarities between cached session embeddings.
@@ -942,7 +936,9 @@ impl SemanticPlugin {
         let vecs: Vec<(&String, &Vec<f32>)> = session_keys
             .iter()
             .filter_map(|k| {
-                self.cache.entries.get(k)
+                self.cache
+                    .entries
+                    .get(k)
                     .and_then(|chunks| chunks.first())
                     .map(|c| (k, &c.vector))
             })
@@ -979,7 +975,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[allow(dead_code)]
 impl SearchResult {
     pub fn new(index: usize, score: u32) -> Self {
-        Self { index, score, semantic_match: false }
+        Self {
+            index,
+            score,
+            semantic_match: false,
+        }
     }
 }
 
@@ -1133,7 +1133,11 @@ pub fn ranked_search_rrf(
         .enumerate()
         .filter_map(|(i, s)| {
             let score = best_lexical_tier_score(s, &query_lower, &query_words);
-            if score > 0 { Some((i, score)) } else { None }
+            if score > 0 {
+                Some((i, score))
+            } else {
+                None
+            }
         })
         .collect();
     lex.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1296,7 +1300,11 @@ pub fn ranked_search_default(
 ) -> Vec<SearchResult> {
     if query.is_empty() {
         return (0..sessions.len())
-            .map(|i| SearchResult { index: i, score: 0, semantic_match: false })
+            .map(|i| SearchResult {
+                index: i,
+                score: 0,
+                semantic_match: false,
+            })
             .collect();
     }
 
@@ -1443,9 +1451,11 @@ mod tests {
 
     #[test]
     fn no_match_returns_empty() {
-        let sessions = vec![
-            make_session("deploy server", "production release", "copilot"),
-        ];
+        let sessions = vec![make_session(
+            "deploy server",
+            "production release",
+            "copilot",
+        )];
         let results = ranked_search(&sessions, "xyznonexistent", None, None);
         assert!(results.is_empty());
     }
@@ -1468,7 +1478,11 @@ mod tests {
     fn exact_title_beats_exact_summary() {
         let sessions = vec![
             make_session("unrelated title", "fix the authentication flow", "copilot"),
-            make_session("fix the authentication flow", "unrelated summary", "copilot"),
+            make_session(
+                "fix the authentication flow",
+                "unrelated summary",
+                "copilot",
+            ),
         ];
         let results = ranked_search(&sessions, "fix the authentication", None, None);
         assert_eq!(results[0].index, 1); // title match scores higher
@@ -1477,9 +1491,13 @@ mod tests {
 
     #[test]
     fn exact_session_id_match() {
-        let sessions = vec![
-            make_session_full("some title", "summary", "copilot", "703611e6-890c-4df2", "D:\\Demo"),
-        ];
+        let sessions = vec![make_session_full(
+            "some title",
+            "summary",
+            "copilot",
+            "703611e6-890c-4df2",
+            "D:\\Demo",
+        )];
         let results = ranked_search(&sessions, "703611e6", None, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].score >= 800);
@@ -1487,9 +1505,13 @@ mod tests {
 
     #[test]
     fn exact_cwd_match() {
-        let sessions = vec![
-            make_session_full("title", "summary", "copilot", "abc", "D:\\Demo\\myproject"),
-        ];
+        let sessions = vec![make_session_full(
+            "title",
+            "summary",
+            "copilot",
+            "abc",
+            "D:\\Demo\\myproject",
+        )];
         let results = ranked_search(&sessions, "myproject", None, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].score >= 400);
@@ -1508,9 +1530,11 @@ mod tests {
 
     #[test]
     fn case_insensitive_matching() {
-        let sessions = vec![
-            make_session("Fix Authentication Bug", "IMPORTANT work", "copilot"),
-        ];
+        let sessions = vec![make_session(
+            "Fix Authentication Bug",
+            "IMPORTANT work",
+            "copilot",
+        )];
         let results = ranked_search(&sessions, "fix authentication", None, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].score >= 1000);
@@ -1544,9 +1568,11 @@ mod tests {
 
     #[test]
     fn partial_word_match_single_word() {
-        let sessions = vec![
-            make_session("authentication module", "handles login", "copilot"),
-        ];
+        let sessions = vec![make_session(
+            "authentication module",
+            "handles login",
+            "copilot",
+        )];
         // "auth" is a substring of "authentication" — should match
         let results = ranked_search(&sessions, "auth", None, None);
         assert_eq!(results.len(), 1);
@@ -1554,9 +1580,7 @@ mod tests {
 
     #[test]
     fn short_words_under_3_chars_ignored_for_partial() {
-        let sessions = vec![
-            make_session("fix it now", "some summary", "copilot"),
-        ];
+        let sessions = vec![make_session("fix it now", "some summary", "copilot")];
         // "it" is < 3 chars, shouldn't trigger partial word match on its own
         // but "fix it" as full query IS an exact substring match in title
         let results = ranked_search(&sessions, "it", None, None);
@@ -1615,9 +1639,9 @@ mod tests {
     #[test]
     fn ranking_preserves_order_by_score() {
         let sessions = vec![
-            make_session("unrelated", "deploy the auth system", "copilot"),  // summary match (600)
-            make_session("auth system deploy", "nothing", "copilot"),         // title match (1000)
-            make_session("other work", "stuff", "copilot"),                   // no match
+            make_session("unrelated", "deploy the auth system", "copilot"), // summary match (600)
+            make_session("auth system deploy", "nothing", "copilot"),       // title match (1000)
+            make_session("other work", "stuff", "copilot"),                 // no match
         ];
         let results = ranked_search(&sessions, "auth", None, None);
         assert_eq!(results.len(), 2);
@@ -1650,9 +1674,11 @@ mod tests {
 
     #[test]
     fn multi_word_scattered_across_field() {
-        let sessions = vec![
-            make_session("the server has a bug in authentication", "details", "copilot"),
-        ];
+        let sessions = vec![make_session(
+            "the server has a bug in authentication",
+            "details",
+            "copilot",
+        )];
         // "authentication bug" — both words present but not as exact phrase
         let results = ranked_search(&sessions, "authentication bug", None, None);
         assert_eq!(results.len(), 1);
@@ -1716,9 +1742,7 @@ mod tests {
     /// search like "/auth" must still return everything containing "auth".
     #[test]
     fn single_word_query_still_scores_on_one_hit() {
-        let sessions = vec![
-            make_session("Fix auth bug", "JWT refresh", "copilot"),
-        ];
+        let sessions = vec![make_session("Fix auth bug", "JWT refresh", "copilot")];
         let results = ranked_search(&sessions, "auth", None, None);
         assert_eq!(results.len(), 1, "single-word query lost recall");
         assert!(results[0].score > 0);
@@ -1744,7 +1768,8 @@ mod tests {
         let results = ranked_search(&sessions, "iteration review", None, Some(&log_matches));
         // The body-match session must rank #1.
         assert_eq!(
-            sessions[results[0].index].id, body_match_id,
+            sessions[results[0].index].id,
+            body_match_id,
             "strong body match did not outrank weak title match: {:?}",
             results
                 .iter()
