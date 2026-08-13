@@ -1510,17 +1510,12 @@ fn decode_cwd_name(name: &str, decoder: &str, backtrack: bool) -> PathBuf {
 /// Splits drive prefix `X--…`, then tries progressively-longer hyphen groupings
 /// for each segment, probing disk existence to disambiguate.
 fn drive_dash_backtrack(encoded: &str) -> Option<PathBuf> {
-    let (drive, remainder) = match encoded.find("--") {
-        Some(pos) => {
-            let drive = format!("{}:\\", &encoded[..pos]);
-            let rest = if pos + 2 < encoded.len() {
-                &encoded[pos + 2..]
-            } else {
-                ""
-            };
-            (drive, rest)
-        }
-        None => return None,
+    let pos = encoded.find("--")?;
+    let drive = format!("{}:\\", &encoded[..pos]);
+    let remainder = if pos + 2 < encoded.len() {
+        &encoded[pos + 2..]
+    } else {
+        ""
     };
     if remainder.is_empty() {
         return Some(PathBuf::from(drive));

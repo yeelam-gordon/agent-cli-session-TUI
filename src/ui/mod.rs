@@ -3729,7 +3729,7 @@ impl App {
                 Span::styled(
                     format!(
                         "{} ({})",
-                        &session.updated_at,
+                        session.updated_at,
                         format_age(&session.updated_at)
                     ),
                     Style::default().fg(Color::White),

@@ -97,7 +97,14 @@ Config search order: next to exe → `%APPDATA%\agent-session-tui\config.toml` �
 
 CI (`.github/workflows/rust.yml`) runs `cargo clippy -- -D warnings` on **BOTH** crates and treats any warning as an error. `cargo build` alone does NOT run clippy, so a local green build can still break CI. Rust toolchain updates (e.g. 1.95 added `not_unsafe_ptr_arg_deref`, `redundant_closure` tightening) routinely surface new lints.
 
-**Before every `git push`, run BOTH commands and fix any findings:**
+**Update your toolchain first — a stale local `stable` silently defeats this whole check.** CI installs the *latest* stable, so an older local compiler will pass clippy on code CI rejects. This has already happened once: local 1.95.0 passed while CI on 1.97.1 failed on `question_mark` and `useless_borrows_in_formatting` in long-standing code.
+
+```bash
+rustup update stable
+rustc --version   # must match (or exceed) what CI reports in its logs
+```
+
+**Then, before every `git push`, run BOTH commands and fix any findings:**
 
 ```bash
 # Core crate — DO NOT pass --lib; CI checks lib + bin + tests
@@ -112,6 +119,8 @@ cargo test --lib
 ```
 
 Both must exit 0. **Do not shortcut with `--lib`** — the bin target surfaces its own lints (notably `dead_code` on library-public API that `main.rs` doesn't call). CI runs plain `cargo clippy`, which defaults to all targets.
+
+Note that CI runs clippy in **debug** (`cargo clippy`), not `--release`. The two normally agree, but if you are chasing a CI-only failure, reproduce with the exact CI command.
 
 If clippy complains about a lint that is intentionally allowed for the situation (e.g. FFI raw-pointer args on `pub extern "C" fn`, or library-public API preserved for future use), scope an `#[allow(clippy::<lint>)]` or `#[allow(dead_code)]` to that item — do not globally silence it.
 
