@@ -850,13 +850,13 @@ impl App {
             // The engines are blocking (HTTP / CPU), so keep them off the
             // async runtime's worker threads.
             let result = tokio::task::spawn_blocking(move || {
-                crate::grouping::suggest(engine, &inputs, &existing_groups, &cfg)
+                crate::grouping::suggest_with_status(engine, &inputs, &existing_groups, &cfg)
             })
             .await;
 
             let (event, command) = match result {
-                Ok(Ok(suggestions)) => {
-                    let json = serde_json::to_string(&suggestions).unwrap_or_default();
+                Ok(Ok(outcome)) => {
+                    let json = serde_json::to_string(&outcome).unwrap_or_default();
                     (
                         SupervisorEvent::AcpResult(json.clone()),
                         SupervisorCommand::AcpResult(json),
@@ -1465,13 +1465,16 @@ impl App {
                     SupervisorEvent::AcpResult(json) => {
                         let was_auto = self.acp_run_is_auto;
                         self.acp_run_is_auto = false;
-                        match serde_json::from_str::<Vec<AiSuggestion>>(&json) {
-                            Ok(suggestions) if suggestions.is_empty() => {
+                        match decode_grouping_result(&json) {
+                            Ok((suggestions, remote_fallback)) if suggestions.is_empty() => {
                                 self.acp_state = AcpState::Idle;
                                 self.status_message =
-                                    "AI: no strong grouping suggestions found".to_string();
+                                    grouping_result_status(remote_fallback, 0, was_auto);
+                                if remote_fallback {
+                                    self.log_lines.push(self.status_message.clone());
+                                }
                             }
-                            Ok(suggestions) => {
+                            Ok((suggestions, remote_fallback)) => {
                                 // Resolve AI session keys against the live
                                 // session list. Some agents echo a truncated
                                 // session id (e.g. `qwen:4b900c0e` instead of
@@ -1529,15 +1532,16 @@ impl App {
                                 }
                                 if count == 0 {
                                     self.acp_state = AcpState::Idle;
-                                    self.status_message =
-                                        "AI: no usable grouping suggestions returned".to_string();
+                                    self.status_message = if remote_fallback {
+                                        grouping_result_status(true, 0, was_auto)
+                                    } else {
+                                        "AI: no usable grouping suggestions returned".to_string()
+                                    };
                                 } else if was_auto {
                                     // Background run: stay in normal view, no popup.
                                     self.acp_state = AcpState::Idle;
-                                    self.status_message = format!(
-                                        "🤖 {} AI suggestions ready — y accept · n dismiss · e edit",
-                                        count
-                                    );
+                                    self.status_message =
+                                        grouping_result_status(remote_fallback, count, true);
                                 } else {
                                     // Manual `s`: legacy popup view, lets the
                                     // user step through the whole batch.
@@ -1545,10 +1549,11 @@ impl App {
                                         suggestions: resolved,
                                         cursor: 0,
                                     };
-                                    self.status_message = format!(
-                                        "AI: {} suggestions ready — review with y/n/e",
-                                        count
-                                    );
+                                    self.status_message =
+                                        grouping_result_status(remote_fallback, count, false);
+                                }
+                                if remote_fallback {
+                                    self.log_lines.push(self.status_message.clone());
                                 }
 
                                 // Auto-suggest runs ONCE per session startup, not in
@@ -4137,6 +4142,39 @@ fn format_duration(d: chrono::Duration) -> String {
     }
 }
 
+fn decode_grouping_result(json: &str) -> Result<(Vec<AiSuggestion>, bool), serde_json::Error> {
+    match serde_json::from_str::<crate::grouping::GroupingOutcome>(json) {
+        Ok(outcome) => Ok((outcome.suggestions, outcome.remote_fallback)),
+        Err(_) => {
+            serde_json::from_str::<Vec<AiSuggestion>>(json).map(|suggestions| (suggestions, false))
+        }
+    }
+}
+
+fn grouping_result_status(remote_fallback: bool, count: usize, was_auto: bool) -> String {
+    if remote_fallback {
+        let fallback_result = if count == 0 {
+            "local fallback found no suggestions"
+        } else {
+            "using local suggestions"
+        };
+        let retry = if was_auto {
+            "Shift+Tab → Grouped, then press s to retry."
+        } else {
+            "Press Esc, then s to retry."
+        };
+        return format!("⚠ Online grouping failed; {fallback_result}. {retry}");
+    }
+    if count == 0 {
+        return "AI: no strong grouping suggestions found".to_string();
+    }
+    if was_auto {
+        format!("🤖 {count} AI suggestions ready — y accept · n dismiss · e edit")
+    } else {
+        format!("AI: {count} suggestions ready — review with y/n/e")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests — test UI logic with mock data (no terminal needed).
 // ---------------------------------------------------------------------------
@@ -4800,7 +4838,7 @@ mod ui_logic_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod ui_invariant_tests {
-    use super::{clamp_cursor_after_removal, empty_provider_bootstrap};
+    use super::{clamp_cursor_after_removal, empty_provider_bootstrap, grouping_result_status};
     use std::fs;
 
     fn ui_source() -> String {
@@ -4811,6 +4849,31 @@ mod ui_invariant_tests {
     fn code_section() -> String {
         let src = ui_source();
         src.split("#[cfg(test)]").next().unwrap_or(&src).to_string()
+    }
+
+    #[test]
+    fn remote_grouping_failure_status_is_actionable() {
+        let status = grouping_result_status(true, 3, true);
+        assert!(status.contains("Online grouping failed"));
+        assert!(status.contains("using local suggestions"));
+        assert!(status.contains("Shift+Tab"));
+        assert!(status.contains("Grouped"));
+        assert!(status.contains("press s to retry"));
+    }
+
+    #[test]
+    fn successful_grouping_does_not_report_online_failure() {
+        let status = grouping_result_status(false, 3, true);
+        assert!(!status.contains("failed"));
+        assert!(status.contains("3 AI suggestions ready"));
+    }
+
+    #[test]
+    fn manual_remote_failure_status_exits_results_before_retry() {
+        let status = grouping_result_status(true, 3, false);
+        assert!(status.contains("Online grouping failed"));
+        assert!(status.contains("Press Esc, then s to retry"));
+        assert!(!status.contains("Shift+Tab"));
     }
 
     // ── Zero-providers startup resilience ───────────────────────────────

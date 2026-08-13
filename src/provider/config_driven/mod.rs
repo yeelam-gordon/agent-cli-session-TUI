@@ -37,9 +37,9 @@ use std::collections::{HashMap, HashSet};
 // ConfigDrivenProvider
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Cached discovery result for a single session. If the events file's mtime
-/// hasn't changed since we last parsed it, we skip the tail-read + parse
-/// entirely and reuse the stored result.
+/// Cached discovery result for a single session. If neither the events nor
+/// metadata file changed since we last parsed it, we skip the tail-read +
+/// parse entirely and reuse the stored result.
 ///
 /// `session: None` is a **negative cache entry**: this stub was parsed and
 /// deliberately yielded nothing (an empty/abandoned session). Remembering that
@@ -52,20 +52,42 @@ struct CachedScan {
     /// a full-precision `SystemTime` here made every reloaded entry compare
     /// unequal to the freshly-stat'd mtime — the persisted cache silently did
     /// almost nothing across restarts (observed: 2494 misses vs 676 hits).
-    mtime_ms: Option<u64>,
+    events_mtime_ms: Option<u64>,
+    metadata_mtime_ms: Option<u64>,
+    cwd_lookup_mtime_ms: Option<u64>,
     session: Option<Session>,
 }
 
 /// Millisecond view of a stat'd mtime, matching what we persist.
-fn stub_mtime_ms(t: Option<SystemTime>) -> Option<u64> {
+fn mtime_ms(t: Option<SystemTime>) -> Option<u64> {
     t.and_then(systime_to_ms)
+}
+
+fn stub_source_mtimes(stub: &SessionStub) -> (Option<u64>, Option<u64>) {
+    (
+        mtime_ms(stub.events_mtime_raw),
+        mtime_ms(stub.metadata_mtime_raw),
+    )
+}
+
+fn cache_entry_matches(
+    entry: &CachedScan,
+    stub: &SessionStub,
+    cwd_lookup_mtime_ms: Option<u64>,
+) -> bool {
+    let (events_mtime_ms, metadata_mtime_ms) = stub_source_mtimes(stub);
+    entry.events_mtime_ms == events_mtime_ms
+        && entry.metadata_mtime_ms == metadata_mtime_ms
+        && entry.cwd_lookup_mtime_ms == cwd_lookup_mtime_ms
 }
 
 /// On-disk form of `CachedScan`. SystemTime isn't serde-native, so we persist
 /// as u64 millis since UNIX_EPOCH.
 #[derive(Serialize, Deserialize)]
 struct PersistedScan {
-    mtime_ms: Option<u64>,
+    events_mtime_ms: Option<u64>,
+    metadata_mtime_ms: Option<u64>,
+    cwd_lookup_mtime_ms: Option<u64>,
     /// `None` = known-empty. Defaults so caches written before negative
     /// entries existed still load (a present object deserializes as `Some`).
     #[serde(default)]
@@ -76,10 +98,12 @@ struct PersistedScan {
 struct PersistedCache {
     /// Bump this if `Session` layout changes incompatibly.
     version: u32,
+    /// Invalidates parsed sessions when provider extraction rules change.
+    provider_fingerprint: u64,
     entries: HashMap<String, PersistedScan>,
 }
 
-const SCAN_CACHE_VERSION: u32 = 1;
+const SCAN_CACHE_VERSION: u32 = 7;
 
 fn systime_to_ms(t: SystemTime) -> Option<u64> {
     t.duration_since(UNIX_EPOCH)
@@ -91,7 +115,42 @@ fn scan_cache_path(provider_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("agent-session-tui-scan-{}.json", provider_name))
 }
 
-fn load_scan_cache_from_disk(provider_name: &str) -> HashMap<String, CachedScan> {
+fn scan_cache_fingerprint(cfg: &ProviderConfigFile, base_dir: &Path) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    let cfg_bytes = serde_json::to_vec(cfg).unwrap_or_default();
+    for byte in cfg_bytes
+        .iter()
+        .copied()
+        .chain(base_dir.to_string_lossy().bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn cwd_lookup_path(cfg: &CwdConfig) -> Option<PathBuf> {
+    match cfg {
+        CwdConfig::SessionIdConfigLookup { lookup_file, .. }
+        | CwdConfig::ConfigLookup { lookup_file, .. }
+        | CwdConfig::ConfigReverseLookup { lookup_file, .. } => Some(expand_path(lookup_file)),
+        CwdConfig::YamlField { .. }
+        | CwdConfig::EventField { .. }
+        | CwdConfig::DirnameDecode { .. } => None,
+    }
+}
+
+fn cwd_lookup_mtime_ms(cfg: &CwdConfig) -> Option<u64> {
+    cwd_lookup_path(cfg)
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(systime_to_ms)
+}
+
+fn load_scan_cache_from_disk(
+    provider_name: &str,
+    provider_fingerprint: u64,
+) -> HashMap<String, CachedScan> {
     let path = scan_cache_path(provider_name);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return HashMap::new();
@@ -110,12 +169,21 @@ fn load_scan_cache_from_disk(provider_name: &str) -> HashMap<String, CachedScan>
         ));
         return HashMap::new();
     }
+    if pc.provider_fingerprint != provider_fingerprint {
+        crate::log::info(&format!(
+            "scan_cache: provider definition changed for '{}' — discarding",
+            provider_name
+        ));
+        return HashMap::new();
+    }
     let mut out = HashMap::with_capacity(pc.entries.len());
     for (k, v) in pc.entries {
         out.insert(
             k,
             CachedScan {
-                mtime_ms: v.mtime_ms,
+                events_mtime_ms: v.events_mtime_ms,
+                metadata_mtime_ms: v.metadata_mtime_ms,
+                cwd_lookup_mtime_ms: v.cwd_lookup_mtime_ms,
                 session: v.session,
             },
         );
@@ -128,7 +196,11 @@ fn load_scan_cache_from_disk(provider_name: &str) -> HashMap<String, CachedScan>
     out
 }
 
-fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedScan>) {
+fn save_scan_cache_to_disk(
+    provider_name: &str,
+    provider_fingerprint: u64,
+    cache: &HashMap<String, CachedScan>,
+) {
     let path = scan_cache_path(provider_name);
     let tmp = path.with_extension("json.tmp");
     let entries: HashMap<String, PersistedScan> = cache
@@ -137,7 +209,9 @@ fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedSc
             (
                 k.clone(),
                 PersistedScan {
-                    mtime_ms: v.mtime_ms,
+                    events_mtime_ms: v.events_mtime_ms,
+                    metadata_mtime_ms: v.metadata_mtime_ms,
+                    cwd_lookup_mtime_ms: v.cwd_lookup_mtime_ms,
                     session: v.session.clone(),
                 },
             )
@@ -145,6 +219,7 @@ fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedSc
         .collect();
     let pc = PersistedCache {
         version: SCAN_CACHE_VERSION,
+        provider_fingerprint,
         entries,
     };
     let Ok(text) = serde_json::to_string(&pc) else {
@@ -154,10 +229,24 @@ fn save_scan_cache_to_disk(provider_name: &str, cache: &HashMap<String, CachedSc
         crate::log::warn(&format!("scan_cache write {tmp:?} failed: {e}"));
         return;
     }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
+    if let Err(e) = replace_cache_file(&tmp, &path) {
         crate::log::warn(&format!(
             "scan_cache rename {tmp:?} -> {path:?} failed: {e}"
         ));
+    }
+}
+
+fn replace_cache_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) if path.exists() => {
+            // Windows rename does not replace an existing destination. This
+            // cache is fully derivable, so a brief remove-then-rename gap is
+            // preferable to leaving every future cache update broken.
+            std::fs::remove_file(path)?;
+            std::fs::rename(tmp, path).map_err(|_| rename_error)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -166,9 +255,10 @@ pub struct ConfigDrivenProvider {
     app_cfg: AppProviderConfig,
     base_dir: PathBuf,
     cache: Mutex<ExprCache>,
-    /// mtime-keyed cache of parsed `Session`s keyed by provider_session_id.
+    /// Source-mtime-keyed cache of parsed `Session`s keyed by provider_session_id.
     /// Used by `discover_sessions` to skip heavy re-parse of unchanged sessions.
     scan_cache: Mutex<HashMap<String, CachedScan>>,
+    scan_cache_fingerprint: u64,
 }
 
 impl ConfigDrivenProvider {
@@ -200,13 +290,15 @@ impl ConfigDrivenProvider {
             .as_ref()
             .map(|p| expand_path(&p.to_string_lossy()))
             .unwrap_or_else(|| expand_path(&cfg.discovery.base_dir));
-        let scan_cache = load_scan_cache_from_disk(&cfg.name);
+        let scan_cache_fingerprint = scan_cache_fingerprint(&cfg, &base_dir);
+        let scan_cache = load_scan_cache_from_disk(&cfg.name, scan_cache_fingerprint);
         Ok(Self {
             cfg,
             app_cfg: app_cfg.clone(),
             base_dir,
             cache: Mutex::new(ExprCache::new()),
             scan_cache: Mutex::new(scan_cache),
+            scan_cache_fingerprint,
         })
     }
 
@@ -262,14 +354,15 @@ impl Provider for ConfigDrivenProvider {
         let mut seen: HashSet<String> = HashSet::with_capacity(stubs.len());
         let mut out: Vec<Session> = Vec::with_capacity(stubs.len());
         let (mut hits, mut misses, mut dropped) = (0usize, 0usize, 0usize);
+        let current_cwd_lookup_mtime_ms = cwd_lookup_mtime_ms(&self.cfg.cwd);
 
         for stub in &stubs {
             seen.insert(stub.session_id.clone());
 
-            // Cache hit: same session_id AND same mtime → reuse the stored
-            // result, including a remembered "this one is empty" (None).
+            // Cache hit: same session_id and unchanged event + metadata mtimes
+            // → reuse the stored result, including a remembered empty result.
             if let Some(entry) = cache.get(&stub.session_id) {
-                if entry.mtime_ms == stub_mtime_ms(stub.mtime_raw) {
+                if cache_entry_matches(entry, stub, current_cwd_lookup_mtime_ms) {
                     match &entry.session {
                         Some(s) => out.push(s.clone()),
                         None => dropped += 1,
@@ -281,13 +374,23 @@ impl Provider for ConfigDrivenProvider {
 
             // Cache miss or mtime changed: do the heavy read + parse.
             misses += 1;
-            let cand = finalize_stub(stub);
+            let cand = match finalize_stub(stub) {
+                Ok(cand) => cand,
+                Err(_) => {
+                    cache.remove(&stub.session_id);
+                    dropped += 1;
+                    continue;
+                }
+            };
+            let (events_mtime_ms, metadata_mtime_ms) = stub_source_mtimes(stub);
             match parse_session(self, &cand) {
                 Ok(Some(s)) => {
                     cache.insert(
                         stub.session_id.clone(),
                         CachedScan {
-                            mtime_ms: stub_mtime_ms(stub.mtime_raw),
+                            events_mtime_ms,
+                            metadata_mtime_ms,
+                            cwd_lookup_mtime_ms: current_cwd_lookup_mtime_ms,
                             session: Some(s.clone()),
                         },
                     );
@@ -299,7 +402,9 @@ impl Provider for ConfigDrivenProvider {
                     cache.insert(
                         stub.session_id.clone(),
                         CachedScan {
-                            mtime_ms: stub_mtime_ms(stub.mtime_raw),
+                            events_mtime_ms,
+                            metadata_mtime_ms,
+                            cwd_lookup_mtime_ms: current_cwd_lookup_mtime_ms,
                             session: None,
                         },
                     );
@@ -336,7 +441,7 @@ impl Provider for ConfigDrivenProvider {
         // thousands of sessions to disk every cycle.
         let mutated = misses > 0 || evicted > 0;
         if mutated {
-            save_scan_cache_to_disk(&self.cfg.name, &cache);
+            save_scan_cache_to_disk(&self.cfg.name, self.scan_cache_fingerprint, &cache);
         }
         drop(cache);
 
@@ -351,33 +456,34 @@ impl Provider for ConfigDrivenProvider {
     /// parses the requested page. This avoids the 2MB×N tail read that makes
     /// full discovery expensive.
     ///
-    /// Note: `total` is the candidate count (pre-parse). Some candidates may
-    /// filter out after parse (e.g., no user interaction), so the actual
-    /// returned `sessions.len()` may be smaller than `limit`.
+    /// Note: `total` is the candidate count (pre-parse). Discovery keeps
+    /// scanning past filtered candidates until it fills the requested page or
+    /// exhausts the candidate set.
     fn discover_sessions_paged(&self, offset: usize, limit: usize) -> Result<PagedSessions> {
-        // Stat-only enumeration to get total candidate count for `has_more`.
-        let total_candidates =
-            count_candidates(&self.cfg.discovery, &self.cfg.session_id, &self.base_dir)?;
-
-        // Load only (offset+limit) candidates by mtime-desc.
         let take = offset.saturating_add(limit);
-        let candidates = list_candidates(
-            &self.cfg.discovery,
-            &self.cfg.session_id,
-            &self.base_dir,
-            Some(take),
-        )?;
+        let mut stubs = list_stubs(&self.cfg.discovery, &self.cfg.session_id, &self.base_dir)?;
+        stubs.sort_by_key(|stub| std::cmp::Reverse(stub.events_mtime_raw));
+        let total_candidates = stubs.len();
 
-        let mut parsed: Vec<Session> = Vec::with_capacity(candidates.len());
-        for cand in candidates {
+        // Parse one valid session beyond the requested range so `has_more`
+        // reflects another real session, not merely another filtered candidate.
+        let lookahead = take.saturating_add(1);
+        let mut parsed: Vec<Session> = Vec::with_capacity(lookahead.min(total_candidates));
+        for stub in &stubs {
+            let Ok(cand) = finalize_stub(stub) else {
+                continue;
+            };
             if let Ok(Some(s)) = parse_session(self, &cand) {
-                parsed.push(s)
+                parsed.push(s);
+                if parsed.len() >= lookahead {
+                    break;
+                }
             }
         }
         parsed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
+        let has_more = parsed.len() > take;
         let sessions: Vec<Session> = parsed.into_iter().skip(offset).take(limit).collect();
-        let has_more = total_candidates > offset + sessions.len();
         Ok(PagedSessions {
             sessions,
             total: total_candidates,
@@ -509,8 +615,10 @@ struct SessionStub {
     metadata_path: Option<PathBuf>,
     /// Tail window for the events read.
     tail_bytes: usize,
-    /// Raw mtime used for cache key comparison. `None` if stat failed.
-    mtime_raw: Option<SystemTime>,
+    /// Raw event-stream mtime used for cache comparison. `None` if stat failed.
+    events_mtime_raw: Option<SystemTime>,
+    /// Raw metadata mtime used for cache comparison. `None` if absent/stat failed.
+    metadata_mtime_raw: Option<SystemTime>,
     /// Formatted mtime string (for `file_mtime` field strategy).
     mtime_str: Option<String>,
 }
@@ -548,15 +656,20 @@ fn list_stubs(
                     continue;
                 }
                 let events_path = dir.join(events_file);
-                let (mtime_raw, mtime_str) = stat_mtime_pair(&events_path);
+                let (events_mtime_raw, mtime_str) = stat_mtime_pair(&events_path);
                 let metadata_path = metadata_file.as_deref().map(|name| dir.join(name));
+                let metadata_mtime_raw = metadata_path
+                    .as_deref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .and_then(|metadata| metadata.modified().ok());
                 out.push(SessionStub {
                     session_id,
                     path: dir,
                     events_path,
                     metadata_path,
                     tail_bytes: *tail_bytes,
-                    mtime_raw,
+                    events_mtime_raw,
+                    metadata_mtime_raw,
                     mtime_str,
                 });
             }
@@ -585,7 +698,8 @@ fn list_stubs(
                     path: s.path,
                     metadata_path: None,
                     tail_bytes: *tail_bytes,
-                    mtime_raw: s.mtime_raw,
+                    events_mtime_raw: s.mtime_raw,
+                    metadata_mtime_raw: None,
                     mtime_str: s.mtime_str,
                 })
                 .collect())
@@ -650,7 +764,8 @@ fn list_stubs(
                                 path: p,
                                 metadata_path: None,
                                 tail_bytes: *tail_bytes,
-                                mtime_raw,
+                                events_mtime_raw: mtime_raw,
+                                metadata_mtime_raw: None,
                                 mtime_str,
                             });
                         }
@@ -663,20 +778,37 @@ fn list_stubs(
 }
 
 /// Heavy finalize of one stub: reads YAML metadata (if any) + tail of events
-/// file, returns a Candidate ready for `parse_session`.
-fn finalize_stub(stub: &SessionStub) -> Candidate {
-    let metadata = stub.metadata_path.as_ref().and_then(|p| {
-        let text = std::fs::read_to_string(p).ok()?;
-        serde_yaml::from_str::<Value>(&text).ok()
-    });
-    let events = read_jsonl_tail(&stub.events_path, stub.tail_bytes).unwrap_or_default();
-    Candidate {
+/// file, returns a Candidate ready for `parse_session`. Missing source files
+/// are deterministic empty stubs; other I/O failures remain retryable.
+fn finalize_stub(stub: &SessionStub) -> Result<Candidate> {
+    let metadata = match &stub.metadata_path {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => Some(
+                serde_yaml::from_str::<Value>(&text)
+                    .with_context(|| format!("parsing session metadata {path:?}"))?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).with_context(|| format!("reading session metadata {path:?}")),
+        },
+        None => None,
+    };
+    let events = match read_jsonl_tail(&stub.events_path, stub.tail_bytes) {
+        Ok(events) => events,
+        Err(e)
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(Candidate {
         session_id: stub.session_id.clone(),
         path: stub.path.clone(),
         metadata,
         events,
         file_mtime: stub.mtime_str.clone(),
-    }
+    })
 }
 
 fn list_candidates(
@@ -714,92 +846,6 @@ fn list_candidates(
             pattern,
             tail_bytes,
         } => list_date_partitioned(base_dir, pattern, *tail_bytes, limit),
-    }
-}
-
-/// Cheap count of candidate dirs/files without tail reads or YAML parses.
-/// Used by paged discovery to compute `total` / `has_more`.
-fn count_candidates(
-    disc: &DiscoveryConfig,
-    session_id_cfg: &SessionIdConfig,
-    base_dir: &Path,
-) -> Result<usize> {
-    if !base_dir.exists() {
-        return Ok(0);
-    }
-    match &disc.strategy {
-        DiscoveryStrategy::DirPerSession { .. } => {
-            let mut n = 0;
-            for entry in std::fs::read_dir(base_dir)?.flatten() {
-                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                    && entry
-                        .file_name()
-                        .to_str()
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false)
-                {
-                    n += 1;
-                }
-            }
-            Ok(n)
-        }
-        DiscoveryStrategy::FilePerSession {
-            glob,
-            hide_paths_glob,
-            ..
-        } => {
-            let mut stubs: Vec<FileStub> = Vec::new();
-            let session_id_from_parent = matches!(session_id_cfg, SessionIdConfig::ParentDirName);
-            stat_files_recursive(
-                base_dir,
-                base_dir,
-                glob,
-                hide_paths_glob,
-                session_id_from_parent,
-                &mut stubs,
-            );
-            Ok(stubs.len())
-        }
-        DiscoveryStrategy::DatePartitioned { .. } => {
-            let mut n = 0;
-            for yr in std::fs::read_dir(base_dir)?.flatten() {
-                if !yr.file_type().map(|f| f.is_dir()).unwrap_or(false) {
-                    continue;
-                }
-                for mo in std::fs::read_dir(yr.path())
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                {
-                    if !mo.file_type().map(|f| f.is_dir()).unwrap_or(false) {
-                        continue;
-                    }
-                    for day in std::fs::read_dir(mo.path())
-                        .ok()
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                    {
-                        if !day.file_type().map(|f| f.is_dir()).unwrap_or(false) {
-                            continue;
-                        }
-                        for file in std::fs::read_dir(day.path())
-                            .ok()
-                            .into_iter()
-                            .flatten()
-                            .flatten()
-                        {
-                            let p = file.path();
-                            if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                                n += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(n)
-        }
     }
 }
 
@@ -1134,32 +1180,48 @@ fn matches_simple_glob(path: &Path, base: &Path, pat: &str) -> bool {
 fn read_jsonl_tail(path: &Path, tail_bytes: usize) -> Result<Vec<Value>> {
     let metadata = std::fs::metadata(path)?;
     let len = metadata.len() as usize;
-    let start = len.saturating_sub(tail_bytes);
-    let text = if start == 0 {
-        std::fs::read_to_string(path)?
-    } else {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut window = tail_bytes.max(1).min(len);
+    loop {
+        let start = len.saturating_sub(window);
         use std::io::{Read, Seek, SeekFrom};
         let mut f = std::fs::File::open(path)?;
         f.seek(SeekFrom::Start(start as u64))?;
-        let mut s = String::new();
-        f.read_to_string(&mut s)?;
-        // drop partial first line
-        if let Some(pos) = s.find('\n') {
-            s.drain(..=pos);
+        let mut bytes = Vec::with_capacity(window);
+        f.read_to_end(&mut bytes)?;
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        let mut needs_expand = false;
+        if start > 0 {
+            // Drop the partial first line. If the whole window lies inside one
+            // oversized record, expand and retry until its beginning is found.
+            if let Some(pos) = text.find('\n') {
+                text.drain(..=pos);
+                needs_expand = text.trim().is_empty();
+            } else {
+                text.clear();
+                needs_expand = true;
+            }
         }
-        s
-    };
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                out.push(v);
+            }
         }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            out.push(v);
+        if !out.is_empty() || start == 0 || !needs_expand {
+            return Ok(out);
         }
+
+        window = window.saturating_mul(4).min(len);
     }
-    Ok(out)
 }
 
 fn file_mtime_rfc3339(path: &Path) -> Option<String> {
@@ -1208,7 +1270,12 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
     // title
     let title_extracted = extract_field(prov, &cand.metadata, &kept, &cfg.fields.title);
     let title_used_fallback = title_extracted.is_none();
-    let title = title_extracted.unwrap_or_else(|| format!("{} session", cfg.display_name));
+    let title = title_extracted.unwrap_or_else(|| {
+        cfg.fields
+            .fallback_title
+            .clone()
+            .unwrap_or_else(|| format!("{} session", cfg.display_name))
+    });
     let title = truncate_str_safe(&title, 120);
 
     // summary
@@ -1248,8 +1315,12 @@ fn parse_session(prov: &ConfigDrivenProvider, cand: &Candidate) -> Result<Option
         }
     }
 
-    // Discard truly empty sessions (no title, no summary content). Mirrors
-    // legacy main's "skip sessions with zero user interaction" guard.
+    // Candidates with no retained event history are storage stubs, not
+    // resumable sessions, even if stale metadata still contains a name.
+    if kept.is_empty() {
+        return Ok(None);
+    }
+
     if cfg.fields.discard_if_empty && title_used_fallback && summary.is_empty() {
         return Ok(None);
     }
@@ -1309,6 +1380,17 @@ fn uuid_like(seed: &str) -> String {
 // CWD resolution
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn read_optional_lookup_json(path: &Path) -> Result<Option<Value>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading CWD lookup {path:?}")),
+    };
+    let json =
+        serde_json::from_str(&text).with_context(|| format!("parsing CWD lookup {path:?}"))?;
+    Ok(Some(json))
+}
+
 fn resolve_cwd(
     prov: &ConfigDrivenProvider,
     cand: &Candidate,
@@ -1349,8 +1431,9 @@ fn resolve_cwd(
             value_path,
         } => {
             let p = expand_path(lookup_file);
-            let text = std::fs::read_to_string(&p).unwrap_or_default();
-            let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let Some(json) = read_optional_lookup_json(&p)? else {
+                return Ok(None);
+            };
             let session_id = &cand.session_id;
             let container_value = if container_path.is_empty() {
                 json.clone()
@@ -1398,8 +1481,9 @@ fn resolve_cwd(
             value_path,
         } => {
             let p = expand_path(lookup_file);
-            let text = std::fs::read_to_string(&p).unwrap_or_default();
-            let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let Some(json) = read_optional_lookup_json(&p)? else {
+                return Ok(None);
+            };
             let key = resolve_key_source(key_source, &cand.path);
             if let Some(entry) = json.get(&key) {
                 let expr = prov.expr(value_path);
@@ -1413,8 +1497,9 @@ fn resolve_cwd(
             container_path,
         } => {
             let p = expand_path(lookup_file);
-            let text = std::fs::read_to_string(&p).unwrap_or_default();
-            let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let Some(json) = read_optional_lookup_json(&p)? else {
+                return Ok(None);
+            };
             let key = resolve_key_source(key_source, &cand.path);
             // Navigate to the container object that holds the <cwd>: <name> map.
             let mut container = &json;
@@ -2556,23 +2641,25 @@ mod tests {
     fn mtime_comparison_survives_millisecond_persistence() {
         use std::time::Duration;
         let with_sub_ms = UNIX_EPOCH + Duration::from_nanos(1_700_000_000_123_456_789);
-        let as_ms = stub_mtime_ms(Some(with_sub_ms)).expect("convertible");
+        let as_ms = mtime_ms(Some(with_sub_ms)).expect("convertible");
 
         // Simulate a reload: only millisecond precision came back from disk.
         let reloaded = CachedScan {
-            mtime_ms: Some(as_ms),
+            events_mtime_ms: Some(as_ms),
+            metadata_mtime_ms: None,
+            cwd_lookup_mtime_ms: None,
             session: None,
         };
         assert_eq!(
-            reloaded.mtime_ms,
-            stub_mtime_ms(Some(with_sub_ms)),
+            reloaded.events_mtime_ms,
+            mtime_ms(Some(with_sub_ms)),
             "a reloaded entry must still match the freshly-stat'd mtime"
         );
     }
 
     #[test]
-    fn stub_mtime_ms_handles_absent_mtime() {
-        assert_eq!(stub_mtime_ms(None), None);
+    fn mtime_ms_handles_absent_mtime() {
+        assert_eq!(mtime_ms(None), None);
     }
 
     /// Round-trip a negative cache entry through the on-disk format.
@@ -2581,34 +2668,173 @@ mod tests {
     #[test]
     fn persisted_scan_round_trips_a_negative_entry() {
         let p = PersistedScan {
-            mtime_ms: Some(1234),
+            events_mtime_ms: Some(1234),
+            metadata_mtime_ms: Some(5678),
+            cwd_lookup_mtime_ms: Some(9012),
             session: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: PersistedScan = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.mtime_ms, Some(1234));
+        assert_eq!(back.events_mtime_ms, Some(1234));
+        assert_eq!(back.metadata_mtime_ms, Some(5678));
+        assert_eq!(back.cwd_lookup_mtime_ms, Some(9012));
         assert!(back.session.is_none(), "negative entry must survive reload");
     }
 
-    /// Caches written before negative entries existed have a bare `session`
-    /// object and no concept of `None`. They must still load rather than being
-    /// discarded, or every user pays a full cold rescan on upgrade.
     #[test]
-    fn persisted_scan_accepts_pre_negative_cache_format() {
-        let legacy = r#"{"mtime_ms":99,"session":{
-            "id":"x","provider_session_id":"sid","provider_name":"copilot",
-            "cwd":"C:\\tmp","title":"t","tab_title":null,"summary":"s",
-            "state":{"process":"Exited","interaction":"Unknown",
-                     "persistence":"Resumable","health":"Clean",
-                     "confidence":"Low","reason":""},
-            "pid":null,"created_at":"","updated_at":"","state_dir":null}}"#;
-        let back: PersistedScan =
-            serde_json::from_str(legacy).expect("legacy cache entry must still parse");
-        assert_eq!(back.mtime_ms, Some(99));
+    fn cache_file_replaces_existing_destination() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("cache.json");
+        let tmp = tmp_dir.path().join("cache.json.tmp");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::write(&tmp, "new").unwrap();
+
+        replace_cache_file(&tmp, &path).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn finalize_stub_propagates_metadata_parse_failures() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let metadata = tmp_dir.path().join("workspace.yaml");
+        let events = tmp_dir.path().join("events.jsonl");
+        std::fs::write(&metadata, "cwd: [unterminated").unwrap();
+        std::fs::write(
+            &events,
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        let stub = SessionStub {
+            session_id: "sid".into(),
+            path: tmp_dir.path().to_path_buf(),
+            events_path: events,
+            metadata_path: Some(metadata),
+            tail_bytes: 1024,
+            events_mtime_raw: None,
+            metadata_mtime_raw: None,
+            mtime_str: None,
+        };
+
         assert!(
-            back.session.is_some(),
-            "a present session object must load as Some"
+            finalize_stub(&stub).is_err(),
+            "degraded metadata must not be cached as a valid session"
         );
+    }
+
+    #[test]
+    fn jsonl_tail_expands_for_single_oversized_record() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("events.jsonl");
+        let content = "x".repeat(4096);
+        std::fs::write(
+            &path,
+            format!("{{\"type\":\"user.message\",\"data\":{{\"content\":\"{content}\"}}}}\n"),
+        )
+        .unwrap();
+
+        let events = read_jsonl_tail(&path, 64).unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "user.message");
+    }
+
+    #[test]
+    fn jsonl_tail_does_not_expand_past_complete_malformed_records() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("events.jsonl");
+        let mut text =
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"old valid\"}}\n".to_string();
+        text.push_str(&"not-json\n".repeat(1024));
+        std::fs::write(&path, text).unwrap();
+
+        let events = read_jsonl_tail(&path, 64).unwrap();
+
+        assert!(
+            events.is_empty(),
+            "complete malformed tail records must not trigger a full-file scan"
+        );
+    }
+
+    /// Regression: Copilot can update workspace.yaml (including its generated
+    /// session name) without touching events.jsonl. The cache must miss when
+    /// metadata changes or stale first-message titles survive indefinitely.
+    #[test]
+    fn metadata_mtime_change_invalidates_cached_session() {
+        use std::time::Duration;
+
+        let events_mtime = UNIX_EPOCH + Duration::from_secs(100);
+        let metadata_mtime = UNIX_EPOCH + Duration::from_secs(200);
+        let mut stub = SessionStub {
+            session_id: "sid".into(),
+            path: PathBuf::from("session"),
+            events_path: PathBuf::from("events.jsonl"),
+            metadata_path: Some(PathBuf::from("workspace.yaml")),
+            tail_bytes: 1024,
+            events_mtime_raw: Some(events_mtime),
+            metadata_mtime_raw: Some(metadata_mtime),
+            mtime_str: None,
+        };
+        let entry = CachedScan {
+            events_mtime_ms: mtime_ms(Some(events_mtime)),
+            metadata_mtime_ms: mtime_ms(Some(metadata_mtime)),
+            cwd_lookup_mtime_ms: None,
+            session: None,
+        };
+
+        assert!(cache_entry_matches(&entry, &stub, None));
+        stub.metadata_mtime_raw = Some(metadata_mtime + Duration::from_secs(1));
+        assert!(
+            !cache_entry_matches(&entry, &stub, None),
+            "workspace.yaml changes must invalidate the parsed session cache"
+        );
+    }
+
+    /// Provider YAML changes alter extraction semantics even when no session
+    /// file changed. Persisted cache entries must not cross that boundary.
+    #[test]
+    fn provider_definition_change_invalidates_cache_fingerprint() {
+        let yaml_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("copilot.yaml");
+        let text = std::fs::read_to_string(yaml_path).unwrap();
+        let v3: ProviderConfigV3 = serde_yaml::from_str(&text).unwrap();
+        let cfg = ProviderConfigFile::try_from(v3).unwrap();
+        let before = scan_cache_fingerprint(&cfg, Path::new("C:\\sessions"));
+
+        let mut changed = cfg.clone();
+        changed
+            .fields
+            .title
+            .transforms
+            .push("lowercase".to_string());
+        let after = scan_cache_fingerprint(&changed, Path::new("C:\\sessions"));
+
+        assert_ne!(
+            before, after,
+            "provider extraction changes must invalidate persisted sessions"
+        );
+    }
+
+    #[test]
+    fn cwd_lookup_change_invalidates_cached_session() {
+        use std::time::Duration;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let lookup = tmp_dir.path().join("projects.json");
+        std::fs::write(&lookup, "{}").unwrap();
+        let cfg = CwdConfig::ConfigReverseLookup {
+            lookup_file: lookup.to_string_lossy().to_string(),
+            key_source: "parent_dir_name".into(),
+            container_path: "projects".into(),
+        };
+        let before = cwd_lookup_mtime_ms(&cfg);
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&lookup, "{\"projects\":{}}").unwrap();
+        let after = cwd_lookup_mtime_ms(&cfg);
+
+        assert_ne!(before, after);
     }
 
     /// The load-bearing regression. An empty session must be parsed once and
@@ -2659,7 +2885,8 @@ mod tests {
             remote_list_cmd: None,
             remote_stream_cmd: None,
         };
-        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg).expect("load copilot.yaml");
+        let prov =
+            ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg).expect("load copilot.yaml");
 
         let first = prov.discover_sessions().expect("first scan");
         let second = prov.discover_sessions().expect("second scan");
@@ -2684,6 +2911,70 @@ mod tests {
         // The real session is cached positively and still returned.
         let good_entry = cache.get("aaaaaaaa-0000-0000-0000-000000000001");
         assert!(good_entry.is_some_and(|e| e.session.is_some()));
+    }
+
+    /// A newer empty candidate must not consume the whole first page and hide
+    /// the next valid session.
+    #[test]
+    fn paged_discovery_scans_past_filtered_candidates() {
+        use std::fs;
+        use std::time::Duration;
+
+        let yaml = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("providers")
+            .join("copilot.yaml");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let old_empty = tmp.path().join("00000000-0000-0000-0000-000000000000");
+        fs::create_dir_all(&old_empty).unwrap();
+        fs::write(old_empty.join("events.jsonl"), "").unwrap();
+
+        std::thread::sleep(Duration::from_millis(20));
+        let good = tmp.path().join("aaaaaaaa-0000-0000-0000-000000000001");
+        fs::create_dir_all(&good).unwrap();
+        fs::write(
+            good.join("workspace.yaml"),
+            "cwd: C:\\tmp\nname: Valid session\n",
+        )
+        .unwrap();
+        fs::write(
+            good.join("events.jsonl"),
+            "{\"type\":\"user.message\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"data\":{\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        std::thread::sleep(Duration::from_millis(20));
+        let new_empty = tmp.path().join("bbbbbbbb-0000-0000-0000-000000000002");
+        fs::create_dir_all(&new_empty).unwrap();
+        fs::write(new_empty.join("events.jsonl"), "").unwrap();
+
+        let app_cfg = AppProviderConfig {
+            enabled: true,
+            default: false,
+            command: "copilot".into(),
+            default_args: vec![],
+            state_dir: Some(tmp.path().to_path_buf()),
+            resume_flag: Some("--resume".into()),
+            startup_dir: None,
+            launch_method: "wt".into(),
+            launch_cmd: None,
+            launch_args: None,
+            launch_fallback_cmd: None,
+            launch_fallback_args: None,
+            launch_fallback: None,
+            wt_profile: None,
+            remote_list_cmd: None,
+            remote_stream_cmd: None,
+        };
+        let prov = ConfigDrivenProvider::load_from_yaml(&yaml, &app_cfg).unwrap();
+
+        let page = prov.discover_sessions_paged(0, 1).unwrap();
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(page.sessions[0].title, "Valid session");
+        assert!(
+            !page.has_more,
+            "filtered candidates must not create an empty next page"
+        );
     }
 
     #[test]
@@ -2812,9 +3103,8 @@ mod tests {
         let s = &sessions[0];
         assert_eq!(s.provider_session_id, sid);
         assert_eq!(s.provider_name, "copilot");
-        // `title` rule in providers/copilot.yaml prefers workspace.yaml.summary
-        // and falls back to the first user.message only when summary is empty.
-        // With summary present, title must equal the summary.
+        // `title` prefers workspace.yaml.name, then summary, then the first
+        // user.message. With no name, the summary supplies the title.
         assert_eq!(s.title, "Build the TUI");
         // `summary` is the metadata summary + concatenated `summary_parts`
         // sections (see providers/copilot.yaml). The metadata must appear
@@ -2863,6 +3153,44 @@ mod tests {
             s2.title, "hello world first line second",
             "when workspace.yaml has no summary, title must fall back to the \
              first user.message (with newlines stripped)"
+        );
+
+        // ── Native parity: resumable no-message sessions remain "(untitled)" ──
+        let sid3 = "33333333-4444-5555-6666-777777777777";
+        let sess3 = tmp.path().join(sid3);
+        fs::create_dir_all(&sess3).unwrap();
+        fs::write(
+            sess3.join("workspace.yaml"),
+            "cwd: D:\\Demo\\agent-session-tui\n",
+        )
+        .unwrap();
+        fs::write(
+            sess3.join("events.jsonl"),
+            r#"{"type":"session.start","timestamp":"2024-01-01T00:00:00Z","data":{}}
+"#,
+        )
+        .unwrap();
+        let sessions3 = prov.discover_sessions().expect("discover_sessions 3");
+        let s3 = sessions3
+            .iter()
+            .find(|s| s.provider_session_id == sid3)
+            .expect("untitled session discovered");
+        assert_eq!(s3.title, "(untitled)");
+
+        // A workspace-only directory has no resumable conversation history and
+        // must remain hidden even when untitled event sessions are retained.
+        let sid4 = "44444444-5555-6666-7777-888888888888";
+        let sess4 = tmp.path().join(sid4);
+        fs::create_dir_all(&sess4).unwrap();
+        fs::write(
+            sess4.join("workspace.yaml"),
+            "cwd: D:\\Demo\\agent-session-tui\nname: Stale metadata title\nsummary: Stale summary\n",
+        )
+        .unwrap();
+        let sessions4 = prov.discover_sessions().expect("discover_sessions 4");
+        assert!(
+            sessions4.iter().all(|s| s.provider_session_id != sid4),
+            "workspace-only storage stubs must not appear as sessions"
         );
     }
 

@@ -294,7 +294,8 @@ pub fn suggest(
         .read_to_string()
         .map_err(|e| format!("Remote grouping read failed: {e}"))?;
 
-    let groups = parse_stream(&text)?.unwrap_or_default();
+    let groups = parse_stream(&text)?
+        .ok_or_else(|| "Remote grouping returned an empty response".to_string())?;
     let suggestions = to_suggestions(&groups, inputs, existing_groups);
 
     crate::log::info(&format!(
@@ -418,6 +419,12 @@ mod tests {
     fn parse_stream_empty_body_yields_none() {
         assert!(parse_stream("").unwrap().is_none());
         assert!(parse_stream("\n\n").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_stream_valid_empty_group_list_is_not_an_empty_response() {
+        let body = r#"{"resultingGroupsList":[]}"#;
+        assert_eq!(parse_stream(body).unwrap().unwrap().len(), 0);
     }
 
     /// Error responses are plain JSON, never streamed. They must not be

@@ -53,6 +53,8 @@ extract:
         where: 'type == "user.message"'
         path: data.content // data.message // data.text
         transforms: [strip_newlines, trim, "truncate:60"]
+  fallback_title: "(untitled)"
+  discard_if_empty: false
 
   summary:
     from: metadata

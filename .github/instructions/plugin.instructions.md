@@ -106,6 +106,9 @@ This uses WMI on Windows (reliable) with sysinfo fallback.
 2. **Read-only** — never write to the agent CLI's state directory.
 3. **UTF-8 safe** — always use `util::truncate_str_safe()` for string truncation. Session data can contain any Unicode.
 4. **Skip empty sessions** — filter out sessions with no user interaction during discovery.
+   If the native CLI intentionally exposes resumable empty sessions, set
+   `extract.discard_if_empty: false` and provide `extract.fallback_title`
+   (for example, `"(untitled)"`) to match its UI.
 5. **File mtime for "last activity"** — don't rely on timestamps inside files. Use the file's modification time as the real-time activity indicator.
 6. **Log diagnostics** — use `crate::log::info/warn/error()` for troubleshooting. Log file is next to the exe.
 7. **Graceful degradation** — if a session file is corrupt or unreadable, skip it and continue. Never crash the TUI.

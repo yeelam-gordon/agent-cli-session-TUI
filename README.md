@@ -237,8 +237,10 @@ timeout_secs = 20     # remote call timeout
   40 sessions to 8 entries. The working directory is included because it
   measurably improves results.
 - **Never sent:** session summaries, file contents, chat transcripts.
-- **On any failure** — non-2xx, timeout, schema change — it silently falls back
-  to `local`. Grouping never breaks.
+- **On any failure** — non-2xx, timeout, schema change — it falls back to
+  `local` and shows a warning. To retry the online service, use `Shift+Tab` to
+  enter the Grouped view, then press `s`. If a manual run fails while its
+  suggestion review is open, press `Esc`, then `s`. Grouping never breaks.
 
 > **Note:** the grouping service is Microsoft-hosted. Its URL is published in
 > Microsoft's [Edge endpoint allowlist](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-security-endpoints)

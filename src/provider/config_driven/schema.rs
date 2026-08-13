@@ -230,6 +230,10 @@ pub enum EventFormat {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FieldsConfig {
     pub title: FieldSpec,
+    /// Provider-specific title for resumable sessions with no extracted title.
+    /// Defaults to "<display_name> session" when absent.
+    #[serde(default)]
+    pub fallback_title: Option<String>,
     pub summary: FieldSpec,
     pub created_at: TimestampSpec,
     pub updated_at: TimestampSpec,
@@ -596,6 +600,9 @@ pub struct V3Extract {
     pub session_id: V3SessionId,
     pub cwd: V3Cwd,
     pub title: V3FieldSpec,
+    /// Provider-specific title for resumable sessions with no extracted title.
+    #[serde(default)]
+    pub fallback_title: Option<String>,
     /// Extended v3 (full TUI): optional 500-char summary for the detail pane.
     /// Absent → synthesized as a never-matching spec (empty summary).
     #[serde(default)]
@@ -1013,6 +1020,7 @@ fn translate_fields(extract: &V3Extract) -> Result<FieldsConfig, anyhow::Error> 
         .collect();
     Ok(FieldsConfig {
         title: translate_v3_field(&extract.title),
+        fallback_title: extract.fallback_title.clone(),
         summary,
         created_at,
         updated_at: translate_timestamp(&extract.updated_at),

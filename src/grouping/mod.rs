@@ -123,17 +123,54 @@ fn expand_over_clusters(
     out
 }
 
+fn accept_remote_result(
+    result: Result<Vec<AiSuggestion>, String>,
+    label: &str,
+) -> Option<Vec<AiSuggestion>> {
+    match result {
+        Ok(suggestions) => Some(suggestions),
+        Err(e) => {
+            crate::log::warn(&format!("Remote grouping failed ({label}): {e}"));
+            None
+        }
+    }
+}
+
 /// Run the configured grouping engine. Blocking — call from a blocking thread.
 ///
 /// `existing_groups` are the user's current group names. They decide `is_new`,
 /// and the remote engine offers them as context so candidates can be folded
 /// into a group the user already has.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct GroupingOutcome {
+    /// Suggestions produced by the selected engine or its fallback.
+    pub suggestions: Vec<AiSuggestion>,
+    /// True when the remote engine failed and local clustering was used.
+    pub remote_fallback: bool,
+}
+
+/// Run the configured grouping engine. Blocking — call from a blocking thread.
+///
+/// This compatibility entry point returns only suggestions. UI callers that
+/// need fallback status should use [`suggest_with_status`].
+#[allow(dead_code)]
 pub fn suggest(
     engine: GroupingEngine,
     inputs: &[GroupingInput],
     existing_groups: &[String],
     cfg: &crate::config::GroupingConfig,
 ) -> Result<Vec<AiSuggestion>, String> {
+    suggest_with_status(engine, inputs, existing_groups, cfg).map(|outcome| outcome.suggestions)
+}
+
+/// Run the configured grouping engine and preserve whether a remote failure
+/// forced the local fallback.
+pub fn suggest_with_status(
+    engine: GroupingEngine,
+    inputs: &[GroupingInput],
+    existing_groups: &[String],
+    cfg: &crate::config::GroupingConfig,
+) -> Result<GroupingOutcome, String> {
     let language = cfg.language.as_str();
     let timeout_secs = cfg.timeout_secs;
     // Zero when the user opts out of reusing existing groups, so every
@@ -145,7 +182,10 @@ pub fn suggest(
     };
 
     if inputs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(GroupingOutcome {
+            suggestions: Vec::new(),
+            remote_fallback: false,
+        });
     }
 
     let items: Vec<(String, String)> = inputs
@@ -161,7 +201,10 @@ pub fn suggest(
     ));
 
     match engine {
-        GroupingEngine::Local => Ok(local_suggestions(&clusters, inputs)),
+        GroupingEngine::Local => Ok(GroupingOutcome {
+            suggestions: local_suggestions(&clusters, inputs),
+            remote_fallback: false,
+        }),
         GroupingEngine::Acp => {
             // Handled by the legacy path in src/acp.rs; not reachable here.
             Err("acp engine is dispatched separately".to_string())
@@ -195,7 +238,10 @@ pub fn suggest(
 
             if reps.is_empty() {
                 crate::log::info("Remote grouping skipped: nothing ungrouped to classify");
-                return Ok(Vec::new());
+                return Ok(GroupingOutcome {
+                    suggestions: Vec::new(),
+                    remote_fallback: false,
+                });
             }
             let reps_only = reps.clone();
 
@@ -234,22 +280,15 @@ pub fn suggest(
             ));
 
             // The service intermittently answers 200 with an entirely empty
-            // body for some payload shapes. Rather than chase an inferred
-            // contract, try the full payload, then retry with candidates only
-            // (a shape that reliably works), then fall back to local. The user
-            // must never end up with nothing.
+            // body for some payload shapes. remote::suggest classifies that as
+            // an error, so retry with candidates only before falling back.
+            // A valid response containing zero groups is a successful result,
+            // not an outage.
             let attempt = |payload: &[remote::RemoteInput], label: &str| {
-                match remote::suggest(payload, existing_groups, language, timeout_secs) {
-                    Ok(s) if !s.is_empty() => Some(s),
-                    Ok(_) => {
-                        crate::log::info(&format!("Remote grouping returned no groups ({label})"));
-                        None
-                    }
-                    Err(e) => {
-                        crate::log::warn(&format!("Remote grouping failed ({label}): {e}"));
-                        None
-                    }
-                }
+                accept_remote_result(
+                    remote::suggest(payload, existing_groups, language, timeout_secs),
+                    label,
+                )
             };
 
             let label = if placeholder_count > 0 {
@@ -277,15 +316,21 @@ pub fn suggest(
                         .filter(|i| is_anchor(i))
                         .map(|i| i.key.as_str())
                         .collect();
-                    Ok(expanded
-                        .into_iter()
-                        .filter(|s| !s.session.starts_with("__group_placeholder_"))
-                        .filter(|s| !anchors.contains(s.session.as_str()))
-                        .collect())
+                    Ok(GroupingOutcome {
+                        suggestions: expanded
+                            .into_iter()
+                            .filter(|s| !s.session.starts_with("__group_placeholder_"))
+                            .filter(|s| !anchors.contains(s.session.as_str()))
+                            .collect(),
+                        remote_fallback: false,
+                    })
                 }
                 None => {
                     crate::log::info("Remote grouping produced nothing — using local engine");
-                    Ok(local_suggestions(&clusters, inputs))
+                    Ok(GroupingOutcome {
+                        suggestions: local_suggestions(&clusters, inputs),
+                        remote_fallback: true,
+                    })
                 }
             }
         }
@@ -506,10 +551,45 @@ mod tests {
             input_in("p:2", "benchmark prompt files run", None),
         ];
         // timeout_secs = 0 → the HTTP attempts fail immediately.
-        let out = suggest(GroupingEngine::Remote, &inp, &[], &test_cfg(0)).unwrap();
-        assert_eq!(out.len(), 2, "must fall back to local clustering");
-        assert_eq!(out[0].group, out[1].group);
-        assert!(out[0].reason.starts_with("Local:"));
+        let outcome =
+            suggest_with_status(GroupingEngine::Remote, &inp, &[], &test_cfg(0)).unwrap();
+        assert_eq!(
+            outcome.suggestions.len(),
+            2,
+            "must fall back to local clustering"
+        );
+        assert_eq!(outcome.suggestions[0].group, outcome.suggestions[1].group);
+        assert!(outcome.suggestions[0].reason.starts_with("Local:"));
+        assert!(
+            outcome.remote_fallback,
+            "the UI must be told that the online API failed"
+        );
+    }
+
+    #[test]
+    fn local_engine_never_reports_remote_failure() {
+        let inp = vec![
+            input_in("p:1", "benchmark prompt files run", None),
+            input_in("p:2", "benchmark prompt files run", None),
+        ];
+        let outcome =
+            suggest_with_status(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+        assert!(!outcome.remote_fallback);
+    }
+
+    #[test]
+    fn successful_empty_remote_result_is_not_a_failure() {
+        let result = accept_remote_result(Ok(Vec::new()), "test");
+        assert!(
+            result.is_some(),
+            "a valid response with zero groups must not trigger local fallback"
+        );
+    }
+
+    #[test]
+    fn remote_error_requests_local_fallback() {
+        let result = accept_remote_result(Err("offline".to_string()), "test");
+        assert!(result.is_none());
     }
 
     /// Existing group names are offered to the service as lightweight
