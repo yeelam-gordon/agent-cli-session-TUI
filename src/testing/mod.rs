@@ -2,6 +2,37 @@ pub mod scenarios;
 
 use std::time::Duration;
 
+use crate::config::ProviderConfig;
+use crate::provider::config_driven::ConfigDrivenProvider;
+
+// ───────────────────────────────────────────────────────────────────────────
+// Provider construction for integration tests
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Build the provider for `key` from the crate's shipped `providers/<key>.yaml`.
+///
+/// The hand-written per-provider modules (`provider::copilot::CopilotProvider`
+/// and friends) were replaced by the YAML-driven engine, which left every
+/// `tests/*_lifecycle_test.rs` importing types that no longer exist. CI only
+/// runs `cargo test --lib`, so that breakage went unnoticed — plain
+/// `cargo test` failed to compile. Tests now go through this helper so a
+/// future provider-loading change breaks in exactly one place.
+///
+/// Resolves against `CARGO_MANIFEST_DIR` so it works regardless of the
+/// test binary's location or the current working directory.
+pub fn load_provider(key: &str, cfg: &ProviderConfig) -> ConfigDrivenProvider {
+    let yaml = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("providers")
+        .join(format!("{key}.yaml"));
+    assert!(
+        yaml.exists(),
+        "providers/{key}.yaml not found at {yaml:?} — provider definitions ship \
+         with the crate and are required by the lifecycle tests"
+    );
+    ConfigDrivenProvider::load_from_yaml(&yaml, cfg)
+        .unwrap_or_else(|e| panic!("failed to load providers/{key}.yaml: {e}"))
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Common test runner — shared by all provider lifecycle tests
 // ───────────────────────────────────────────────────────────────────────────

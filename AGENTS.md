@@ -49,13 +49,8 @@ agent-session-tui/
 │   │   └── win.rs          # Windows UI Automation: find & focus WT tabs via COM
 │   ├── provider/
 │   │   ├── mod.rs          # Provider trait + ProviderRegistry + default state inference
-│   │   ├── config_driven/  # YAML-backed provider engine — most providers use this
-│   │   ├── copilot/mod.rs  # Copilot CLI plugin
-│   │   ├── claude/mod.rs   # Claude Code plugin
-│   │   ├── codex/mod.rs    # Codex CLI plugin
-│   │   ├── qwen/mod.rs     # Qwen CLI plugin
-│   │   ├── gemini/mod.rs   # Gemini CLI plugin
-│   │   └── kimi/mod.rs     # Kimi plugin
+│   │   ├── config_driven/  # YAML-backed provider engine — ALL local providers use this
+│   │   └── remote_json.rs  # Remote providers: one-shot (--dump-json) and streaming
 │   ├── supervisor/mod.rs   # Background tokio task: parallel scan, reconcile, launch, archive
 │   ├── testing/
 │   │   ├── mod.rs          # TestRunner (shared by all provider tests)
@@ -153,20 +148,25 @@ cargo test --lib claude                               # anything with "claude" i
 cargo test --lib <filter> -- --nocapture
 ```
 
-Tests use the shared framework in `src/testing/`. Each test file is a thin wrapper that creates its provider and calls shared scenarios. Provider scanner tests (state detection with fixture JSONL) are in each provider's `mod.rs` under `#[cfg(test)]`.
+Tests use the shared framework in `src/testing/`. Each `tests/*_lifecycle_test.rs` is a thin wrapper that builds its provider via `testing::load_provider("<key>", pc)` (which loads `providers/<key>.yaml`) and calls shared scenarios. They are compiled but **not run** on CI — they need real session data. Provider scanner tests (state detection with fixture JSONL) live in `src/provider/config_driven/mod.rs` under `#[cfg(test)]`.
 
 ## How to Add a New Provider
 
 **Detailed guide**: [`.github/instructions/plugin.instructions.md`](.github/instructions/plugin.instructions.md)
 
-Quick summary:
-1. Create `src/provider/<name>/mod.rs` implementing the `Provider` trait
-2. Add match arm in `src/main.rs::create_provider()`
-3. Add `pub mod <name>;` in `src/provider/mod.rs`
-4. Add `[providers.<name>]` section in `config.toml`
-5. Create `tests/<name>_lifecycle_test.rs` using the shared test framework
-6. Add unit tests for state detection (waiting vs busy) in your provider's `mod.rs`
-7. Build and run: `cargo test --test <name>_lifecycle_test -- --nocapture`
+Quick summary — providers are **YAML, not Rust**. You should not need to write
+any Rust to add one:
+1. Create `providers/<name>.yaml` describing discovery, extraction and state rules
+2. Add a `[providers.<name>]` section in `config.toml` (command, resume flag, state_dir)
+3. Add an end-to-end unit test in `src/provider/config_driven/mod.rs` (see
+   `copilot_yaml_end_to_end` and friends) covering discovery + state detection
+4. Optionally add `tests/<name>_lifecycle_test.rs` — copy an existing one; they
+   all go through `testing::load_provider("<name>", pc)`
+5. Run: `cargo test --lib provider::config_driven::tests` and, for the
+   integration test, `cargo test --test <name>_lifecycle_test -- --nocapture`
+
+`src/main.rs::create_provider()` resolves `providers/<key>.yaml` automatically —
+there is no match arm to edit.
 
 ## Key Design Decisions
 

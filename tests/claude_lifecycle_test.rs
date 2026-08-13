@@ -7,8 +7,7 @@
 //! Args: --scenario discover|launch|kill|graceful|all (default: all)
 
 use agent_session_tui::config::AppConfig;
-use agent_session_tui::provider::claude::ClaudeProvider;
-use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::{load_provider, scenarios};
 use agent_session_tui::testing::TestRunner;
 
 #[test]
@@ -31,7 +30,7 @@ fn claude_lifecycle() {
         .providers
         .get("claude")
         .expect("'claude' not in config");
-    let provider = ClaudeProvider::new(pc);
+    let provider = load_provider("claude", pc);
     let mut runner = TestRunner::new("Claude");
 
     match scenario {

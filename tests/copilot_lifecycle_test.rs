@@ -7,8 +7,7 @@
 //! Args: --scenario discover|launch|kill|graceful|all (default: all)
 
 use agent_session_tui::config::AppConfig;
-use agent_session_tui::provider::copilot::CopilotProvider;
-use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::{load_provider, scenarios};
 use agent_session_tui::testing::TestRunner;
 
 #[test]
@@ -31,7 +30,7 @@ fn copilot_lifecycle() {
         .providers
         .get("copilot")
         .expect("'copilot' not in config");
-    let provider = CopilotProvider::new(pc);
+    let provider = load_provider("copilot", pc);
     let mut runner = TestRunner::new("Copilot");
 
     match scenario {

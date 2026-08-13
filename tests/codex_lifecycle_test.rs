@@ -7,8 +7,7 @@
 //! Args: --scenario discover|launch|kill|graceful|all (default: all)
 
 use agent_session_tui::config::AppConfig;
-use agent_session_tui::provider::codex::CodexProvider;
-use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::{load_provider, scenarios};
 use agent_session_tui::testing::TestRunner;
 
 #[test]
@@ -33,7 +32,7 @@ fn codex_lifecycle() {
         .cloned()
         .or_else(|| AppConfig::default().providers.get("codex").cloned())
         .expect("'codex' not in config or defaults");
-    let provider = CodexProvider::new(&pc);
+    let provider = load_provider("codex", &pc);
     let mut runner = TestRunner::new("Codex");
 
     match scenario {

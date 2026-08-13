@@ -1,6 +1,5 @@
 use agent_session_tui::config::AppConfig;
-use agent_session_tui::provider::gemini::GeminiProvider;
-use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::{load_provider, scenarios};
 use agent_session_tui::testing::TestRunner;
 
 #[test]
@@ -11,7 +10,7 @@ fn gemini_lifecycle() {
         .get("gemini")
         .expect("'gemini' not in config");
 
-    let provider = GeminiProvider::new(pc);
+    let provider = load_provider("gemini", pc);
     let mut runner = TestRunner::new("Gemini");
 
     // 1. Static Discovery (Offline)

@@ -1,6 +1,5 @@
 use agent_session_tui::config::ProviderConfig;
-use agent_session_tui::provider::qwen::QwenProvider;
-use agent_session_tui::testing::scenarios;
+use agent_session_tui::testing::{load_provider, scenarios};
 use agent_session_tui::testing::TestRunner;
 
 #[test]
@@ -23,7 +22,7 @@ fn qwen_lifecycle() {
         remote_list_cmd: None,
         remote_stream_cmd: None,
     };
-    let provider = QwenProvider::new(&pc);
+    let provider = load_provider("qwen", &pc);
 
     let mut runner = TestRunner::new("Qwen CLI");
 

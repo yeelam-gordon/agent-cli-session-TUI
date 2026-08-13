@@ -246,15 +246,19 @@ Providers share structural patterns (discovery, process matching, state inferenc
 
 ## Existing Providers as Reference
 
-| Provider | File | Data Sources |
-|----------|------|-------------|
-| Copilot CLI | `src/provider/copilot/mod.rs` | `workspace.yaml`, `events.jsonl`, `inuse.<pid>.lock` files, `plan.md` |
-| Claude Code | `src/provider/claude/mod.rs` | `~/.claude/projects/<encoded-path>/<session-id>.jsonl` |
-| Codex CLI | `src/provider/codex/mod.rs` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
-| Qwen CLI | `src/provider/qwen/mod.rs` | `~/.qwen/projects/<encoded-path>/chats/<session-id>.jsonl` |
-| Gemini CLI | `src/provider/gemini/mod.rs` | `~/.gemini/tmp/<project>/chats/session-*.jsonl` + subdirs |
+| Provider | Definition | Data Sources |
+|----------|-----------|-------------|
+| Copilot CLI | `providers/copilot.yaml` | `workspace.yaml`, `events.jsonl`, `inuse.<pid>.lock` files, `plan.md` |
+| Claude Code | `providers/claude.yaml` | `~/.claude/projects/<encoded-path>/<session-id>.jsonl` |
+| Codex CLI | `providers/codex.yaml` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Qwen CLI | `providers/qwen.yaml` | `~/.qwen/projects/<encoded-path>/chats/<session-id>.jsonl` |
+| Gemini CLI | `providers/gemini.yaml` | `~/.gemini/tmp/<project>/chats/session-*.jsonl` + subdirs |
+| Kimi | `providers/kimi.yaml` | Kimi CLI session state |
 
-Study these for patterns on summary extraction, state inference, and edge case handling.
+Every provider is now a YAML definition interpreted by
+`src/provider/config_driven/`. The hand-written `src/provider/<name>/mod.rs`
+modules no longer exist — study the YAML files plus the engine for patterns on
+summary extraction, state inference, and edge case handling.
 
 ## Response Extraction
 

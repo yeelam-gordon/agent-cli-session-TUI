@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v6
       with:
         python-version: '3.11'
     - name: Generate per-OS configs
@@ -58,6 +58,12 @@ jobs:
       # Only run lib tests (unit tests in src/).
       # Integration tests in tests/ need real session data and are skipped on CI.
       run: cargo test --lib --verbose
+
+    - name: Compile integration tests
+      # Integration tests are never RUN on CI (they need real session data), but
+      # they must still COMPILE. Without this they silently rotted against the
+      # provider refactor and plain `cargo test` failed for everyone locally.
+      run: cargo test --no-run --verbose
 
     - name: Clippy (semantic plugin)
       working-directory: semantic-plugin
