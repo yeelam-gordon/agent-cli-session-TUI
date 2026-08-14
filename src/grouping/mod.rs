@@ -201,7 +201,7 @@ pub fn suggest_with_status(
     ));
 
     match engine {
-        GroupingEngine::Local => Ok(GroupingOutcome {
+        GroupingEngine::WordMatch => Ok(GroupingOutcome {
             suggestions: local_suggestions(&clusters, inputs),
             remote_fallback: false,
         }),
@@ -404,7 +404,7 @@ mod tests {
             ("p:2", "Read the complete benchmark prompt from prompt-files"),
             ("p:3", "Plan quarterly budget review meeting"),
         ]);
-        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+        let out = suggest(GroupingEngine::WordMatch, &inp, &[], &test_cfg(5)).unwrap();
         // The two duplicates get a group; the lone outlier does not.
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].group, out[1].group);
@@ -415,13 +415,13 @@ mod tests {
     #[test]
     fn local_engine_ignores_singletons() {
         let inp = inputs(&[("p:1", "Totally unique work item"), ("p:2", "Another one")]);
-        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+        let out = suggest(GroupingEngine::WordMatch, &inp, &[], &test_cfg(5)).unwrap();
         assert!(out.is_empty());
     }
 
     #[test]
     fn empty_input_returns_empty_without_work() {
-        let out = suggest(GroupingEngine::Local, &[], &[], &test_cfg(5)).unwrap();
+        let out = suggest(GroupingEngine::WordMatch, &[], &[], &test_cfg(5)).unwrap();
         assert!(out.is_empty());
     }
 
@@ -494,7 +494,7 @@ mod tests {
             input_in("p:anchor", "benchmark prompt files run", Some("Rust Tooling")),
             input_in("p:new", "benchmark prompt files run", None),
         ];
-        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+        let out = suggest(GroupingEngine::WordMatch, &inp, &[], &test_cfg(5)).unwrap();
         assert_eq!(out.len(), 1, "anchor itself must not be re-suggested");
         assert_eq!(out[0].session, "p:new");
         assert_eq!(out[0].group, "Rust Tooling");
@@ -509,7 +509,7 @@ mod tests {
             input_in("p:anchor", "authentication token refresh logic", Some("Auth")),
             input_in("p:new", "authentication token refresh logic", None),
         ];
-        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+        let out = suggest(GroupingEngine::WordMatch, &inp, &[], &test_cfg(5)).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].group, "Auth");
     }
@@ -520,7 +520,7 @@ mod tests {
             input_in("p:a1", "same words here now", Some("G")),
             input_in("p:a2", "same words here now", Some("G")),
         ];
-        let out = suggest(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+        let out = suggest(GroupingEngine::WordMatch, &inp, &[], &test_cfg(5)).unwrap();
         assert!(out.is_empty(), "all inputs were already grouped");
     }
 
@@ -573,7 +573,7 @@ mod tests {
             input_in("p:2", "benchmark prompt files run", None),
         ];
         let outcome =
-            suggest_with_status(GroupingEngine::Local, &inp, &[], &test_cfg(5)).unwrap();
+            suggest_with_status(GroupingEngine::WordMatch, &inp, &[], &test_cfg(5)).unwrap();
         assert!(!outcome.remote_fallback);
     }
 

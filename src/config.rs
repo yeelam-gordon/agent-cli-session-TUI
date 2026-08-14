@@ -186,10 +186,16 @@ pub enum GroupingEngine {
     /// what is transmitted and the stability caveats.
     #[default]
     Remote,
-    /// Word-overlap matching on titles. No network, ~0.2s, keyword-derived
-    /// names. Not a local model. Also the automatic fallback whenever `Remote`
-    /// fails.
-    Local,
+    /// Word-overlap matching on titles — **not a local AI model**. It counts
+    /// how many words two session titles share and groups them if more than
+    /// half overlap, naming each group after its most common words (e.g.
+    /// `benchmark-prompt-files`). No network, no model, ~0.2s. Also the
+    /// automatic fallback whenever `Remote` fails.
+    ///
+    /// Accepts `"local"` as an alias — that was the original name, and it
+    /// repeatedly read as "runs a local model", which it does not.
+    #[serde(alias = "local")]
+    WordMatch,
     /// Legacy: spawn the configured CLI (`[acp]`) as a one-shot subprocess.
     Acp,
 }
@@ -633,13 +639,13 @@ mod tests {
     fn local_engine_can_be_selected_explicitly() {
         let cfg: AppConfig =
             toml::from_str("[grouping]\nengine = \"local\"\n").expect("parse");
-        assert_eq!(cfg.grouping.engine, GroupingEngine::Local);
+        assert_eq!(cfg.grouping.engine, GroupingEngine::WordMatch);
     }
 
     #[test]
     fn grouping_engine_parses_each_variant() {
         for (s, want) in [
-            ("local", GroupingEngine::Local),
+            ("wordmatch", GroupingEngine::WordMatch),
             ("remote", GroupingEngine::Remote),
             ("acp", GroupingEngine::Acp),
         ] {
@@ -647,6 +653,27 @@ mod tests {
                 toml::from_str(&format!("[grouping]\nengine = \"{s}\"\n")).expect("parse");
             assert_eq!(cfg.grouping.engine, want, "engine = {s}");
         }
+    }
+
+    /// `local` was the original name for the word-overlap engine. It read as
+    /// "runs a local model" — which it does not — so the canonical name is now
+    /// `wordmatch`. Existing configs must keep working.
+    #[test]
+    fn legacy_local_engine_name_still_parses() {
+        let cfg: AppConfig =
+            toml::from_str("[grouping]\nengine = \"local\"\n").expect("legacy name must parse");
+        assert_eq!(cfg.grouping.engine, GroupingEngine::WordMatch);
+    }
+
+    /// The canonical serialized form is `wordmatch`, not `local`.
+    #[test]
+    fn wordmatch_serializes_under_its_new_name() {
+        let cfg = GroupingConfig {
+            engine: GroupingEngine::WordMatch,
+            ..Default::default()
+        };
+        let out = toml::to_string(&cfg).expect("serialize");
+        assert!(out.contains("wordmatch"), "expected wordmatch in: {out}");
     }
 
     #[test]

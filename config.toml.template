@@ -44,7 +44,7 @@ log_max_lines = 500
 #                      Nothing to install or authenticate. See the note below on
 #                      what is sent.
 #
-#   engine = "local"   No network. NOT a local AI model — it just compares how
+#   engine = "wordmatch" No network. NOT an AI model of any kind — it just compares how
 #                      many words two titles share, and names each group after
 #                      its most common words (e.g. "benchmark-prompt-files"), so
 #                      expect to rename some. ~0.2s. Also the automatic fallback
@@ -73,7 +73,7 @@ log_max_lines = 500
 # microsoft-edge-security-endpoints, under "Tab groups"), but only as a
 # firewall entry: there is no published request/response contract, versioning
 # guarantee, or terms covering third-party callers. Titles and folder paths do
-# leave your machine. If that is not acceptable, set engine = "local".
+# leave your machine. If that is not acceptable, set engine = "wordmatch".
 
 # ─── AI Auto-Grouping (ACP / Agent Client Protocol) ───
 # Only used when `engine = "acp"` above. Lets the TUI ask an AI agent to

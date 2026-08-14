@@ -181,7 +181,7 @@ there is no match arm to edit.
 | **Parallel provider scans** | All providers scan concurrently via `std::thread::scope` for fast refresh |
 | **Provider trait** | Each CLI is a plugin. Discovery, state inference, and launch are provider-specific. Common test scenarios validate any provider. |
 | **File-based logging** | `%TEMP%/agent-session-tui.log`. Panics are logged with file:line before terminal restore. |
-| **Remote-first grouping** | `[grouping] engine` defaults to `remote`. It sends session titles + cwd (as `file:///` URIs) for one representative per local cluster (measured: 40 sessions → 8 entries), never summaries or file contents, and falls back to `local` on any failure. `local` is word-overlap matching, **not** a local model. |
+| **Remote-first grouping** | `[grouping] engine` defaults to `remote`. It sends session titles + cwd (as `file:///` URIs) for one representative per local cluster (measured: 40 sessions → 8 entries), never summaries or file contents, and falls back to `wordmatch` on any failure. `wordmatch` is word-overlap matching, **not** a model of any kind (it was called `local`, which misread as "local model"; that name still parses as an alias). |
 | **Subprocess timeouts must kill** | `tokio::time::timeout` only drops the future; it cannot reap an OS process. `acp::wait_with_timeout` polls `try_wait` and calls `child.kill()` at the limit. Any future subprocess work must do the same. |
 
 ## Common Pitfalls

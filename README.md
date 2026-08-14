@@ -212,8 +212,7 @@ hosted tab auto-grouping service, which returns natural group names like
 "System Maintenance". About 2 seconds for 30 sessions. Nothing to install or
 authenticate.
 
-**`local`** — no network. This is *not* a local AI model: it simply compares how
-many words two titles share, and names each group after its most common words.
+**`wordmatch`** — no network, and **not an AI model of any kind**. It counts how many words two session titles share, groups them if more than half overlap, and names each group after its most common words.
 That produces blunt names like `benchmark-prompt-files`, so expect to rename
 some with `e`. It runs in ~0.2s and is also the automatic fallback whenever
 `remote` fails.
@@ -225,7 +224,7 @@ A run exceeding `timeout_secs` is **terminated**, not just abandoned.
 
 ```toml
 [grouping]
-engine = "remote"     # "remote" | "local" | "acp"
+engine = "remote"     # "remote" | "wordmatch" | "acp"
 language = "en-US"    # language for generated group names
 timeout_secs = 20     # remote call timeout
 ```
@@ -238,7 +237,7 @@ timeout_secs = 20     # remote call timeout
   measurably improves results.
 - **Never sent:** session summaries, file contents, chat transcripts.
 - **On any failure** — non-2xx, timeout, schema change — it falls back to
-  `local` and shows a warning. To retry the online service, use `Shift+Tab` to
+  `wordmatch` and shows a warning. To retry the online service, use `Shift+Tab` to
   enter the Grouped view, then press `s`. If a manual run fails while its
   suggestion review is open, press `Esc`, then `s`. Grouping never breaks.
 
@@ -248,7 +247,7 @@ timeout_secs = 20     # remote call timeout
 > request/response contract, versioning guarantee, or terms covering
 > third-party callers, and the request shape used here was determined by
 > probing. Titles and folder paths do leave your machine. If that isn't
-> acceptable for your work, set `engine = "local"`.
+> acceptable for your work, set `engine = "wordmatch"`.
 
 ### Reusing the groups you already have
 
