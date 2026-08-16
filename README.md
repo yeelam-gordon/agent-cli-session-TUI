@@ -195,8 +195,10 @@ The semantic plugin lives in `semantic-plugin/`. See [`CONTRIBUTING.md` § Seman
 
 ## AI Auto-Grouping
 
-Suggests thematic groups for your ungrouped sessions. Runs automatically; press
-`s` in the Grouped view to run on demand. Suggestions appear as a dim
+Suggests thematic groups for your ungrouped sessions. It runs **once**, after
+the initial full discovery completes, so the top-30 batch is selected from the
+complete session list rather than the fast first page. Press `s` in the Grouped
+view to run another batch on demand. Suggestions appear as a dim
 `· ⟨group⟩` shadow under the session row — `y` accepts, `n` dismisses, `e` edits
 the name first.
 

@@ -22,6 +22,12 @@ pub enum SupervisorEvent {
         active: Vec<Session>,
         hidden: Vec<Session>,
     },
+    /// Fired once, after every provider has completed phase-2 full discovery
+    /// and all resulting `SessionsUpdated` events have been queued.
+    ///
+    /// Auto-grouping uses this instead of the phase-1 "first page ready"
+    /// signal, so its single top-30 batch is selected from the complete store.
+    InitialDiscoveryComplete,
     /// Fired synchronously after `handle_archive` persists the archive record
     /// to disk. The UI uses this as the authoritative signal to drain its
     /// `pending_archives` list. Clearing pending_archives based on scan
@@ -482,6 +488,7 @@ impl Supervisor {
             }
         });
         crate::log::info(&format!("Phase 2 complete in {:?}", phase2_start.elapsed()));
+        let _ = event_tx.send(SupervisorEvent::InitialDiscoveryComplete);
         Ok(())
     }
 

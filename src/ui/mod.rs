@@ -1155,11 +1155,6 @@ impl App {
                             self.initial_load_complete = true;
                         }
 
-                        // Kick the auto AI grouping run once the first full
-                        // discovery is in. Idempotent — `maybe_kick_auto_suggest`
-                        // self-gates on `auto_suggest_kicked`.
-                        self.maybe_kick_auto_suggest(&cmd_tx);
-
                         // Always accumulate sessions so they're ready the moment
                         // initial load completes. But we gate *rendering* of the
                         // list/selection/detail on initial_load_complete to avoid
@@ -1429,6 +1424,13 @@ impl App {
                         // data_changed-guarded spawn above is the only one we need.
                         // This one fired on every SupervisorEvent and burned
                         // ~1% idle CPU spawning redundant threads.)
+                    }
+                    SupervisorEvent::InitialDiscoveryComplete => {
+                        crate::log::info(&format!(
+                            "Initial full discovery complete: {} active sessions; starting auto-suggest",
+                            self.sessions.len()
+                        ));
+                        self.maybe_kick_auto_suggest(&cmd_tx);
                     }
                     SupervisorEvent::ArchiveConfirmed {
                         provider_key,
@@ -4906,6 +4908,43 @@ mod ui_invariant_tests {
             "auto_suggest must be gated behind is_acp — an unconditional \
              `if !self.acp_config.auto_suggest` check stops the default \
              engine from ever auto-running."
+        );
+    }
+
+    /// Regression: discovery is phased, and auto-suggest originally fired from
+    /// the first page (20 sessions per provider). On a real 2194-session store
+    /// it saw 7 candidates and ignored ~2000 sessions. A temporary fix ran
+    /// twice (first page + full list), but duplicate runs are confusing.
+    ///
+    /// The final contract is one run, triggered only by the supervisor's
+    /// explicit phase-2 completion event.
+    #[test]
+    fn auto_suggest_runs_once_after_full_discovery() {
+        let src = code_section();
+        assert!(
+            src.contains("SupervisorEvent::InitialDiscoveryComplete =>"),
+            "the UI must trigger auto-suggest from the full-discovery event"
+        );
+        assert!(
+            src.contains("if self.auto_suggest_kicked {"),
+            "auto-suggest must remain a one-shot operation"
+        );
+        let call_count = src.matches("self.maybe_kick_auto_suggest(&cmd_tx);").count();
+        assert!(
+            call_count == 1,
+            "auto-suggest must have exactly one event-loop trigger, found {call_count}"
+        );
+
+        let supervisor = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/supervisor/mod.rs"
+        ))
+        .expect("should read supervisor/mod.rs");
+        assert!(
+            supervisor.contains(
+                "event_tx.send(SupervisorEvent::InitialDiscoveryComplete)"
+            ),
+            "the supervisor must emit completion after phase-2 discovery"
         );
     }
 
