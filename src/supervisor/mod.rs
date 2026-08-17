@@ -770,10 +770,18 @@ fn expand_launch_args(args: &[String], cwd: &str, command: &str) -> Vec<String> 
 }
 
 fn is_wtcli_program(program: &str) -> bool {
-    std::path::Path::new(program)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .is_some_and(|s| s.eq_ignore_ascii_case("wtcli"))
+    // Tests and remote configs can carry Windows paths even when this code is
+    // compiled on Linux. `Path` follows the host separator, so explicitly
+    // accept both slash styles before stripping an optional `.exe`.
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program);
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    stem.eq_ignore_ascii_case("wtcli")
 }
 
 #[cfg(windows)]
