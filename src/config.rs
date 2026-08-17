@@ -121,7 +121,8 @@ pub struct ProviderConfig {
     pub resume_flag: Option<String>,
     #[serde(default)]
     pub startup_dir: Option<PathBuf>,
-    /// Launch method shortcut: "wt" | "pwsh" | "cmd". Ignored if launch_cmd is set.
+    /// Launch method shortcut: "wt" | "wtai" | "pwsh" | "cmd".
+    /// Ignored if `launch_cmd` is set.
     #[serde(default = "default_launch_method")]
     pub launch_method: String,
     /// Custom launcher program (e.g., "wtai", "wt", "tmux"). Overrides launch_method.

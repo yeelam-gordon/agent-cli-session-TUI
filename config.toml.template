@@ -13,8 +13,9 @@ log_max_lines = 500
 # Each provider can configure how sessions are launched in a terminal.
 #
 # Option 1 — shortcut (Windows only, currently):
-#   launch_method  = "wt" | "pwsh" | "cmd"
+#   launch_method  = "wt" | "wtai" | "pwsh" | "cmd"
 #   launch_fallback = "cmd"
+#   "wtai" launches Intelligent Terminal and works from any host terminal.
 #
 # Option 2 — custom command (works cross-platform, takes priority):
 #   launch_cmd  = "gnome-terminal"          # any program on PATH
@@ -22,6 +23,12 @@ log_max_lines = 500
 #     placeholders: {cwd} → working directory, {command} → the agent CLI command
 #   launch_fallback_cmd  = "xterm"           # tried if launch_cmd fails
 #   launch_fallback_args = ["-e", "sh -c 'cd {cwd} && {command}; exec sh'"]
+#
+# `wtcli` is a control client, not a general launcher. It only works when this
+# app itself is already running inside an Intelligent Terminal pane with
+# `WT_COM_CLSID` in its environment. Do not use `launch_cmd = "wtcli"` when
+# launching the TUI from ordinary Windows Terminal; prefer `launch_method =
+# "wtai"` with `launch_fallback = "wt"`.
 #
 # Per-OS defaults shipped in release zips:
 #   Windows → launch_method = "wt"

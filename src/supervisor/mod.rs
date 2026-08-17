@@ -769,8 +769,48 @@ fn expand_launch_args(args: &[String], cwd: &str, command: &str) -> Vec<String> 
         .collect()
 }
 
-/// Try to launch with a program + args. Returns Ok if spawned, Err if program not found.
+fn is_wtcli_program(program: &str) -> bool {
+    std::path::Path::new(program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("wtcli"))
+}
+
+#[cfg(windows)]
+fn validate_wtcli_connection(com_clsid: Option<&std::ffi::OsStr>) -> Result<()> {
+    if com_clsid.is_some_and(|v| !v.is_empty()) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "wtcli requires WT_COM_CLSID from an Intelligent Terminal pane"
+        ))
+    }
+}
+
+fn wait_for_launcher(mut child: std::process::Child, program: &str) -> Result<()> {
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("{program} exited with {status}"))
+    }
+}
+
+/// Try to launch with a program + args.
+///
+/// Most terminal launchers detach after `spawn`, so spawning is sufficient.
+/// `wtcli` is different: it is a short-lived control client whose exit status
+/// says whether the COM request was accepted. It also requires
+/// `WT_COM_CLSID`, which ordinary Windows Terminal panes do not inject.
 fn try_launch(program: &str, args: &[String]) -> Result<()> {
+    #[cfg(windows)]
+    if is_wtcli_program(program) {
+        validate_wtcli_connection(std::env::var_os("WT_COM_CLSID").as_deref())?;
+        let mut command = std::process::Command::new(program);
+        command.args(args);
+        return wait_for_launcher(spawn_launcher(&mut command)?, program);
+    }
+
     let mut command = std::process::Command::new(program);
     command.args(args);
     spawn_launcher(&mut command)?;
@@ -946,7 +986,7 @@ fn launch_with_shortcut(
 
 #[cfg(test)]
 mod launcher_tests {
-    use super::spawn_launcher;
+    use super::{is_wtcli_program, spawn_launcher, wait_for_launcher};
     use std::process::{Command, Stdio};
 
     #[cfg(windows)]
@@ -982,5 +1022,42 @@ mod launcher_tests {
         assert!(child.stdout.is_none());
         assert!(child.stderr.is_none());
         assert!(child.wait().expect("launcher should exit").success());
+    }
+
+    #[test]
+    fn wtcli_program_detection_handles_paths_and_extensions() {
+        assert!(is_wtcli_program("wtcli"));
+        assert!(is_wtcli_program("WTCLI.EXE"));
+        assert!(is_wtcli_program(r"C:\Tools\wtcli.exe"));
+        assert!(!is_wtcli_program("wt"));
+        assert!(!is_wtcli_program("wtai"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wtcli_requires_an_intelligent_terminal_connection() {
+        assert!(super::validate_wtcli_connection(None).is_err());
+        assert!(
+            super::validate_wtcli_connection(Some(std::ffi::OsStr::new(""))).is_err()
+        );
+        assert!(
+            super::validate_wtcli_connection(Some(std::ffi::OsStr::new("{test-clsid}")))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn failed_control_launcher_status_is_an_error() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "exit 7"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            command
+        };
+        let child = spawn_launcher(&mut command).expect("launcher should spawn");
+        assert!(wait_for_launcher(child, "test-launcher").is_err());
     }
 }
