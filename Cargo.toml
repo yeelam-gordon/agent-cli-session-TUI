@@ -1,6 +1,6 @@
 [package]
 name = "agent-session-tui"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Terminal UI for managing AI agent CLI sessions — GitHub Copilot, Claude Code, OpenAI Codex, Qwen, Google Gemini"
 license = "MIT"
