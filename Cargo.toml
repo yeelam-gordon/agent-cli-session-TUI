@@ -33,15 +33,6 @@ unicode-width = "0.2"
 libloading = "0.9.0"
 uuid = { version = "1", default-features = false, features = ["v4", "fast-rng"] }
 
-# HTTP client for the remote grouping engine (src/grouping/remote.rs).
-# `native-tls` deliberately over `rustls`: it uses the OS TLS stack (schannel /
-# Security.framework / openssl). Measured in an isolated probe crate with this
-# same release profile, the HTTP stack cost +445 KB over a serde-only baseline
-# vs +1.26 MB for rustls — and native-tls avoids pulling in `ring`, whose build
-# needs a C toolchain (it fails outright on the windows-gnu toolchain).
-ureq = { version = "3", default-features = false, features = ["native-tls"] }
-native-tls = "0.2"
-
 # Full-text search over session logs (Lucene-like, MIT-licensed)
 tantivy = { version = "0.22", default-features = false, features = ["mmap", "stopwords"] }
 
@@ -54,6 +45,9 @@ agent-client-protocol-tokio = "0.11.1"
 
 # Process info — disable disk/network/component/user, keep only process lookup
 [target.'cfg(windows)'.dependencies]
+# OS-native Schannel keeps the Windows binary smaller than bundled Rustls.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "windows"] }
 windows = { version = "0.62", features = [
     "Win32_UI_Accessibility",
@@ -63,6 +57,17 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Use Security.framework through native-tls on macOS.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux ARM64 release builds cross-compile on an x64 runner. Native TLS would
+# require a target-architecture OpenSSL installation and pkg-config setup;
+# Rustls is self-contained and builds with the installed cross C compiler.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(unix)'.dependencies]
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }

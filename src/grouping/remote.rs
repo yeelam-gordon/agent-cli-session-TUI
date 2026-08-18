@@ -49,6 +49,16 @@ const ENDPOINT: &str =
 /// Stream terminator emitted after the final data line on success.
 const DONE_SENTINEL: &str = r#"["DONE"]"#;
 
+#[cfg(any(windows, target_os = "macos"))]
+fn tls_provider() -> ureq::tls::TlsProvider {
+    ureq::tls::TlsProvider::NativeTls
+}
+
+#[cfg(target_os = "linux")]
+fn tls_provider() -> ureq::tls::TlsProvider {
+    ureq::tls::TlsProvider::Rustls
+}
+
 /// One tab-like item in the request. Field names match the service exactly.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -266,12 +276,12 @@ pub fn suggest(
     ));
 
     let start = std::time::Instant::now();
-    // ureq 3 defaults to the Rustls provider even when only `native-tls` is
-    // compiled in, and panics at request time. Select the provider explicitly.
+    // Select the feature-backed provider explicitly. ureq otherwise defaults
+    // to Rustls even in native-tls-only builds and panics on the first request.
     let agent = ureq::Agent::config_builder()
         .tls_config(
             ureq::tls::TlsConfig::builder()
-                .provider(ureq::tls::TlsProvider::NativeTls)
+                .provider(tls_provider())
                 .build(),
         )
         .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
