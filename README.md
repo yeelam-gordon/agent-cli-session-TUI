@@ -56,7 +56,7 @@ To search Copilot CLI session history—or find an old Claude Code or Codex conv
 ## Pain Points Solved
 
 - **Where is my running agent?** — `Enter` on a 🟡 *Needs input* / 🟢 *Working* session attempts to focus a matching Windows Terminal tab (Windows only)
-- **Too many tabs** — every background session in one view with clear status badges
+- **Too many tabs** — supported retained sessions discovered by the provider definitions in one view with clear status badges (subject to provider formats and discovery filters)
 - **Which needs my input?** — 🟡 *Needs input* vs 🟢 *Working* vs 💤 *Resumable* at a glance
 - **Finding that one session** — `/` to search. Hybrid ranking fuses keyword (BM25) + semantic embeddings + lexical scoring via Reciprocal Rank Fusion, to help with typos, paraphrases, and partial recall; results are not guaranteed and semantic ranking requires the optional plugin. Indexes titles, summaries, compaction summaries, and your own messages
 - **Hundreds of sessions piling up** — `g` to assign to groups; `Shift+Tab` to view by group; optional [AI auto-suggest](#ai-auto-grouping)
