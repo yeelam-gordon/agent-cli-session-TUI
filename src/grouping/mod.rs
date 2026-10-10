@@ -2,17 +2,20 @@
 //!
 //! Three engines, selected by `[grouping] engine` in config.toml:
 //!
-//! | Engine   | Network | Latency | Notes |
-//! |----------|---------|---------|-------|
-//! | `remote` | yes     | ~2s     | **default** — local pre-pass, then the service names the clusters |
-//! | `local`  | none    | ~0.2s   | word-overlap matching; also the fallback when `remote` fails |
-//! | `acp`    | yes     | 30–180s | legacy: spawns the configured CLI |
+//! | Engine      | Network | Notes |
+//! |-------------|---------|-------|
+//! | `remote`    | yes     | **default** — local pre-pass, then the service names the clusters |
+//! | `wordmatch` | none    | word-overlap matching; also the fallback when `remote` fails |
+//! | `acp`       | yes     | legacy: spawns the configured CLI |
+//!
+//! `local` remains a compatibility alias for `wordmatch`. Historical timings
+//! in the README are maintainer reports on private data, not latency guarantees.
 //!
 //! The `remote` engine always runs the local pre-pass first and sends only one
 //! representative per cluster, then expands the answer back over each cluster's
-//! members. That cuts what leaves the machine (measured: 40 sessions → 8
-//! entries) and costs one request instead of one per session. If the remote call
-//! fails for any reason it degrades to the local result rather than erroring.
+//! members. This reduces submitted representatives when sessions cluster;
+//! the amount depends on the history. If the remote call fails, it falls back
+//! to wordmatch results and records the failure for UI warning/status handling.
 
 pub mod local;
 pub mod remote;

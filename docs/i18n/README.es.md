@@ -1,6 +1,8 @@
-# Agent CLI Session TUI — Buscar el historial y retomar conversaciones
+# Agent CLI Session TUI — Buscar en el historial y retomar conversaciones
 
-[English](../../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
+
+[Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
 Un gestor de sesiones de terminal para el historial existente de Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI y Kimi, incluidas conversaciones iniciadas por separado. Hay seis proveedores integrados; admitir otros requiere ampliar sus definiciones, no significa compatibilidad con cualquier CLI.
 
@@ -9,6 +11,8 @@ Un gestor de sesiones de terminal para el historial existente de Copilot CLI, Cl
 Necesitas conversaciones guardadas de al menos un proveedor. Para retomarlas, su CLI debe estar instalado, autenticado y disponible mediante el comando configurado; el directorio de trabajo original debe ser accesible. Usa una terminal interactiva y una versión para tu SO y CPU.
 
 **Aviso antes del primer inicio:** la agrupación `remote`, predeterminada, envía títulos y directorios de trabajo a un servicio alojado y puede ejecutarse automáticamente después de detectar el historial. No hay un contrato público de API para terceros. Para agrupar sin red, edita la tabla existente de `config.toml` antes de iniciar, sin duplicarla:
+
+Para una primera instalación de Core, copia el `config.toml.example` generado como `config.toml` junto al ejecutable. En esa copia, busca `# [grouping]` y `# engine = "remote"`: quita el `#` inicial de ambas líneas y cambia el valor a `"wordmatch"`, como abajo. Deja comentadas las demás opciones. Si ya existe una tabla `[grouping]` activa, modifica su `engine` sin añadir otra tabla. Guarda antes de iniciar o explorar el historial.
 
 ```toml
 [grouping]

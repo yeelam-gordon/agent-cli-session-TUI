@@ -1,6 +1,8 @@
 # Agent CLI Session TUI — Search coding-agent history and resume sessions
 
-[English](README.md) · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [Español](docs/i18n/README.es.md) · [Português (Brasil)](docs/i18n/README.pt-BR.md) · [Français](docs/i18n/README.fr.md) · [Deutsch](docs/i18n/README.de.md)
+[English](README.md) · [简体中文](docs/i18n/README.zh-CN.md) · [繁體中文](docs/i18n/README.zh-TW.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Español](docs/i18n/README.es.md) · [Português (Brasil)](docs/i18n/README.pt-BR.md) · [Français](docs/i18n/README.fr.md)
+
+[Deutsch](docs/i18n/README.de.md) · [Italiano](docs/i18n/README.it.md) · [Русский](docs/i18n/README.ru.md) · [Türkçe](docs/i18n/README.tr.md) · [Tiếng Việt](docs/i18n/README.vi.md) · [Bahasa Indonesia](docs/i18n/README.id.md) · [हिन्दी](docs/i18n/README.hi.md) · [العربية](docs/i18n/README.ar.md)
 
 A **terminal session manager** for existing **Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, and Kimi** conversations. Search history across these six providers, inspect a conversation, and resume it without remembering which CLI you used. On Windows, it can also focus a matching running Windows Terminal tab.
 
@@ -14,6 +16,8 @@ It reads each provider's own history, including independently started conversati
 - Use a release for your OS and CPU in an interactive terminal. Core targets Windows, Linux and macOS, x64/arm64; Semantic availability differs by target. On Windows, install Windows Terminal (`wt`) for the default launcher and native tab focus; `cmd` is the packaged fallback. Linux defaults to `gnome-terminal`; macOS uses `osascript` with Terminal. Change the [launcher configuration](#configuration) if those commands are unavailable. Linux/macOS do not focus existing running tabs.
 - **Privacy warning before first launch:** default `remote` grouping sends session **titles and working directories** to a hosted service when invoked. It can run automatically after initial discovery, not just when you press `s`. The service has no published third-party request/response contract. For **non-network grouping**, add or edit this table in `config.toml` **before starting**:
 
+For a fresh Core install, first copy the **generated** `config.toml.example` to `config.toml` beside the executable. In that copy, find `# [grouping]` and `# engine = "remote"`: remove the leading `#` from **both lines** and change the engine value to `"wordmatch"`, producing the two active lines below. Leave the other commented grouping options unchanged. If you already have an active `[grouping]` table, change its `engine` there instead—do not add a second table. Save the file before launching or scanning any history.
+
 ```toml
 [grouping]
 engine = "wordmatch"
@@ -25,7 +29,7 @@ engine = "wordmatch"
 
 1. Open [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), select a release, and download the **Core** archive for your OS/architecture (`.zip` on Windows, `.tar.gz` on Linux/macOS), not GitHub's source-code archive. Semantic is optional.
 2. Extract the **whole archive** into a writable folder. Keep the binary, `providers/`, `prompts/`, and generated `config.toml.example` together. Copying just the executable loses provider definitions and prompt assets.
-3. Copy `config.toml.example` to `config.toml` beside the executable; do not overwrite an existing configuration. Edit the existing `[grouping]` table to `engine = "wordmatch"` for non-network grouping. Check `state_dir`, `command` and launcher, and disable unused providers with `enabled = false`.
+3. Copy `config.toml.example` to `config.toml` beside the executable; do not overwrite an existing configuration. Activate the two commented grouping lines as described above and set `engine = "wordmatch"` for non-network grouping (or edit your already-active table). Check `state_dir`, `command` and launcher, and disable unused providers with `enabled = false`.
 4. Open a terminal **in the extracted folder**, then start:
 
 ```powershell
@@ -73,8 +77,7 @@ This TUI reads supported retained provider histories, including conversations st
 | **Supported retained histories** | This TUI reads each CLI's own session directory, so supported saved histories can appear regardless of how they were started (subject to provider format and discovery filters) |
 | **Hybrid content search** | BM25 keyword + semantic embeddings + lexical scoring fused via Reciprocal Rank Fusion. Semantic ranking requires the optional plugin; typo/paraphrase matches and exact-match ordering are not guaranteed. Searches titles, summaries, and your own messages mid-transcript |
 | **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
-| **AI-suggested groups** | Optional ACP-driven auto-clustering of ungrouped sessions |
-- **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
+| **Suggested groups** | Group suggestions for ungrouped sessions via configurable engines; remote is the default, wordmatch is non-network and not AI, and ACP is a legacy option. See [grouping privacy](#what-remote-sends). |
 
 ## Beyond Intelligent Terminal
 

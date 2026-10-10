@@ -1,14 +1,18 @@
 # Agent CLI Session TUI — Pesquisar o histórico e retomar sessões
 
-[English](../../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
+
+[Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
 Um gerenciador de sessões de terminal para o histórico existente do Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi, inclusive conversas iniciadas separadamente. São seis provedores integrados; outros exigem novas definições, não há suporte automático a qualquer CLI.
 
 ## Antes de iniciar: requisitos, privacidade e instalação
 
-Tenha conversas salvas de pelo menos um provedor. Para retomá-las, o CLI correspondente precisa estar instalado, autenticado e acessível pelo comando configurado; o diretório de trabalho original deve existir. Use um terminal interativo e a versão adequada ao sistema e à CPU.
+Tenha conversas salvas de pelo menos um provedor. Para retomá-las, o CLI correspondente precisa estar instalado, autenticado e acessível pelo comando configurado; o diretório de trabalho original deve continuar acessível. Use um terminal interativo e a versão adequada ao sistema e à CPU.
 
 **Aviso antes da primeira execução:** o agrupamento padrão `remote` envia títulos e diretórios de trabalho a um serviço hospedado e pode ser acionado automaticamente após a descoberta inicial. Não há contrato público de API para terceiros. Para agrupar sem rede, edite a tabela existente em `config.toml` antes de iniciar, sem duplicá-la:
+
+Na primeira instalação do Core, copie o `config.toml.example` gerado para `config.toml` ao lado do executável. Nessa cópia, encontre `# [grouping]` e `# engine = "remote"`: remova o `#` inicial das duas linhas e altere o valor para `"wordmatch"`, como abaixo. Mantenha as outras opções comentadas. Se já houver uma tabela `[grouping]` ativa, altere o `engine` nela, sem criar outra tabela. Salve antes de iniciar ou ler o histórico.
 
 ```toml
 [grouping]

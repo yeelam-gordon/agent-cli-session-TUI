@@ -30,18 +30,19 @@ pub struct AppConfig {
     pub semantic_index_min_interval_ms: u64,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-    /// ACP (AI) configuration for group suggestions.
+    /// Configuration for the legacy ACP grouping engine.
     ///
-    /// Only `Some(_)` when the user has explicitly written an `[acp]` section
-    /// in their `config.toml`. When `None`, the AI grouping feature is
-    /// completely unavailable: the `s` shortcut is hidden from the menu,
-    /// background auto-suggest is skipped, and no `copilot` process is ever
-    /// spawned. This is an explicit opt-in — defaults alone do not turn the
-    /// feature on.
+    /// Only `Some(_)` when the user explicitly writes an `[acp]` section in
+    /// `config.toml`. When the ACP engine is selected, grouping requires this
+    /// opt-in and a resolvable prompt template; otherwise its `s` shortcut and
+    /// automatic suggestions are unavailable and no ACP subprocess is spawned.
+    /// Remote and wordmatch grouping remain available without this section;
+    /// remote is the default and can send titles and working directories.
     #[serde(default)]
     pub acp: Option<AcpConfig>,
-    /// Grouping engine selection. Absent (the common case) means the
-    /// zero-egress local engine.
+    /// Grouping engine selection. Defaults to the hosted remote engine, which
+    /// can send titles and working directories automatically after initial
+    /// discovery. Select wordmatch before launch for non-network grouping.
     #[serde(default)]
     pub grouping: GroupingConfig,
     /// Shared template for `--remote <box>` mode. When you run the TUI with
@@ -181,17 +182,16 @@ fn default_launch_method() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupingEngine {
-    /// Hosted tab auto-grouping service. The default: it answers a 30-session
-    /// batch in ~2s and produces natural group names. Sends session titles and
-    /// working directories; see `src/grouping/remote.rs` for the full note on
-    /// what is transmitted and the stability caveats.
+    /// Hosted tab auto-grouping service, selected by default. Sends session
+    /// titles and working directories and returns suggested group names;
+    /// see `src/grouping/remote.rs` for transmission and stability caveats.
     #[default]
     Remote,
     /// Word-overlap matching on titles — **not a local AI model**. It counts
     /// how many words two session titles share and groups them if more than
     /// half overlap, naming each group after its most common words (e.g.
-    /// `benchmark-prompt-files`). No network, no model, ~0.2s. Also the
-    /// automatic fallback whenever `Remote` fails.
+    /// `benchmark-prompt-files`). No network or model. Also the automatic
+    /// fallback whenever `Remote` fails.
     ///
     /// Accepts `"local"` as an alias — that was the original name, and it
     /// repeatedly read as "runs a local model", which it does not.
@@ -204,8 +204,9 @@ pub enum GroupingEngine {
 /// Configuration for group suggestions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupingConfig {
-    /// Engine to use. Defaults to `local` — no session data leaves the machine
-    /// unless the user explicitly opts into a remote engine.
+    /// Engine to use. Defaults to the hosted remote engine, which can send
+    /// titles and working directories automatically after initial discovery.
+    /// Select wordmatch before launch for non-network grouping.
     #[serde(default)]
     pub engine: GroupingEngine,
     /// Language tag passed to a remote engine; controls the language generated
@@ -228,9 +229,9 @@ pub struct GroupingConfig {
     /// [`Self::reuse_existing_groups`] is enabled.
     #[serde(default = "default_max_group_anchors")]
     pub max_group_anchors: usize,
-    /// Maximum seconds to wait for a remote grouping call. Far lower than the
-    /// ACP default because the endpoint answers a 30-item batch in ~2s;
-    /// anything slower is a fault, not slow progress.
+    /// Maximum seconds to wait for a remote grouping call. This is a configured
+    /// waiting policy, not evidence that a slower response is faulty.
+    /// Actual latency depends on the service, network and workload.
     #[serde(default = "default_grouping_timeout_secs")]
     pub timeout_secs: u64,
 }
@@ -294,10 +295,10 @@ fn default_acp_command() -> String {
 
 /// Default extra args for the ACP run.
 ///
-/// `--effort low` is the right level for our task: structured JSON pattern-
-/// matching (assigning sessions to thematic groups). Empirically saves ~30%
-/// off run time vs default effort, with no observable quality drop. Users
-/// who want more reasoning can override `extra_args` in config.toml.
+/// Uses `--effort low` for assigning sessions to thematic groups.
+/// Runtime and suggestion quality depend on the CLI, model and workload;
+/// no speedup or unchanged-quality guarantee is implied. Users can override
+/// `extra_args` in config.toml.
 fn default_acp_extra_args() -> Vec<String> {
     vec!["--effort".into(), "low".into()]
 }

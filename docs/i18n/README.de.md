@@ -1,6 +1,8 @@
 # Agent CLI Session TUI — Frühere CLI-Sitzungen durchsuchen und fortsetzen
 
-[English](../../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
+
+[Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
 Ein Terminal-Sitzungsmanager für gespeicherte Gespräche aus Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI und Kimi – auch für unabhängig gestartete Sitzungen. Diese sechs Anbieter sind integriert; weitere erfordern zusätzliche Anbieterdefinitionen. Nicht jede CLI wird automatisch unterstützt.
 
@@ -9,6 +11,8 @@ Ein Terminal-Sitzungsmanager für gespeicherte Gespräche aus Copilot CLI, Claud
 Mindestens ein Anbieter muss gespeicherte Gespräche haben. Zum Fortsetzen muss seine CLI installiert, authentifiziert und über den konfigurierten Befehl erreichbar sein; das ursprüngliche Arbeitsverzeichnis muss zugänglich bleiben. Verwenden Sie ein interaktives Terminal und die passende Version für Betriebssystem und CPU.
 
 **Datenschutz vor dem ersten Start:** Die voreingestellte Gruppierung `remote` sendet Sitzungstitel und Arbeitsverzeichnisse an einen gehosteten Dienst und kann nach der ersten Erkennung automatisch laufen. Es gibt keinen öffentlichen API-Vertrag für Drittanbieter. Für Gruppierung ohne Netzwerk bearbeiten Sie vor dem Start die vorhandene Tabelle in `config.toml`, ohne sie doppelt anzulegen:
+
+Kopieren Sie vor dem ersten Start von Core die generierte Datei `config.toml.example` als `config.toml` neben das Programm. Suchen Sie darin `# [grouping]` und `# engine = "remote"`: Entfernen Sie bei beiden Zeilen das führende `#` und ändern Sie den Wert zu `"wordmatch"`, wie unten gezeigt. Lassen Sie die anderen Optionen auskommentiert. Falls bereits eine aktive `[grouping]`-Tabelle existiert, ändern Sie dort `engine`, ohne eine zweite Tabelle anzulegen. Speichern Sie vor dem Start und dem Einlesen des Verlaufs.
 
 ```toml
 [grouping]

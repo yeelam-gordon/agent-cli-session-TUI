@@ -1,6 +1,8 @@
 # Agent CLI Session TUI — 搜索并恢复 AI 编程助手的历史会话
 
-[English](../../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
+
+[Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
 这个终端会话管理器搜索 Copilot CLI、Claude Code、Codex CLI、Qwen CLI、Gemini CLI 和 Kimi 的现有历史，包括独立启动的对话。内置支持这六个提供程序；其他 CLI 需要扩展定义，不是通用终端多路复用器。
 
@@ -9,6 +11,8 @@
 至少需要一个提供程序的已保存对话。恢复时，相应 CLI 必须已安装、可通过配置的命令运行并已认证，原工作目录必须可访问。使用交互式终端和匹配系统、CPU 的版本。
 
 **首次启动前注意隐私：** 默认 `remote` 分组发送会话标题和工作目录到托管服务，首次发现完成后可能自动调用，不只是按 `s` 时调用。服务没有公开的第三方接口契约。若要不联网分组，请在启动前编辑 `config.toml` 已有的表，不要重复添加：
+
+首次使用 Core 时，先把生成的 `config.toml.example` 复制为程序旁的 `config.toml`。在副本中找到 `# [grouping]` 和 `# engine = "remote"`，去掉这两行开头的 `#`，把值改为 `"wordmatch"`，得到下面两行有效配置。其他分组选项保持注释。若已有启用的 `[grouping]` 配置节，只修改其中的 `engine`，不要再添加同名配置节。保存后才启动程序、扫描历史。
 
 ```toml
 [grouping]

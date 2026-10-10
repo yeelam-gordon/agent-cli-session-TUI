@@ -1,6 +1,8 @@
-# Agent CLI Session TUI — Rechercher l’historique et reprendre les sessions
+# Agent CLI Session TUI — Rechercher dans l’historique et reprendre les sessions
 
-[English](../../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md) · [Deutsch](README.de.md)
+[English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
+
+[Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
 Un gestionnaire de sessions de terminal pour les conversations enregistrées de Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI et Kimi, y compris celles lancées séparément. Six fournisseurs sont intégrés ; les autres nécessitent des définitions supplémentaires, sans prise en charge universelle des CLI.
 
@@ -9,6 +11,8 @@ Un gestionnaire de sessions de terminal pour les conversations enregistrées de 
 Il faut des conversations enregistrées chez au moins un fournisseur. Pour les reprendre, son CLI doit être installé, authentifié et accessible par la commande configurée ; le répertoire de travail d’origine doit rester accessible. Utilisez un terminal interactif et une version adaptée au système et au processeur.
 
 **Avant le premier lancement :** le regroupement par défaut `remote` envoie les titres et les répertoires de travail à un service hébergé et peut démarrer automatiquement après la découverte initiale. Il n’existe pas de contrat public d’API pour les tiers. Pour regrouper sans réseau, modifiez la table existante de `config.toml` avant le lancement, sans la dupliquer :
+
+Pour une première installation de Core, copiez le fichier généré `config.toml.example` en `config.toml` à côté du binaire. Dans cette copie, repérez `# [grouping]` et `# engine = "remote"` : retirez le `#` initial des deux lignes et remplacez la valeur par `"wordmatch"`, comme ci-dessous. Laissez les autres options commentées. Si une table `[grouping]` active existe déjà, modifiez son `engine` sans ajouter une seconde table. Enregistrez avant de lancer le programme ou de lire l’historique.
 
 ```toml
 [grouping]
