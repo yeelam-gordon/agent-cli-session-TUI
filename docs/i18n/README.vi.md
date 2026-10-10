@@ -10,7 +10,7 @@
 
 </details>
 
-Tìm cuộc trò chuyện trong lịch sử nhiều CLI bằng một lần tìm. Tiếp tục cuộc trò chuyện và ngữ cảnh qua CLI gốc đã cài. Chỉ trên Windows, thử chuyển đến tab Windows Terminal đang chạy khớp thay vì mở cửa sổ khác.
+Tìm cuộc trò chuyện trong lịch sử nhiều CLI bằng một lần tìm kiếm. Tiếp tục cuộc trò chuyện và ngữ cảnh qua CLI gốc đã cài. Chỉ trên Windows, thử chuyển đến tab Windows Terminal phù hợp đang chạy thay vì mở cửa sổ khác.
 
 [Xem quy trình](#first-workflow) · [Cài Core](#install-core) · [Công cụ và giới hạn](../../README.md#supported-providers)
 
@@ -70,9 +70,9 @@ Có sáu định nghĩa lịch sử và đường dẫn tiếp tục đã cấu 
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Tiếp tục bằng CLI đã cài và xác thực, với thư mục gốc truy cập được |
+| Resumable (cuộc trò chuyện có thể tiếp tục) | Tiếp tục bằng CLI đã cài và xác thực, với thư mục gốc truy cập được |
 | Running / Waiting / Idle | Chỉ trên Windows, thử đưa tab Windows Terminal đang chạy phù hợp lên trước; nơi khác chuyển thủ công |
-| Archived / Stopped | Tiếp tục bằng CLI đã cài và xác thực, với thư mục gốc truy cập được; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Tiếp tục bằng CLI đã cài và xác thực, với thư mục gốc truy cập được; [giới hạn](../../README.md#supported-providers) |
 
 
 

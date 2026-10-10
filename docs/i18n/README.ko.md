@@ -52,7 +52,7 @@ engine = "wordmatch"
 
 ## 첫 검색과 예상 결과
 
-먼저 제목 일부나 프로젝트 문구를 그대로 검색하세요. Core는 키워드·유사 문자열 검색을 제공하며 의미 기반 바꿔 쓰기 순위에는 선택 플러그인이 필요합니다.
+먼저 제목 일부나 프로젝트 문구를 그대로 검색하세요. Core는 키워드·유사 문자열 검색을 제공하며 의미가 비슷한 검색어의 순위 지정에는 선택 플러그인이 필요합니다.
 
 압축을 푼 폴더의 터미널에서 Windows PowerShell로 실행합니다.
 
@@ -72,7 +72,7 @@ Linux/macOS:
 |---|---|
 | Resumable（이어갈 수 있는 대화） | 설치·인증된 CLI로 재개하며 원래 디렉터리에 접근할 수 있어야 함 |
 | Running / Waiting / Idle | Windows에서만 일치하는 실행 중 Windows Terminal 탭으로 이동 시도, 그 외에는 직접 전환 |
-| Archived / Stopped | 설치·인증된 CLI로 재개하며 원래 디렉터리에 접근할 수 있어야 함; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | 설치·인증된 CLI로 재개하며 원래 디렉터리에 접근할 수 있어야 함; [제한](../../README.md#supported-providers) |
 
 
 

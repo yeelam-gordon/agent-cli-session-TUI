@@ -10,7 +10,7 @@
 
 </details>
 
-Retrouvez la conversation dans les historiques CLI en une recherche. Reprenez son contexte avec le CLI d’origine installé. Sous Windows seulement, tentez de sélectionner l’onglet Windows Terminal correspondant en cours, sans autre fenêtre.
+Cherchez dans les historiques CLI. Reprenez la conversation et son contexte via son CLI installé. Sous Windows, tentez d’activer l’onglet correspondant de Windows Terminal en cours d’exécution, sans ouvrir une autre fenêtre.
 
 [Voir le parcours](#first-workflow) · [Installer Core](#install-core) · [Fournisseurs et limites](../../README.md#supported-providers)
 
@@ -22,7 +22,7 @@ Illustration conceptuelle, pas une capture réelle de l’application. Les libel
 
 - Retrouvez un sujet ou projet : recherchez une expression mémorisée, puis vérifiez le fournisseur, le titre et le répertoire.
 - Reprenez la bonne conversation : `Enter` sur **Resumable** exige un historique conservé, un CLI installé et authentifié et un répertoire d’origine accessible.
-- Retrouvez l’onglet en cours d’exécution sous Windows : tente de sélectionner un onglet correspondant de Windows Terminal, uniquement sous Windows ; ce n’est pas un rattachement universel aux processus. Sous Linux/macOS, basculez manuellement.
+- Retrouvez l’onglet en cours d’exécution sous Windows : tentez de sélectionner un onglet correspondant de Windows Terminal, uniquement sous Windows ; ce n’est pas un rattachement universel aux processus. Sous Linux/macOS, basculez manuellement.
 
 Elle n’a pas besoin d’avoir été lancée depuis ce TUI.
 
@@ -62,9 +62,9 @@ Six définitions d’historique et des chemins de reprise configurés sont fourn
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Reprendre via le CLI installé et authentifié, avec le répertoire d’origine accessible |
+| Resumable (conversation à reprendre) | Reprendre via le CLI installé et authentifié, avec le répertoire d’origine accessible |
 | Running / Waiting / Idle | Uniquement sous Windows, tenter de sélectionner l’onglet en cours d’exécution correspondant de Windows Terminal ; sinon basculer manuellement |
-| Archived / Stopped | Reprendre via le CLI installé et authentifié, avec le répertoire d’origine accessible; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Reprendre via le CLI installé et authentifié, avec le répertoire d’origine accessible; [limites](../../README.md#supported-providers) |
 
 
 

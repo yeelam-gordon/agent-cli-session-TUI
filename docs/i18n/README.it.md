@@ -10,7 +10,7 @@
 
 </details>
 
-Trova conversazioni tra cronologie CLI con una ricerca. Riprendi il contesto con il CLI originale installato. Solo su Windows, prova a selezionare la scheda Windows Terminal corrispondente in esecuzione, senza un’altra finestra.
+Cerca nelle cronologie di più CLI. Riprendi la conversazione con il suo contesto nel CLI originale installato. Solo su Windows, prova a selezionare la scheda Windows Terminal corrispondente già in esecuzione, senza aprire un’altra finestra.
 
 [Vedi il percorso](#first-workflow) · [Installa Core](#install-core) · [Fornitori e limiti](../../README.md#supported-providers)
 
@@ -70,9 +70,9 @@ Sono incluse sei definizioni di cronologia e percorsi di ripresa configurati; le
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Riprendere con CLI installato e autenticato e directory originale accessibile |
+| Resumable (conversazione riprendibile) | Riprendere con CLI installato e autenticato e directory originale accessibile |
 | Running / Waiting / Idle | Solo su Windows tentare di selezionare la scheda in esecuzione corrispondente di Windows Terminal; altrimenti passare manualmente |
-| Archived / Stopped | Riprendere con CLI installato e autenticato e directory originale accessibile; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Riprendere con CLI installato e autenticato e directory originale accessibile; [limiti](../../README.md#supported-providers) |
 
 
 

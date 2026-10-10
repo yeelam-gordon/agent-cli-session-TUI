@@ -10,7 +10,7 @@
 
 </details>
 
-Busca conversaciones entre CLI en una búsqueda. Retoma su contexto con el CLI original instalado. Solo en Windows, intenta enfocar su pestaña Windows Terminal coincidente ya en ejecución, sin abrir otra ventana.
+Busca en historiales de varios CLI de una vez. Retoma la conversación y su contexto con el CLI original instalado. Solo en Windows, intenta enfocar la pestaña correspondiente de Windows Terminal ya en ejecución, sin abrir otra ventana.
 
 [Ver el flujo](#first-workflow) · [Instalar Core](#install-core) · [Proveedores y límites](../../README.md#supported-providers)
 
@@ -33,7 +33,7 @@ No hace falta haberla iniciado en este TUI.
 
 Necesitas conversaciones guardadas de al menos un proveedor. Para retomarlas, su CLI debe estar instalado, autenticado y disponible mediante el comando configurado; el directorio de trabajo original debe ser accesible. Usa una terminal interactiva y una versión para tu SO y CPU.
 
-El lanzador predeterminado es `wt` en Windows (alternativa: `cmd`), `gnome-terminal` en Linux y `osascript` con Terminal en macOS; adapta la configuración si faltan. Core contempla x64/arm64 en los tres SO; la disponibilidad semántica depende del destino y de los archivos publicados. El enfoque nativo de pestañas requiere Windows Terminal y se limita a Windows.
+El lanzador predeterminado es `wt` en Windows (alternativa: `cmd`), `gnome-terminal` en Linux y `osascript` con Terminal en macOS; adapta la configuración si faltan. Core contempla x64/arm64 en los tres SO; la disponibilidad semántica depende del destino y de los archivos publicados. Para intentar seleccionar la pestaña correspondiente se necesita Windows Terminal; esta función solo está disponible en Windows.
 
 En [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), descarga el **archivo Core completo** para tu SO y CPU, no el archivo de código fuente. Extrae todo y conserva el ejecutable, `providers/`, `prompts/` y el `config.toml.example` generado. Comprueba `state_dir`, `command`, el lanzador y la opción de privacidad siguiente. El archivo fuente `config.toml.template` contiene marcadores y no se debe simplemente renombrar.
 
@@ -62,9 +62,9 @@ Se incluyen seis definiciones de historial y rutas de reanudación configuradas;
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Reanudar con CLI instalado y autenticado y directorio original accesible |
+| Resumable (conversación que se puede retomar) | Reanudar con CLI instalado y autenticado y directorio original accesible |
 | Running / Waiting / Idle | Solo en Windows, intentar enfocar la pestaña en ejecución coincidente de Windows Terminal; en otros sistemas, cambiar manualmente |
-| Archived / Stopped | Reanudar con CLI instalado y autenticado y directorio original accesible; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Reanudar con CLI instalado y autenticado y directorio original accesible; [límites](../../README.md#supported-providers) |
 
 
 

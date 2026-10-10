@@ -10,7 +10,7 @@
 
 </details>
 
-Temukan percakapan lintas riwayat CLI dalam satu pencarian. Lanjutkan konteks lewat CLI asal terpasang. Hanya di Windows, coba fokuskan tab Windows Terminal berjalan yang cocok, bukan membuka jendela lain.
+Cari percakapan di riwayat CLI dengan satu pencarian. Lanjutkan percakapan dan konteks lewat CLI asal yang terpasang. Hanya di Windows, coba fokuskan tab Windows Terminal yang cocok dan sedang berjalan, bukan membuka jendela lain.
 
 [Lihat alur](#first-workflow) · [Pasang Core](#install-core) · [Penyedia dan batasan](../../README.md#supported-providers)
 
@@ -70,9 +70,9 @@ Tersedia enam definisi riwayat dan jalur lanjut yang dikonfigurasi; versi CLI as
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Lanjutkan melalui CLI terpasang dan terautentikasi, dengan direktori asal yang dapat diakses |
+| Resumable (percakapan yang dapat dilanjutkan) | Lanjutkan melalui CLI terpasang dan terautentikasi, dengan direktori asal yang dapat diakses |
 | Running / Waiting / Idle | Hanya di Windows, coba fokuskan tab Windows Terminal berjalan yang cocok; lainnya beralih manual |
-| Archived / Stopped | Lanjutkan melalui CLI terpasang dan terautentikasi, dengan direktori asal yang dapat diakses; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Lanjutkan melalui CLI terpasang dan terautentikasi, dengan direktori asal yang dapat diakses; [batasan](../../README.md#supported-providers) |
 
 
 

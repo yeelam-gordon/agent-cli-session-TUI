@@ -64,7 +64,7 @@ engine = "wordmatch"
 |---|---|
 | Resumable（可继续的历史对话） | 由已安装并认证的 CLI 恢复，原目录须可访问 |
 | Running / Waiting / Idle | 仅 Windows 尝试聚焦匹配的正在运行的 Windows Terminal 标签；否则手动切换 |
-| Archived / Stopped | 由已安装并认证的 CLI 恢复，原目录须可访问; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | 由已安装并认证的 CLI 恢复，原目录须可访问; [限制](../../README.md#supported-providers) |
 
 
 

@@ -10,7 +10,7 @@
 
 </details>
 
-CLI をまたぐ履歴から一度の検索で会話を探し、インストール済みの元の CLI で会話と文脈を再開。Windows のみ、別のウィンドウを開く代わりに、一致する実行中の Windows Terminal タブへのフォーカスを試みます。
+CLI をまたぐ履歴から一度の検索で会話を探し、インストール済みの元の CLI で文脈を引き継いで会話を再開。Windows のみ、別のウィンドウを開く代わりに、一致する実行中の Windows Terminal タブへのフォーカスを試みます。
 
 [操作の流れ](#first-workflow) · [Core をインストール](#install-core) · [対応範囲と制限](../../README.md#supported-providers)
 
@@ -64,7 +64,7 @@ engine = "wordmatch"
 |---|---|
 | Resumable（再開可能な会話） | インストールと認証を済ませた CLI で再開。元のディレクトリが必要 |
 | Running / Waiting / Idle | Windows のみ一致する実行中の Windows Terminal タブへのフォーカスを試行。それ以外は手動で切り替え |
-| Archived / Stopped | インストールと認証を済ませた CLI で再開。元のディレクトリが必要; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | インストールと認証を済ませた CLI で再開。元のディレクトリが必要; [制限](../../README.md#supported-providers) |
 
 
 

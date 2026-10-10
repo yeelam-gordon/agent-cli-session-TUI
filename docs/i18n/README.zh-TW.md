@@ -52,7 +52,7 @@ engine = "wordmatch"
 
 ## 找到對話並接續
 
-先搜尋標題中的原詞或專案片語。Core 有關鍵字與模糊搜尋；語意改寫排序需要選用插件。
+先搜尋標題中的原詞或專案片語。Core 有關鍵字與模糊搜尋；語意改寫排序需要選用外掛。
 
 在解壓縮目錄的終端機執行：
 
@@ -72,7 +72,7 @@ Linux/macOS：
 |---|---|
 | Resumable（可接續的歷史對話） | 透過已安裝且完成驗證的 CLI 接續，原目錄須可存取 |
 | Running / Waiting / Idle | 僅 Windows 嘗試聚焦相符的執行中 Windows Terminal 分頁；否則手動切換 |
-| Archived / Stopped | 透過已安裝且完成驗證的 CLI 接續，原目錄須可存取; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | 透過已安裝且完成驗證的 CLI 接續，原目錄須可存取; [限制](../../README.md#supported-providers) |
 
 
 

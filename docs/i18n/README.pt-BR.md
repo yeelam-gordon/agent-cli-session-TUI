@@ -10,7 +10,7 @@
 
 </details>
 
-Encontre conversas entre históricos de CLI em uma busca. Retome a conversa e seu contexto pelo CLI original instalado. Só no Windows, tente focar sua aba correspondente já em execução no Windows Terminal em vez de abrir outra janela.
+Busque conversas nos históricos de vários CLIs de uma vez. Retome a conversa e seu contexto pelo CLI original instalado. Só no Windows, tente focar sua aba correspondente já em execução no Windows Terminal em vez de abrir outra janela.
 
 [Ver o fluxo](#first-workflow) · [Instalar Core](#install-core) · [Provedores e limites](../../README.md#supported-providers)
 
@@ -62,9 +62,9 @@ Há seis definições de histórico e rotas de retomada configuradas; as versõe
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Retomar com CLI instalado e autenticado e diretório original acessível |
+| Resumable (conversa que pode ser retomada) | Retomar com CLI instalado e autenticado e diretório original acessível |
 | Running / Waiting / Idle | Só no Windows, tentar focar a aba em execução correspondente do Windows Terminal; nos demais sistemas, alternar manualmente |
-| Archived / Stopped | Retomar com CLI instalado e autenticado e diretório original acessível; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Retomar com CLI instalado e autenticado e diretório original acessível; [limites](../../README.md#supported-providers) |
 
 
 

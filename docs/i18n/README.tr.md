@@ -29,7 +29,7 @@ Konuşmayı bu TUI’de başlatmış olmanız gerekmez.
 
 <a id="install-core"></a>
 
-## İlk özel arama: Core + wordmatch
+## Gizlilik odaklı ilk arama: Core + wordmatch
 
 En az bir sağlayıcıda kayıtlı konuşma gerekir. Devam etmek için ilgili CLI kurulu, kimlik doğrulaması yapılmış ve yapılandırılan `command` üzerinden erişilebilir olmalıdır; özgün çalışma dizinine de erişilebilmelidir. İşletim sistemi ve işlemcinize uygun sürümü etkileşimli terminalde kullanın.
 
@@ -70,9 +70,9 @@ Altı geçmiş tanımı ve yapılandırılmış devam yolları sunulur; burada t
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Kurulu ve doğrulanmış CLI ile devam; özgün dizin erişilebilir olmalı |
+| Resumable (devam edilebilir konuşma) | Kurulu ve doğrulanmış CLI ile devam; özgün dizin erişilebilir olmalı |
 | Running / Waiting / Idle | Yalnızca Windows’ta eşleşen çalışan Windows Terminal sekmesine odaklanmayı dene; diğer sistemlerde elle geçiş |
-| Archived / Stopped | Kurulu ve doğrulanmış CLI ile devam; özgün dizin erişilebilir olmalı; [limits](../../README.md#supported-providers) |
+| Archived / Stopped | Kurulu ve doğrulanmış CLI ile devam; özgün dizin erişilebilir olmalı; [sınırlar](../../README.md#supported-providers) |
 
 
 
@@ -104,7 +104,7 @@ Başlatmadan önce kurulumdaki gizlilik adımlarını izleyin; varsayılan uzak 
 **Running/Waiting/Idle** için yalnızca Windows’ta eşleşen Windows Terminal sekmesine geçiş denenir; başarılı olursa sekme seçilir ve pencere öne gelir. Linux/macOS’ta çalışan terminale elle geçin. Belirsiz veya yanlış yazılmış aramaların sonuçları garanti edilmez.
 
 <details>
-<summary>↳ İlk özel arama: Core + wordmatch</summary>
+<summary>↳ Gizlilik odaklı ilk arama: Core + wordmatch</summary>
 
 **Kurgusal örnek; gözlemlenmiş çalışma veya pakete eklenmiş oturum değildir:** `/` ile `build failure` arayın; Claude Code · başlık `Build failure` · proje `demo-project` satırını düşünün. `↑`/`↓` ile sağlayıcıyı, başlığı ve özgün dizini kontrol edin. Doğru **Resumable** konuşmaysa `Enter`, kurulu ve kimlik doğrulaması tamamlanmış Claude CLI ile açar; dizin erişilebilir olmalıdır. Sonuç veya uyumluluk garantisi değildir.
 

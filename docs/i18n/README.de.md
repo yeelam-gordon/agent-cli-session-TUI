@@ -10,7 +10,7 @@
 
 </details>
 
-Verlorene Gespräche in CLI-Verläufen mit einer Suche finden. Kontext über die installierte Original-CLI fortsetzen. Nur unter Windows: passenden laufenden Windows-Terminal-Tab fokussieren versuchen, statt ein neues Fenster zu öffnen.
+CLI-Verläufe gemeinsam durchsuchen. Gespräch und Kontext mit installierter Original-CLI fortsetzen. Nur unter Windows versuchen, den passenden laufenden Windows-Terminal-Tab zu fokussieren, statt ein neues Fenster zu öffnen.
 
 [Ablauf ansehen](#first-workflow) · [Core installieren](#install-core) · [Anbieter und Grenzen](../../README.md#supported-providers)
 
@@ -62,9 +62,9 @@ Sechs Verlaufsdefinitionen und konfigurierte Fortsetzungswege werden mitgeliefer
 
 | UI | `Enter` |
 |---|---|
-| Resumable | Über installierte, authentifizierte CLI fortsetzen; ursprüngliches Verzeichnis zugänglich |
-| Running / Waiting / Idle | Nur unter Windows passenden laufenden Windows-Terminal-Tab fokussieren versuchen; sonst manuell wechseln |
-| Archived / Stopped | Über installierte, authentifizierte CLI fortsetzen; ursprüngliches Verzeichnis zugänglich; [limits](../../README.md#supported-providers) |
+| Resumable (fortsetzbares Gespräch) | Über installierte, authentifizierte CLI fortsetzen; ursprüngliches Verzeichnis zugänglich |
+| Running / Waiting / Idle | Nur unter Windows versuchen, den passenden laufenden Windows-Terminal-Tab zu fokussieren; sonst manuell wechseln |
+| Archived / Stopped | Über installierte, authentifizierte CLI fortsetzen; ursprüngliches Verzeichnis zugänglich; [Grenzen](../../README.md#supported-providers) |
 
 
 
