@@ -296,7 +296,7 @@ Maintainer-reported historical results from a private 30-query corpus over ~780 
 
 MRR is mean reciprocal rank of the expected conversation; P@1 is the fraction with the expected conversation first; Recall@10 is the fraction retrieved within the first ten. First-result ranking improved, but top-ten coverage fell **93% → 90%**; this is a trade-off, not universal improvement. The optional plugin’s state for that historical run is **unknown**.
 
-Per-category P@1 jumps: exact-title 33% → 100%, person-name 50% → 100%, semantic-only 38% → 62%, typo 0% → 33%. Keyword and partial-recall queries hold their ground.
+Per-category P@1 jumps: exact-title 33% → 100%, person-name 50% → 100%, semantic-only 38% → 62%, typo 0% → 33%. Keyword and partial-recall queries hold their ground. Per-category sample counts are unpublished; the overall 30-query count does not establish each category's denominator.
 
 ### What you get out of the box
 
@@ -344,12 +344,12 @@ Set with `[grouping] engine` in `config.toml`.
 hosted tab auto-grouping service, which returns natural group names like
 "System Maintenance". A maintainer-reported historical private-data run took about 2 seconds for 30 sessions; no public run artifact/environment is supplied. Latency varies with service, network and workload. No separate service installation or authentication is configured, but titles and paths leave the machine.
 
-**`wordmatch`** — no network, and **not an AI model of any kind**. It counts how many words two session titles share, groups them if more than half overlap, and names each group after its most common words.
+**`wordmatch`** — no network, and **not an AI model of any kind**. It clusters normalized title/summary tokens when their Jaccard similarity (shared tokens divided by all distinct tokens) is strictly above 0.5, then names each group after its most common words.
 That produces blunt names like `benchmark-prompt-files`, so expect to rename
-some with `e`. A maintainer-reported historical private-data run took ~0.2s; no public run artifact/environment is supplied. Timing varies with hardware and workload. It is also the automatic fallback whenever `remote` fails.
+some with `e`. A maintainer-reported historical private-data run took ~0.2s; no public run artifact/environment or batch size is supplied. Timing varies with hardware and workload. It is also the automatic fallback whenever `remote` fails.
 
 **`acp`** — legacy. Spawns the CLI configured in `[acp]` (default `copilot`).
-The maintainer historically reported useful names and 25–45s per batch on private data, without a public run artifact/environment. Quality and timing vary with model and workload; it consumes the configured CLI's quota. Requires the
+The maintainer historically reported useful names and 25–45s per batch on private data, without a public run artifact/environment or batch size. Repeated-run uncertainty is unknown for these local/ACP timing reports; they are not established as the same 30-session workload as the remote example. Quality and timing vary with model and workload; it consumes the configured CLI's quota. Requires the
 `copilot` CLI authenticated and `prompts/group-suggest.md` next to the binary.
 A run exceeding `timeout_secs` is **terminated**, not just abandoned.
 
@@ -402,7 +402,7 @@ max_group_anchors = 6          # how many names to offer when enabled
 
 - `g` — assign the selected session to an existing group (← → to pick) or type a new one
 
-Groups are sorted by most-recent member activity, frozen on entry to the Grouped view to avoid jitter on the 2-second scan refresh. To refresh the order, leave and re-enter the view via `Shift+Tab`.
+Groups are sorted by most-recent member activity, frozen on entry to the Grouped view to avoid jitter on the configured scan refresh (2 seconds in the configuration example above; built-in default 5 seconds). To refresh the order, leave and re-enter the view via `Shift+Tab`.
 
 </details>
 
