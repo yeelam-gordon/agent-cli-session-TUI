@@ -1,10 +1,26 @@
 # Agent CLI Session TUI — Cercare nella cronologia e riprendere le conversazioni
 
+Quella conversazione di debug era in Claude Code, Copilot CLI o Codex? Cerca nelle cronologie esistenti da un’unica vista, verifica la conversazione e riprendila tramite il CLI corrispondente installato. Non deve essere stata avviata da questo TUI.
+
+- Ritrova un argomento o progetto: cerca una frase che ricordi e verifica fornitore, titolo e directory.
+- Riprendi la conversazione giusta: `Enter` su **Resumable** richiede cronologia conservata, CLI installato e autenticato e directory originale accessibile.
+- Ritrova la scheda attiva su Windows: tenta di selezionare una scheda corrispondente di Windows Terminal, solo su Windows; non è un collegamento universale ai processi. Su Linux/macOS passa manualmente al terminale.
+
+Se conosci già fornitore e sessione, basta la cronologia del CLI. Questo catalogo aiuta con più CLI o progetti, quando ricordi l’argomento ma non l’ID.
+
+Un gestore di sessioni di terminale per le conversazioni conservate di Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi, anche avviate separatamente. Sono sei fornitori integrati: la copertura dipende dai formati e dai filtri di rilevamento, non include automaticamente ogni CLI.
+
+[Vedi il percorso](#first-workflow) · [Installa Core](#install-core) · [Fornitori e limiti](../../README.md#supported-providers)
+
+Illustrazione concettuale, non una schermata reale dell’app. Le etichette inglesi e le righe fittizie sono esempi, non cronologie private reali. Segui i passi sulla privacy prima dell’avvio; il raggruppamento remoto predefinito può partire automaticamente.
+
+<img src="../agent-session-benefits.png" alt="Concetto: ritrovare e riprendere una conversazione nelle cronologie dei CLI" width="780">
+
 [English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
 
 [Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
-Un gestore di sessioni di terminale per le conversazioni conservate di Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi, anche avviate separatamente. Sono sei fornitori integrati: la copertura dipende dai formati e dai filtri di rilevamento, non include automaticamente ogni CLI.
+<a id="install-core"></a>
 
 ## Prima dell’avvio: installazione e privacy
 
@@ -20,6 +36,8 @@ engine = "wordmatch"
 ```
 
 Lascia commentate le altre opzioni. Se esiste già una tabella `[grouping]` attiva, modifica il suo `engine` senza aggiungerne un’altra. Salva prima di avviare o leggere la cronologia. `wordmatch` confronta parole, non è IA locale e non controlla le connessioni dei CLI. Il plugin semantico facoltativo può scaricare modelli all’inizializzazione; parti con Core per non caricarlo.
+
+<a id="first-workflow"></a>
 
 ## Prima ricerca e risultato atteso
 
@@ -40,3 +58,13 @@ Attendi l’elenco, premi `/` e inserisci un progetto o una frase della tua cron
 Lanciatori predefiniti: Windows `wt` (alternativa `cmd`), Linux `gnome-terminal`, macOS `osascript` con Terminal. Adatta la configurazione se mancano. Core ha destinazioni x64/arm64 per i tre sistemi; i pacchetti semantici non coprono tutte le destinazioni, verifica gli allegati della release. `Esc` annulla la ricerca; `q` / `Ctrl+C` esce senza cancellare la cronologia né fermare altri CLI. La terminazione delle sessioni non è implementata.
 
 Elenco vuoto, configurazione errata, problemi di avvio o selezione, aggiornamento, rimozione e ripristino: [risoluzione dei problemi in inglese](../../README.md#troubleshooting-update-and-removal). Il [manuale inglese](../../README.md) è il riferimento tecnico; vedi [configurazione](../../README.md#configuration) e [dati inviati](../../README.md#what-remote-sends).
+
+**Esempio fittizio, non osservato in esecuzione né incluso come sessione:** premi `/`, cerca `build failure` e immagina una riga Claude Code · titolo `Build failure` · progetto `demo-project`. Con `↑`/`↓`, verifica fornitore, titolo e directory originale. Se è la conversazione **Resumable** giusta, `Enter` la riapre tramite il CLI Claude installato e autenticato, con la directory accessibile. Nessuna garanzia di risultati o compatibilità.
+
+- Elenco vuoto: verifica cronologia salvata, fornitore abilitato e `state_dir`.
+- Ripresa fallita: verifica installazione del CLI, autenticazione e directory originale.
+- Avvio fallito: estrai l’archivio completo con `providers/`, `prompts/` ed esempio generato; verifica il lanciatore.
+
+Consulta le conversazioni conservate, cerca nella tua cronologia e scegline una da riprendere. Il GIF mostra l’interfaccia inglese della versione registrata, non verifica la versione attuale o la compatibilità di ogni CLI. Tradurre i documenti non traduce l’interfaccia né le conversazioni salvate. Imposta la privacy descritta nei passi di installazione prima di avviare il programma. La versione e la data della registrazione sono sconosciute. [Installa Core](#install-core).
+
+<img src="../agentTUI.gif" alt="Demo TUI: elenco della cronologia, ricerca e ripresa" width="700">

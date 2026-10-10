@@ -1,16 +1,34 @@
 # Agent CLI Session TUI — 過去の会話を検索して再開
 
+あのデバッグの会話は Claude Code、Copilot CLI、それとも Codex？既存の履歴を一つの画面で検索し、見つかった会話を確認して、対応するインストール済み CLI で続きを進められます。この TUI から始めた会話でなくても対象です。
+
+- 以前の話題やプロジェクトを探す：覚えている語句で検索し、プロバイダー、タイトル、作業ディレクトリを確認。
+- 正しい会話を再開：**Resumable** で `Enter`。保存済み履歴、認証済みのインストール済み CLI、アクセス可能な元のディレクトリが必要です。
+- 実行中の Windows タブを探す：Windows でのみ一致する Windows Terminal タブへのフォーカスを試みます。汎用的なプロセス接続ではなく、Linux/macOS では手動で切り替えます。
+
+プロバイダーと会話が分かっていれば、その CLI の履歴機能で十分です。複数の CLI やプロジェクトにまたがる場合や、セッション ID ではなく話題だけ覚えている場合に役立ちます。
+
+Copilot CLI、Claude Code、Codex CLI、Qwen CLI、Gemini CLI、Kimi の保存済み履歴を横断検索するターミナルのセッション管理ツールです。別々に起動した会話も対象です。標準対応はこの6種類で、他の CLI はプロバイダー定義による拡張が必要です。
+
+[操作の流れ](#first-workflow) · [Core をインストール](#install-core) · [対応範囲と制限](../../README.md#supported-providers)
+
+これは概念図であり、実際のアプリ画面ではありません。英語のラベルと架空の行は説明用で、実際の個人の履歴ではありません。起動前にインストール手順のプライバシー設定を行ってください。既定のリモート分類は自動実行される場合があります。
+
+<img src="../agent-session-benefits.png" alt="概念図：CLI をまたいで以前の会話を探して再開" width="780">
+
 [English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
 
 [Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
-Copilot CLI、Claude Code、Codex CLI、Qwen CLI、Gemini CLI、Kimi の保存済み履歴を横断検索するターミナルのセッション管理ツールです。別々に起動した会話も対象です。標準対応はこの6種類で、他の CLI はプロバイダー定義による拡張が必要です。
+<a id="install-core"></a>
 
 ## 起動前の確認・プライバシー・インストール
 
 少なくとも1つの CLI に保存済みの会話が必要です。再開する CLI はインストール・認証済みで、設定したコマンドから実行でき、元の作業ディレクトリにアクセスできる必要があります。OS と CPU に合う版を対話型ターミナルで使います。
 
-**初回起動前の注意：** 既定の `remote` グループ分けは会話タイトルと作業ディレクトリを外部サービスへ送信し、初回の検出後に自動実行されることもあります。第三者向けの公開 API 契約はありません。通信しないグループ分けには、起動前に `config.toml` の既存の表を編集します（重複させないでください）：
+[Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases) から OS・CPU に合う **Core の完全なアーカイブ**を取得します。ソースコードのアーカイブではありません。全体を展開し、実行ファイル、`providers/`、`prompts/`、生成済み `config.toml.example` を同じ場所に保ちます。既存設定を上書きせず、`state_dir`、`command`、起動方法と以下の設定を確認します。ソースの `config.toml.template` は未置換のテンプレートなので単に改名しないでください。
+
+**初回起動前の注意：** 既定の `remote` グループ分けは会話タイトルと作業ディレクトリを外部サービスへ送信し、初回の検出後に自動実行されることもあります。第三者向けの公開 API 契約はありません。通信しないグループ分けには、次の初回設定手順に従ってください：
 
 Core の初回設定では、生成済みの `config.toml.example` を実行ファイル横の `config.toml` にコピーします。その中の `# [grouping]` と `# engine = "remote"` の両方から先頭の `#` を外し、値を `"wordmatch"` に変更して、下の2行を有効にします。他の分類設定はコメントのままにします。有効な `[grouping]` 表が既にある場合は、その `engine` だけを変更し、表を追加しないでください。保存してから起動し、履歴を読み込みます。
 
@@ -21,7 +39,7 @@ engine = "wordmatch"
 
 `wordmatch` は単語の重なりによる分類で、ローカル AI ではありません。オプションのセマンティック検索プラグインは初期化時にモデルをダウンロードする場合があります。まず Core を使えばこのプラグインは読み込まれません。各 CLI 自体の通信を制御する設定ではありません。
 
-[Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases) から OS・CPU に合う **Core の完全なアーカイブ**を取得します。ソースコードのアーカイブではありません。全体を展開し、実行ファイル、`providers/`、`prompts/`、生成済み `config.toml.example` を同じ場所に保ちます。例を実行ファイル横の `config.toml` にコピーし、既存設定を上書きせず、`state_dir`、`command`、起動方法と上記の設定を確認します。ソースの `config.toml.template` は未置換のテンプレートなので単に改名しないでください。
+<a id="first-workflow"></a>
 
 ## 最初の検索と期待結果
 
@@ -32,3 +50,13 @@ engine = "wordmatch"
 Windows の既定起動は `wt`（代替は `cmd`）、Linux は `gnome-terminal`、macOS は `osascript` と Terminal です。利用できなければ設定を変更します。Core は3 OS の x64/arm64 が対象ですが、セマンティック検索パッケージの対象は異なるのでリリースを確認してください。`Esc` は検索を取り消し、`q` / `Ctrl+C` は履歴を削除せず終了します。他の CLI は停止しません。Kill 機能は未実装です。
 
 空の履歴、設定エラー、起動・フォーカス失敗、更新・削除・復元は [英語のトラブルシューティング](../../README.md#troubleshooting-update-and-removal) を参照してください。[英語版](../../README.md) が技術情報の基準です。[設定](../../README.md#configuration) と [送信内容](../../README.md#what-remote-sends) も確認してください。
+
+**架空の操作例です。実行確認済みでも同梱セッションでもありません：** `/` で `build failure` を検索し、Claude Code・タイトル `Build failure`・プロジェクト `demo-project` の行が見つかったとします。`↑`/`↓` で詳細と元のディレクトリを確認し、目的の **Resumable** 会話なら `Enter`。インストール・認証済みの Claude CLI で再開し、元のディレクトリへのアクセスも必要です。検索結果や互換性を保証する例ではありません。
+
+- 一覧が空：保存済み履歴、プロバイダーの有効化、`state_dir` を確認。
+- 再開できない：CLI のインストール、アカウント認証、元の作業ディレクトリを確認。
+- 起動できない：アーカイブ全体を展開し、`providers/`、`prompts/`、生成済み設定例を保持して、起動方法を確認。
+
+保存済みの履歴を一覧で確認し、自分の会話を検索して再開する流れを示します。GIF は録画時のバージョンの英語 UI で、現行版や各 CLI の互換性を検証するものではありません。文書の翻訳は UI や保存済み会話の翻訳を意味しません。実行前にインストール手順のプライバシー設定を行ってください。 録画したバージョンと日付は不明です。 [Core をインストール](#install-core).
+
+<img src="../agentTUI.gif" alt="履歴一覧・検索・会話再開の TUI デモ" width="700">

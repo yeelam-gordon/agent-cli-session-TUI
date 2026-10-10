@@ -1,12 +1,24 @@
-# Agent CLI Session TUI — Search coding-agent history and resume sessions
+# Agent CLI Session TUI — Find an old coding-agent conversation and resume it
+
+Was that debugging conversation in Claude Code, Copilot CLI or Codex? Search your existing histories in one terminal view, inspect the matching conversation, and continue through its installed CLI. You do not need to have started the conversation in this TUI.
+
+- **Find the old topic or project:** search a phrase you remember, then verify provider, title and working directory.
+- **Continue the right conversation:** `Enter` on **Resumable** reopens through its provider CLI. Retained history, an installed/authenticated CLI and an accessible original directory are required.
+- **Find the running Windows tab:** `Enter` on **Running/Waiting** attempts to focus a matching Windows Terminal tab, on Windows only—not universal process attachment. Linux/macOS users switch manually.
+
+Native CLI history is enough when you already know the provider and session. Use this **terminal session manager** when histories span CLIs or projects, or you remember the topic rather than the session ID.
+
+Built-in history definitions: **Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI and Kimi**. Discovery depends on retained formats and filters; additional providers require [definitions](#adding-a-provider), not universal CLI support. Kill is not implemented.
+
+[See how it works](#first-search-and-expected-result) · [Install Core safely](#install-the-complete-release-archive) · [Provider coverage and limits](#supported-providers)
+
+Concept illustration, not an actual app screenshot. English labels and mock rows are illustrative, not real private histories. Follow the installation privacy steps before launching; default remote grouping can run automatically.
+
+<img src="docs/agent-session-benefits.png" alt="Concept: find a lost coding-agent conversation across CLI histories and resume it" width="780">
 
 [English](README.md) · [简体中文](docs/i18n/README.zh-CN.md) · [繁體中文](docs/i18n/README.zh-TW.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Español](docs/i18n/README.es.md) · [Português (Brasil)](docs/i18n/README.pt-BR.md) · [Français](docs/i18n/README.fr.md)
 
 [Deutsch](docs/i18n/README.de.md) · [Italiano](docs/i18n/README.it.md) · [Русский](docs/i18n/README.ru.md) · [Türkçe](docs/i18n/README.tr.md) · [Tiếng Việt](docs/i18n/README.vi.md) · [Bahasa Indonesia](docs/i18n/README.id.md) · [हिन्दी](docs/i18n/README.hi.md) · [العربية](docs/i18n/README.ar.md)
-
-A **terminal session manager** for existing **Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, and Kimi** conversations. Search history across these six providers, inspect a conversation, and resume it without remembering which CLI you used. On Windows, it can also focus a matching running Windows Terminal tab.
-
-It reads each provider's own history, including independently started conversations—not just sessions launched by this TUI. Additional providers can be added through [provider definitions](#adding-a-provider); this is not support for every CLI or a generic shell multiplexer. Running-tab focus is Windows-only and depends on finding a matching tab. Kill is not implemented.
 
 ## Quick start: find an old conversation and resume it
 
@@ -14,9 +26,15 @@ It reads each provider's own history, including independently started conversati
 
 - Have saved history from at least one [supported provider](#supported-providers). To resume, that provider's CLI must be installed, available through the configured `command`, and authenticated. The original working directory must still be accessible.
 - Use a release for your OS and CPU in an interactive terminal. Core targets Windows, Linux and macOS, x64/arm64; Semantic availability differs by target. On Windows, install Windows Terminal (`wt`) for the default launcher and native tab focus; `cmd` is the packaged fallback. Linux defaults to `gnome-terminal`; macOS uses `osascript` with Terminal. Change the [launcher configuration](#configuration) if those commands are unavailable. Linux/macOS do not focus existing running tabs.
-- **Privacy warning before first launch:** default `remote` grouping sends session **titles and working directories** to a hosted service when invoked. It can run automatically after initial discovery, not just when you press `s`. The service has no published third-party request/response contract. For **non-network grouping**, add or edit this table in `config.toml` **before starting**:
 
-For a fresh Core install, first copy the **generated** `config.toml.example` to `config.toml` beside the executable. In that copy, find `# [grouping]` and `# engine = "remote"`: remove the leading `#` from **both lines** and change the engine value to `"wordmatch"`, producing the two active lines below. Leave the other commented grouping options unchanged. If you already have an active `[grouping]` table, change its `engine` there instead—do not add a second table. Save the file before launching or scanning any history.
+### Install the complete release archive
+
+1. Open [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), select a release, and download the **Core** archive for your OS/architecture (`.zip` on Windows, `.tar.gz` on Linux/macOS), not GitHub's source-code archive. Semantic is optional.
+2. Extract the **whole archive** into a writable folder. Keep the binary, `providers/`, `prompts/`, and generated `config.toml.example` together. Copying just the executable loses provider definitions and prompt assets.
+
+**Privacy warning before first launch:** default `remote` grouping sends session **titles and working directories** to a hosted service and can run automatically after initial discovery, not just when you press `s`. The service has no published third-party request/response contract. Choose non-network grouping before launching:
+
+3. For a fresh Core install, first copy the **generated** `config.toml.example` to `config.toml` beside the executable. In that copy, find `# [grouping]` and `# engine = "remote"`: remove the leading `#` from **both lines** and change the engine value to `"wordmatch"`, producing the two active lines below. Leave the other commented grouping options unchanged. If you already have an active `[grouping]` table, change its `engine` there instead—do not add a second table. Save the file before launching or scanning any history.
 
 ```toml
 [grouping]
@@ -25,11 +43,8 @@ engine = "wordmatch"
 
 `wordmatch` uses word overlap; it is **not local AI**. This setting controls grouping, not the behavior of your provider CLIs. The optional semantic plugin can download model files on initialization; use Core for a first run without that plugin. See [grouping privacy](#what-remote-sends) and [semantic search](#what-you-get-out-of-the-box). Keep configuration, logs and session metadata private.
 
-### Install the complete release archive
+Check `state_dir`, provider `command` and launcher; disable unused providers with `enabled = false`. Do not overwrite an existing configuration.
 
-1. Open [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), select a release, and download the **Core** archive for your OS/architecture (`.zip` on Windows, `.tar.gz` on Linux/macOS), not GitHub's source-code archive. Semantic is optional.
-2. Extract the **whole archive** into a writable folder. Keep the binary, `providers/`, `prompts/`, and generated `config.toml.example` together. Copying just the executable loses provider definitions and prompt assets.
-3. Copy `config.toml.example` to `config.toml` beside the executable; do not overwrite an existing configuration. Activate the two commented grouping lines as described above and set `engine = "wordmatch"` for non-network grouping (or edit your already-active table). Check `state_dir`, `command` and launcher, and disable unused providers with `enabled = false`.
 4. Open a terminal **in the extracted folder**, then start:
 
 ```powershell
@@ -42,8 +57,6 @@ engine = "wordmatch"
 ./agent-session-tui
 ```
 
-The source checkout has **`config.toml.template`**, not a ready-to-run example: release packaging substitutes OS-specific placeholders using `scripts/generate_config.py` and writes **`dist/config.toml.example`**. Do not simply rename the source template. Developers can use the generator with their target triple before following the copy/edit step; see [Building](#building).
-
 ### First search and expected result
 
 To search Copilot CLI session history—or find an old Claude Code or Codex conversation—use a phrase from **your own saved history**. No sample session is bundled.
@@ -55,7 +68,29 @@ To search Copilot CLI session history—or find an old Claude Code or Codex conv
 
 `Esc` cancels search; `q` or `Ctrl+C` exits without deleting provider histories. If nothing appears or launching fails, see [Troubleshooting, update and removal](#troubleshooting-update-and-removal).
 
-![Agent CLI Session TUI demo](docs/agentTUI.gif)
+**Fictional worked recovery—not observed runtime and not a bundled session:** press `/`, type `build failure`, and imagine a matching row: Claude Code · title `Build failure` · project `demo-project`. Use `↑`/`↓` to inspect the provider, title and original directory. Only if this is your intended **Resumable** conversation, press `Enter` to reopen it through the installed, authenticated Claude CLI with that directory accessible. This illustrates the workflow, not a guaranteed search match or compatibility test.
+
+## Recorded demo
+
+Browse the saved-history list, search your own conversation, inspect it and select it to resume using the workflow above. This GIF records an English interface from its recording-time version; it is not current-version or all-provider compatibility verification. Translated documentation does not translate the UI or saved conversations. Complete the privacy setup before running. The recording version and date are unknown.
+
+<img src="docs/agentTUI.gif" alt="Recorded English TUI history list, search and conversation selection" width="700">
+
+## Troubleshooting, update and removal
+
+| Symptom | What to check |
+|---------|---------------|
+| Empty list or no match | Confirm saved conversations, an enabled provider and the actual CLI `state_dir`. Wait for discovery; try a literal title fragment. Check Hidden with `Shift+Tab` if you archived it. Not every format/version or query is guaranteed to match. |
+| Configuration error at startup | Check TOML syntax and duplicate tables. Back up your config, compare the generated release example, and fix the file found by the config search order. Preserve the privacy setting; removing configuration can restore remote defaults. |
+| `Failed to resume` / no terminal | Try the provider's own resume command with the selected session ID in its original directory. Check authentication, `command`, resume arguments, directory existence and launcher availability. Fix configuration, not provider history. |
+| Missing or wrong running-tab focus | Focus is Windows-only and title-based, not a process attachment guarantee. Shared titles can be ambiguous. Switch manually and verify the tab; Linux/macOS users must switch manually. |
+| No 🧠 indicator | Semantic search is optional. Check the trusted matching-platform library beside the executable and model initialization; Core still has keyword/lexical search. |
+
+See [issue guidance](CONTRIBUTING.md#reporting-issues) and [security reporting](SECURITY.md). Logs can contain IDs and paths; redact sensitive content before sharing.
+
+**Update:** quit with `q`/`Ctrl+C`, back up `config.toml` and configured `data_dir` (groups, archive state and caches), and extract the new complete archive into a separate folder. Copy your configuration and keep the same `data_dir`; compare the new example without overwriting your settings. **Restore:** return to the old complete package and backed-up configuration/data. Provider updates and authentication are separate.
+
+**Remove:** quit, then remove only your extracted TUI package. Optionally back up and remove its own configured `data_dir` and OS-level TUI configuration; do not delete `.copilot`, `.claude`, `.codex`, `.qwen`, `.gemini` or `.kimi` histories. Exiting/removing the TUI does not stop running provider CLIs; close those through their own terminal.
 
 ## Pain Points Solved
 
@@ -65,66 +100,7 @@ To search Copilot CLI session history—or find an old Claude Code or Codex conv
 - **Finding that one session** — `/` to search. Hybrid ranking fuses keyword (BM25) + semantic embeddings + lexical scoring via Reciprocal Rank Fusion, to help with typos, paraphrases, and partial recall; results are not guaranteed and semantic ranking requires the optional plugin. Indexes titles, summaries, compaction summaries, and your own messages
 - **Hundreds of sessions piling up** — `g` to assign to groups; `Shift+Tab` to view by group; optional [AI auto-suggest](#ai-auto-grouping)
 - **Close without worry** — shut down anytime; saved histories remain available; resumption depends on the provider CLI and retained history
-- **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
-
-## Beyond `claude agents`
-
-This TUI reads supported retained provider histories, including conversations started independently of this TUI. See Claude Code's [`agent view documentation`](https://code.claude.com/docs/en/agent-view) for its current behavior; no future or version-wide comparison is asserted here.
-
-| What we add | |
-|---|---|
-| **Multi-CLI** | One screen for Copilot · Claude · Codex · Qwen · Gemini · Kimi |
-| **Supported retained histories** | This TUI reads each CLI's own session directory, so supported saved histories can appear regardless of how they were started (subject to provider format and discovery filters) |
-| **Hybrid content search** | BM25 keyword + semantic embeddings + lexical scoring fused via Reciprocal Rank Fusion. Semantic ranking requires the optional plugin; typo/paraphrase matches and exact-match ordering are not guaranteed. Searches titles, summaries, and your own messages mid-transcript |
-| **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
-| **Suggested groups** | Group suggestions for ungrouped sessions via configurable engines; remote is the default, wordmatch is non-network and not AI, and ACP is a legacy option. See [grouping privacy](#what-remote-sends). |
-
-## Beyond Intelligent Terminal
-
-[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) is an experimental fork of Windows Terminal with native agent integration — the *terminal* that hosts your agent CLI. This TUI catalogs supported retained histories discovered by its provider definitions.
-
-| What we add | |
-|---|---|
-| **Cross-CLI, not single-host** | This TUI lists supported retained histories discovered by the Copilot, Claude, Codex, Qwen, Gemini and Kimi definitions, subject to provider formats and filters |
-| **Hybrid content search** | BM25 + semantic embeddings + lexical, fused via RRF. Search discovered histories with partial recall; semantic ranking requires the optional plugin and results are not guaranteed |
-| **Thematic groups across providers** | Group sessions by project or theme regardless of which CLI ran them; optional AI-suggested clustering |
-| **Cross-platform catalog** | Core release targets for Windows / Linux / macOS. Resume requires a configured terminal launcher; native running-tab focus is Windows-only |
-
-Use them together: Intelligent Terminal for the conversation, this TUI for the catalog.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ TUI (ratatui + crossterm)                                   │
-│  Session List  │  Session Detail  │  Activity Log           │
-│  Hybrid RRF Search (BM25 + semantic + lexical) · Tab Focus │
-├─────────────────────────────────────────────────────────────┤
-│ SessionViewModel (incremental merge, phased loading)        │
-│ Supervisor (tokio — parallel provider scans, non-blocking)  │
-│  Discovery · Process matching · Launch/Resume (config-driven)│
-├─────────────────────────────────────────────────────────────┤
-│ Provider plugins (data-only — read from each CLI's state)   │
-│  Copilot │ Claude │ Codex │ Qwen │ Gemini │ Kimi │ (more…) │
-├─────────────────────────────────────────────────────────────┤
-│ Shared infrastructure                                       │
-│  Process detection │ Semantic DLL (optional) │ Archive store │
-└─────────────────────────────────────────────────────────────┘
-```
-
-No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh. The `SessionViewModel` merges results incrementally per-provider for progressive loading.
-
-### Session States
-
-Three states, mirroring `claude agents` vocabulary:
-
-| Badge | This TUI    | `claude agents` | Meaning |
-|-------|-------------|-----------------|---------|
-| 🟢    | **Running** | *Working*       | Actively running tools or generating a response |
-| 🟡    | **Waiting** | *Needs input*   | Finished — waiting for your reply / permission |
-| 💤    | **Resumable** | *Completed*   | Not currently running — resume through the installed provider CLI |
-
-`Enter` on *Running* / *Waiting* attempts Windows Terminal tab focus on Windows; Linux/macOS cannot focus existing tabs. `Enter` on *Resumable* relaunches through the configured CLI.
+- **Resume a saved conversation after reboot** — summaries, last activity and the full last response help choose the right retained history. This does not preserve a running process across reboot
 
 ## Keybindings
 
@@ -200,6 +176,8 @@ launch_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k"
 Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI command.
 
 Config search order: next to exe → the OS configuration directory (`%APPDATA%/agent-session-tui/config.toml` on Windows) → built-in defaults. A malformed found configuration is an error, not an instruction to use defaults.
+
+The source checkout has **`config.toml.template`**, not a ready-to-run example: release packaging substitutes OS-specific placeholders using `scripts/generate_config.py` and writes **`dist/config.toml.example`**. Do not simply rename the source template. Developers can use the generator with their target triple before following the copy/edit step; see [Building](#building).
 
 ## Search
 
@@ -335,21 +313,64 @@ Groups are sorted by most-recent member activity, frozen on entry to the Grouped
 
 Core targets cover **x64** and **arm64** on Windows, Linux and macOS. The Semantic matrix covers Windows/Linux x64 and arm64, and macOS arm64; consult the selected release assets for availability.
 
-## Troubleshooting, update and removal
+## Beyond `claude agents`
 
-| Symptom | What to check |
-|---------|---------------|
-| Empty list or no match | Confirm saved conversations, an enabled provider and the actual CLI `state_dir`. Wait for discovery; try a literal title fragment. Check Hidden with `Shift+Tab` if you archived it. Not every format/version or query is guaranteed to match. |
-| Configuration error at startup | Check TOML syntax and duplicate tables. Back up your config, compare the generated release example, and fix the file found by the config search order. Preserve the privacy setting; removing configuration can restore remote defaults. |
-| `Failed to resume` / no terminal | Try the provider's own resume command with the selected session ID in its original directory. Check authentication, `command`, resume arguments, directory existence and launcher availability. Fix configuration, not provider history. |
-| Missing or wrong running-tab focus | Focus is Windows-only and title-based, not a process attachment guarantee. Shared titles can be ambiguous. Switch manually and verify the tab; Linux/macOS users must switch manually. |
-| No 🧠 indicator | Semantic search is optional. Check the trusted matching-platform library beside the executable and model initialization; Core still has keyword/lexical search. |
+This TUI reads supported retained provider histories, including conversations started independently of this TUI. See Claude Code's [`agent view documentation`](https://code.claude.com/docs/en/agent-view) for its current behavior; no future or version-wide comparison is asserted here.
 
-See [issue guidance](CONTRIBUTING.md#reporting-issues) and [security reporting](SECURITY.md). Logs can contain IDs and paths; redact sensitive content before sharing.
+| What we add | |
+|---|---|
+| **Multi-CLI** | One screen for Copilot · Claude · Codex · Qwen · Gemini · Kimi |
+| **Supported retained histories** | This TUI reads each CLI's own session directory, so supported saved histories can appear regardless of how they were started (subject to provider format and discovery filters) |
+| **Hybrid content search** | BM25 keyword + semantic embeddings + lexical scoring fused via Reciprocal Rank Fusion. Semantic ranking requires the optional plugin; typo/paraphrase matches and exact-match ordering are not guaranteed. Searches titles, summaries, and your own messages mid-transcript |
+| **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
+| **Suggested groups** | Group suggestions for ungrouped sessions via configurable engines; remote is the default, wordmatch is non-network and not AI, and ACP is a legacy option. See [grouping privacy](#what-remote-sends). |
 
-**Update:** quit with `q`/`Ctrl+C`, back up `config.toml` and configured `data_dir` (groups, archive state and caches), and extract the new complete archive into a separate folder. Copy your configuration and keep the same `data_dir`; compare the new example without overwriting your settings. **Restore:** return to the old complete package and backed-up configuration/data. Provider updates and authentication are separate.
+## Beyond Intelligent Terminal
 
-**Remove:** quit, then remove only your extracted TUI package. Optionally back up and remove its own configured `data_dir` and OS-level TUI configuration; do not delete `.copilot`, `.claude`, `.codex`, `.qwen`, `.gemini` or `.kimi` histories. Exiting/removing the TUI does not stop running provider CLIs; close those through their own terminal.
+[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) is an experimental fork of Windows Terminal with native agent integration — the *terminal* that hosts your agent CLI. This TUI catalogs supported retained histories discovered by its provider definitions.
+
+| What we add | |
+|---|---|
+| **Cross-CLI, not single-host** | This TUI lists supported retained histories discovered by the Copilot, Claude, Codex, Qwen, Gemini and Kimi definitions, subject to provider formats and filters |
+| **Hybrid content search** | BM25 + semantic embeddings + lexical, fused via RRF. Search discovered histories with partial recall; semantic ranking requires the optional plugin and results are not guaranteed |
+| **Thematic groups across providers** | Group sessions by project or theme regardless of which CLI ran them; optional AI-suggested clustering |
+| **Cross-platform catalog** | Core release targets for Windows / Linux / macOS. Resume requires a configured terminal launcher; native running-tab focus is Windows-only |
+
+Use them together: Intelligent Terminal for the conversation, this TUI for the catalog.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ TUI (ratatui + crossterm)                                   │
+│  Session List  │  Session Detail  │  Activity Log           │
+│  Hybrid RRF Search (BM25 + semantic + lexical) · Tab Focus │
+├─────────────────────────────────────────────────────────────┤
+│ SessionViewModel (incremental merge, phased loading)        │
+│ Supervisor (tokio — parallel provider scans, non-blocking)  │
+│  Discovery · Process matching · Launch/Resume (config-driven)│
+├─────────────────────────────────────────────────────────────┤
+│ Provider plugins (data-only — read from each CLI's state)   │
+│  Copilot │ Claude │ Codex │ Qwen │ Gemini │ Kimi │ (more…) │
+├─────────────────────────────────────────────────────────────┤
+│ Shared infrastructure                                       │
+│  Process detection │ Semantic DLL (optional) │ Archive store │
+└─────────────────────────────────────────────────────────────┘
+```
+
+No internal database. Providers read directly from each CLI's own state directory (read-only). All providers scan in parallel for fast refresh. The `SessionViewModel` merges results incrementally per-provider for progressive loading.
+
+### Session States
+
+Three states, mirroring `claude agents` vocabulary:
+
+| Badge | This TUI    | `claude agents` | Meaning |
+|-------|-------------|-----------------|---------|
+| 🟢    | **Running** | *Working*       | Actively running tools or generating a response |
+| 🟡    | **Waiting** | *Needs input*   | Finished — waiting for your reply / permission |
+| 💤    | **Resumable** | *Completed*   | Not currently running — resume through the installed provider CLI |
+
+`Enter` on *Running* / *Waiting* attempts Windows Terminal tab focus on Windows; Linux/macOS cannot focus existing tabs. `Enter` on *Resumable* relaunches through the configured CLI.
 
 ## Adding a Provider
 

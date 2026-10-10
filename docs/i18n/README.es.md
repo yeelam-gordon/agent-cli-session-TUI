@@ -1,18 +1,36 @@
 # Agent CLI Session TUI — Buscar en el historial y retomar conversaciones
 
+¿Aquella conversación de depuración estaba en Claude Code, Copilot CLI o Codex? Busca en tus historiales existentes desde una sola vista, comprueba la conversación y continúala con su CLI instalado. No hace falta haberla iniciado en este TUI.
+
+- Encuentra un tema o proyecto antiguo: busca una frase que recuerdes y verifica proveedor, título y directorio.
+- Continúa la conversación correcta: `Enter` en **Resumable** requiere historial conservado, CLI instalado y autenticado, y directorio original accesible.
+- Localiza la pestaña activa en Windows: intenta enfocar una pestaña coincidente de Windows Terminal, solo en Windows; no conecta a cualquier proceso. En Linux/macOS, cambia manualmente.
+
+Si ya conoces el proveedor y la sesión, basta con el historial del CLI. Este catálogo ayuda cuando trabajas con varios CLI o proyectos y recuerdas el tema, no el ID.
+
+Un gestor de sesiones de terminal para el historial existente de Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI y Kimi, incluidas conversaciones iniciadas por separado. Hay seis proveedores integrados; admitir otros requiere ampliar sus definiciones, no significa compatibilidad con cualquier CLI.
+
+[Ver el flujo](#first-workflow) · [Instalar Core](#install-core) · [Proveedores y límites](../../README.md#supported-providers)
+
+Ilustración conceptual, no una captura real de la aplicación. Las etiquetas en inglés y las filas ficticias son ejemplos, no historiales privados reales. Sigue los pasos de privacidad antes de iniciar; la agrupación remota predeterminada puede ejecutarse automáticamente.
+
+<img src="../agent-session-benefits.png" alt="Concepto: encontrar y continuar una conversación entre historiales de CLI" width="780">
+
 [English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
 
 [Deutsch](README.de.md) · [Italiano](README.it.md) · [Русский](README.ru.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [हिन्दी](README.hi.md) · [العربية](README.ar.md)
 
-Un gestor de sesiones de terminal para el historial existente de Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI y Kimi, incluidas conversaciones iniciadas por separado. Hay seis proveedores integrados; admitir otros requiere ampliar sus definiciones, no significa compatibilidad con cualquier CLI.
+<a id="install-core"></a>
 
 ## Antes de iniciar: requisitos, privacidad e instalación
 
 Necesitas conversaciones guardadas de al menos un proveedor. Para retomarlas, su CLI debe estar instalado, autenticado y disponible mediante el comando configurado; el directorio de trabajo original debe ser accesible. Usa una terminal interactiva y una versión para tu SO y CPU.
 
-**Aviso antes del primer inicio:** la agrupación `remote`, predeterminada, envía títulos y directorios de trabajo a un servicio alojado y puede ejecutarse automáticamente después de detectar el historial. No hay un contrato público de API para terceros. Para agrupar sin red, edita la tabla existente de `config.toml` antes de iniciar, sin duplicarla:
+En [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), descarga el **archivo Core completo** para tu SO y CPU, no el archivo de código fuente. Extrae todo y conserva el ejecutable, `providers/`, `prompts/` y el `config.toml.example` generado. Comprueba `state_dir`, `command`, el lanzador y la opción de privacidad siguiente. El archivo fuente `config.toml.template` contiene marcadores y no se debe simplemente renombrar.
 
-Para una primera instalación de Core, copia el `config.toml.example` generado como `config.toml` junto al ejecutable. En esa copia, busca `# [grouping]` y `# engine = "remote"`: quita el `#` inicial de ambas líneas y cambia el valor a `"wordmatch"`, como abajo. Deja comentadas las demás opciones. Si ya existe una tabla `[grouping]` activa, modifica su `engine` sin añadir otra tabla. Guarda antes de iniciar o explorar el historial.
+**Aviso antes del primer inicio:** la agrupación `remote`, predeterminada, envía títulos y directorios de trabajo a un servicio alojado y puede ejecutarse automáticamente después de detectar el historial. No hay un contrato público de API para terceros. Para agrupar sin red, sigue la configuración inicial a continuación:
+
+Para una primera instalación de Core, copia el `config.toml.example` generado como `config.toml` junto al ejecutable, sin sobrescribir una configuración existente. En esa copia, busca `# [grouping]` y `# engine = "remote"`: quita el `#` inicial de ambas líneas y cambia el valor a `"wordmatch"`, como abajo. Deja comentadas las demás opciones. Si ya existe una tabla `[grouping]` activa, modifica su `engine` sin añadir otra tabla. Guarda antes de iniciar o explorar el historial.
 
 ```toml
 [grouping]
@@ -21,7 +39,7 @@ engine = "wordmatch"
 
 `wordmatch` compara palabras: no es IA local. El complemento semántico opcional puede descargar modelos al inicializarse; empieza con Core para no cargarlo. Esta opción no controla las conexiones de los propios CLI.
 
-En [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), descarga el **archivo Core completo** para tu SO y CPU, no el archivo de código fuente. Extrae todo y conserva el ejecutable, `providers/`, `prompts/` y el `config.toml.example` generado. Copia el ejemplo como `config.toml` junto al ejecutable sin sobrescribir una configuración existente. Comprueba `state_dir`, `command`, el lanzador y la opción de privacidad anterior. El archivo fuente `config.toml.template` contiene marcadores y no se debe simplemente renombrar.
+<a id="first-workflow"></a>
 
 ## Primera búsqueda y resultado esperado
 
@@ -32,3 +50,13 @@ Con **Resumable**, el resultado esperado es una terminal donde el CLI carga la c
 El lanzador predeterminado es `wt` en Windows (alternativa: `cmd`), `gnome-terminal` en Linux y `osascript` con Terminal en macOS; adapta la configuración si faltan. Core contempla x64/arm64 en los tres SO; la disponibilidad semántica depende del destino y de los archivos publicados. `Esc` cancela la búsqueda; `q` / `Ctrl+C` sale sin borrar el historial ni detener otros CLI. La función de terminar sesiones no está implementada.
 
 Para listas vacías, errores de configuración, fallos de inicio o enfoque, actualización, desinstalación y restauración: [solución de problemas en inglés](../../README.md#troubleshooting-update-and-removal). La [documentación inglesa](../../README.md) es la referencia técnica; consulta [configuración](../../README.md#configuration) y [privacidad de agrupación](../../README.md#what-remote-sends).
+
+**Ejemplo ficticio, no observado en ejecución ni incluido como sesión:** pulsa `/`, busca `build failure` e imagina una fila Claude Code · título `Build failure` · proyecto `demo-project`. Con `↑`/`↓`, comprueba proveedor, título y directorio original. Si es la conversación **Resumable** correcta, `Enter` la reabre mediante el CLI de Claude instalado y autenticado, con el directorio accesible. No garantiza resultados ni compatibilidad.
+
+- Lista vacía: comprueba historial guardado, proveedor habilitado y `state_dir`.
+- Fallo al reanudar: revisa instalación del CLI, autenticación y directorio original.
+- No inicia: extrae el archivo completo con `providers/`, `prompts/` y ejemplo generado; revisa el lanzador.
+
+Consulta las conversaciones guardadas en la lista, busca en tu historial y elige una para retomarla. El GIF muestra la interfaz en inglés de la versión grabada, no una verificación de la versión actual ni de la compatibilidad de cada CLI. Traducir la documentación no traduce la interfaz ni las conversaciones guardadas. Configura la privacidad indicada en la instalación antes de iniciar. Se desconocen la versión y la fecha de la grabación. [Instalar Core](#install-core).
+
+<img src="../agentTUI.gif" alt="Demostración del TUI: lista de historial, búsqueda y reanudación" width="700">
