@@ -1,42 +1,91 @@
-# Agent CLI Session TUI
+# Agent CLI Session TUI — Search coding-agent history and resume sessions
 
-**Agent view for every CLI** — one screen for parallel Copilot, Claude, Codex, Qwen, Gemini, Kimi background sessions.
+[English](README.md) · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [Español](docs/i18n/README.es.md) · [Português (Brasil)](docs/i18n/README.pt-BR.md) · [Français](docs/i18n/README.fr.md) · [Deutsch](docs/i18n/README.de.md)
+
+A **terminal session manager** for existing **Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, and Kimi** conversations. Search history across these six providers, inspect a conversation, and resume it without remembering which CLI you used. On Windows, it can also focus a matching running Windows Terminal tab.
+
+It reads each provider's own history, including independently started conversations—not just sessions launched by this TUI. Additional providers can be added through [provider definitions](#adding-a-provider); this is not support for every CLI or a generic shell multiplexer. Running-tab focus is Windows-only and depends on finding a matching tab. Kill is not implemented.
+
+## Quick start: find an old conversation and resume it
+
+### Before you launch: prerequisites and privacy
+
+- Have saved history from at least one [supported provider](#supported-providers). To resume, that provider's CLI must be installed, available through the configured `command`, and authenticated. The original working directory must still be accessible.
+- Use a release for your OS and CPU in an interactive terminal. Core targets Windows, Linux and macOS, x64/arm64; Semantic availability differs by target. On Windows, install Windows Terminal (`wt`) for the default launcher and native tab focus; `cmd` is the packaged fallback. Linux defaults to `gnome-terminal`; macOS uses `osascript` with Terminal. Change the [launcher configuration](#configuration) if those commands are unavailable. Linux/macOS do not focus existing running tabs.
+- **Privacy warning before first launch:** default `remote` grouping sends session **titles and working directories** to a hosted service when invoked. It can run automatically after initial discovery, not just when you press `s`. The service has no published third-party request/response contract. For **non-network grouping**, add or edit this table in `config.toml` **before starting**:
+
+```toml
+[grouping]
+engine = "wordmatch"
+```
+
+`wordmatch` uses word overlap; it is **not local AI**. This setting controls grouping, not the behavior of your provider CLIs. The optional semantic plugin can download model files on initialization; use Core for a first run without that plugin. See [grouping privacy](#what-remote-sends) and [semantic search](#what-you-get-out-of-the-box). Keep configuration, logs and session metadata private.
+
+### Install the complete release archive
+
+1. Open [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), select a release, and download the **Core** archive for your OS/architecture (`.zip` on Windows, `.tar.gz` on Linux/macOS), not GitHub's source-code archive. Semantic is optional.
+2. Extract the **whole archive** into a writable folder. Keep the binary, `providers/`, `prompts/`, and generated `config.toml.example` together. Copying just the executable loses provider definitions and prompt assets.
+3. Copy `config.toml.example` to `config.toml` beside the executable; do not overwrite an existing configuration. Edit the existing `[grouping]` table to `engine = "wordmatch"` for non-network grouping. Check `state_dir`, `command` and launcher, and disable unused providers with `enabled = false`.
+4. Open a terminal **in the extracted folder**, then start:
+
+```powershell
+# Windows PowerShell
+.\agent-session-tui.exe
+```
+
+```sh
+# Linux/macOS
+./agent-session-tui
+```
+
+The source checkout has **`config.toml.template`**, not a ready-to-run example: release packaging substitutes OS-specific placeholders using `scripts/generate_config.py` and writes **`dist/config.toml.example`**. Do not simply rename the source template. Developers can use the generator with their target triple before following the copy/edit step; see [Building](#building).
+
+### First search and expected result
+
+To search Copilot CLI session history—or find an old Claude Code or Codex conversation—use a phrase from **your own saved history**. No sample session is bundled.
+
+1. Wait for sessions to populate the list. Press `/`, then type a known project name or distinctive phrase (the slash opens search; it is not part of the query).
+2. Use `↑`/`↓` to inspect matches and details. Confirm the provider, title and working directory before pressing `Enter`; ranking can miss a session, especially with vague or misspelled queries.
+3. Choose **Resumable** to relaunch that provider CLI with its saved session ID in the original working directory. **Expected result:** a terminal opens and the provider displays the selected conversation, ready to continue, assuming history and authentication remain valid.
+4. For **Running/Waiting**, `Enter` instead attempts to focus an existing matching **Windows Terminal** tab. **Expected result on a match:** that tab is selected and its window comes to the foreground. This is focus, not universal process attachment; on Linux/macOS, switch to the running terminal yourself.
+
+`Esc` cancels search; `q` or `Ctrl+C` exits without deleting provider histories. If nothing appears or launching fails, see [Troubleshooting, update and removal](#troubleshooting-update-and-removal).
 
 ![Agent CLI Session TUI demo](docs/agentTUI.gif)
 
 ## Pain Points Solved
 
-- **Where is my running agent?** — `Enter` on any 🟡 *Needs input* / 🟢 *Working* session to attach / focus its terminal tab
+- **Where is my running agent?** — `Enter` on a 🟡 *Needs input* / 🟢 *Working* session attempts to focus a matching Windows Terminal tab (Windows only)
 - **Too many tabs** — every background session in one view with clear status badges
 - **Which needs my input?** — 🟡 *Needs input* vs 🟢 *Working* vs 💤 *Resumable* at a glance
-- **Finding that one session** — `/` to search. Hybrid ranking fuses keyword (BM25) + semantic embeddings + lexical scoring via Reciprocal Rank Fusion, so typos, paraphrases, and half-remembered phrases all land the right session. Indexes titles, summaries, compaction summaries, and your own messages
+- **Finding that one session** — `/` to search. Hybrid ranking fuses keyword (BM25) + semantic embeddings + lexical scoring via Reciprocal Rank Fusion, to help with typos, paraphrases, and partial recall; results are not guaranteed and semantic ranking requires the optional plugin. Indexes titles, summaries, compaction summaries, and your own messages
 - **Hundreds of sessions piling up** — `g` to assign to groups; `Shift+Tab` to view by group; optional [AI auto-suggest](#ai-auto-grouping)
-- **Close without worry** — shut down anytime; all sessions remain discoverable + resumable
+- **Close without worry** — shut down anytime; saved histories remain available; resumption depends on the provider CLI and retained history
 - **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
 
 ## Beyond `claude agents`
 
-Claude Code's [`claude agents`](https://code.claude.com/docs/en/agent-view) is single-vendor and only shows sessions **it** dispatched. This TUI does more:
+This TUI reads supported retained provider histories, including conversations started independently of this TUI. See Claude Code's [`agent view documentation`](https://code.claude.com/docs/en/agent-view) for its current behavior; no future or version-wide comparison is asserted here.
 
 | What we add | |
 |---|---|
 | **Multi-CLI** | One screen for Copilot · Claude · Codex · Qwen · Gemini · Kimi |
-| **Sees every session, not just backgrounded ones** | Plain `claude` and `claude agents` are two disjoint pools today — sessions you ran with `claude` (interactive) never appear in `claude agents`, past or future, unless you explicitly background them. This TUI reads each CLI's own session directory, so every session shows up regardless of how it was started |
-| **Hybrid content search** | BM25 keyword + semantic embeddings + lexical scoring fused via Reciprocal Rank Fusion. Tolerates typos and paraphrases without penalizing exact matches. Searches titles, summaries, and your own messages mid-transcript |
+| **Supported retained histories** | This TUI reads each CLI's own session directory, so supported saved histories can appear regardless of how they were started (subject to provider format and discovery filters) |
+| **Hybrid content search** | BM25 keyword + semantic embeddings + lexical scoring fused via Reciprocal Rank Fusion. Semantic ranking requires the optional plugin; typo/paraphrase matches and exact-match ordering are not guaranteed. Searches titles, summaries, and your own messages mid-transcript |
 | **Thematic groups** | `g` to tag any session into a named group; `Shift+Tab` to browse by group |
 | **AI-suggested groups** | Optional ACP-driven auto-clustering of ungrouped sessions |
 - **Resume after reboot** — summaries, last activity, full last response so you can pick up the right one
 
 ## Beyond Intelligent Terminal
 
-[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) is an experimental fork of Windows Terminal with native agent integration — the *terminal* that hosts your agent CLI. This TUI is the *cross-CLI switchboard* for everything those agents leave behind.
+[**Intelligent Terminal**](https://github.com/microsoft/intelligent-terminal) is an experimental fork of Windows Terminal with native agent integration — the *terminal* that hosts your agent CLI. This TUI catalogs supported retained histories discovered by its provider definitions.
 
 | What we add | |
 |---|---|
-| **Cross-CLI, not single-host** | Intelligent Terminal hosts one agent per pane. This TUI surfaces every session from every provider — Copilot, Claude, Codex, Qwen, Gemini, Kimi — in one list |
-| **Hybrid content search** | BM25 + semantic embeddings + lexical, fused via RRF. Find a session by typo, paraphrase, or half-remembered phrase across every provider at once |
+| **Cross-CLI, not single-host** | This TUI lists supported retained histories discovered by the Copilot, Claude, Codex, Qwen, Gemini and Kimi definitions, subject to provider formats and filters |
+| **Hybrid content search** | BM25 + semantic embeddings + lexical, fused via RRF. Search discovered histories with partial recall; semantic ranking requires the optional plugin and results are not guaranteed |
 | **Thematic groups across providers** | Group sessions by project or theme regardless of which CLI ran them; optional AI-suggested clustering |
-| **Runs anywhere** | Pure ratatui TUI — works inside Intelligent Terminal, Windows Terminal, tmux, or any plain terminal on Windows / Linux / macOS |
+| **Cross-platform catalog** | Core release targets for Windows / Linux / macOS. Resume requires a configured terminal launcher; native running-tab focus is Windows-only |
 
 Use them together: Intelligent Terminal for the conversation, this TUI for the catalog.
 
@@ -70,16 +119,16 @@ Three states, mirroring `claude agents` vocabulary:
 |-------|-------------|-----------------|---------|
 | 🟢    | **Running** | *Working*       | Actively running tools or generating a response |
 | 🟡    | **Waiting** | *Needs input*   | Finished — waiting for your reply / permission |
-| 💤    | **Resumable** | *Completed*   | Not currently running — attach / resume anytime |
+| 💤    | **Resumable** | *Completed*   | Not currently running — resume through the installed provider CLI |
 
-`Enter` on *Running* / *Waiting* attaches (focuses existing terminal tab). `Enter` on *Resumable* relaunches.
+`Enter` on *Running* / *Waiting* attempts Windows Terminal tab focus on Windows; Linux/macOS cannot focus existing tabs. `Enter` on *Resumable* relaunches through the configured CLI.
 
 ## Keybindings
 
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` or `j`/`k` | Navigate sessions |
-| `Enter` (⏎) | Resume selected session — focuses the WT tab if Running, launches otherwise |
+| `Enter` (⏎) | Resume a Resumable session; attempt WT tab focus for Running/Waiting on Windows |
 | `n` | New session (launches default provider) |
 | `a` | Archive session (instantly hidden) |
 | `g` | Assign current session to a group (← → pick from existing, type to add new) |
@@ -87,7 +136,7 @@ Three states, mirroring `claude agents` vocabulary:
 | `y` / `n` / `e` | Accept / dismiss / edit pending AI suggestion (cursor must be on a session with a 🤖 shadow) |
 | `/` | Search (type to filter, `↑`/`↓` to browse, `Enter` to resume, `Esc` to cancel) |
 | `Shift+Tab` | Cycle Active → Grouped → Hidden views |
-| `Tab` | Switch panel focus (works for all 5 providers) |
+| `Tab` | Switch panel focus (provider-independent) |
 | `PgUp`/`PgDn` | Scroll detail panel |
 | `Esc` | Cancel search |
 | `q` / `Ctrl+C` | Quit |
@@ -107,7 +156,7 @@ Native mouse text selection works (click-drag to highlight and copy).
 
 ## Configuration
 
-Copy `config.toml.example` next to the binary and rename to `config.toml`:
+Use the generated release example, copied to `config.toml` next to the binary. This excerpt is Windows-oriented; retain your release example's OS-specific settings and the pre-launch privacy choice above:
 
 ```toml
 data_dir = '~/.local/share/agent-session-tui'
@@ -147,7 +196,7 @@ launch_args = ["-w", "0", "new-tab", "--startingDirectory", "{cwd}", "cmd", "/k"
 
 Placeholders: `{cwd}` → working directory, `{command}` → the agent CLI command.
 
-Config search order: next to exe → `%APPDATA%/agent-session-tui/config.toml` → built-in defaults.
+Config search order: next to exe → the OS configuration directory (`%APPDATA%/agent-session-tui/config.toml` on Windows) → built-in defaults. A malformed found configuration is an error, not an instruction to use defaults.
 
 ## Search
 
@@ -156,14 +205,14 @@ Search is a hybrid ranker. Three independent signals score every session, then *
 | Signal | What it catches |
 |--------|-----------------|
 | **BM25** (Tantivy full-text index) | Exact keywords, multi-word phrases, weighted titles |
-| **Semantic** (cached embeddings, optional DLL) | Paraphrases — "improve grammar" finds "Polish English Writing" |
-| **Lexical** (substring + fuzzy) | Typos and partial recall — "iteation revew" still finds "Iteration Review" |
+| **Semantic** (cached embeddings, optional DLL) | Paraphrase similarity, e.g. "improve grammar" versus "Polish English Writing"; no guaranteed match |
+| **Lexical** (substring + fuzzy) | Typos and partial recall, e.g. "iteation revew" versus "Iteration Review"; no guaranteed match |
 
-On top of fusion: an **exact-title substring lock** pins any session whose title literally contains your query to rank 1, so remembering the query correctly is never penalized. State and recency act as soft tie-breakers.
+On top of fusion: an **exact-title substring lock** prioritizes literal title matches. Multiple matching titles, available content and query choice still affect which conversation you find. State and recency act as soft tie-breakers.
 
 ### Measured on real session data
 
-30-query benchmark over ~780 sessions, comparing the previous additive scorer with the current RRF default:
+Maintainer-reported historical results from a private 30-query corpus over ~780 sessions, comparing the previous additive scorer with the current RRF default. Actual private queries, histories and run artifacts are not published, so these numbers are not publicly reproducible from the example queries. Results vary with corpus, plugin availability and environment; they do not guarantee accuracy on your histories and have not been rerun for this documentation update:
 
 |                  | Additive | **RRF (default)** |
 |------------------|----------|-------------------|
@@ -176,8 +225,9 @@ Per-category P@1 jumps: exact-title 33% → 100%, person-name 50% → 100%, sema
 ### What you get out of the box
 
 - No flags, no opt-in — RRF is the default scorer
-- The semantic signal needs the optional `semantic_search.dll` / `.so` / `.dylib` plugin; without it, the ranker degrades gracefully to BM25 + lexical
+- The semantic signal needs the optional `semantic_search_plugin.dll` / `libsemantic_search_plugin.so` / `libsemantic_search_plugin.dylib` plugin; without it, the ranker degrades gracefully to BM25 + lexical
 - Embeddings are pre-computed and cached per session — search itself never embeds
+- The plugin may download model files during initialization; embeddings are computed locally. Only load a trusted matching-platform plugin from a trusted directory
 - Status bar shows 🧠 when the semantic plugin is loaded
 - Indexes are incremental — only changed sessions are re-indexed on each scan
 - **No index migration needed** when upgrading: schema, fingerprints, and embedding cache are unchanged
@@ -211,16 +261,14 @@ Set with `[grouping] engine` in `config.toml`.
 
 **`remote` — the default.** Sends session titles and working directories to a
 hosted tab auto-grouping service, which returns natural group names like
-"System Maintenance". About 2 seconds for 30 sessions. Nothing to install or
-authenticate.
+"System Maintenance". A maintainer-reported historical private-data run took about 2 seconds for 30 sessions; no public run artifact/environment is supplied. Latency varies with service, network and workload. No separate service installation or authentication is configured, but titles and paths leave the machine.
 
 **`wordmatch`** — no network, and **not an AI model of any kind**. It counts how many words two session titles share, groups them if more than half overlap, and names each group after its most common words.
 That produces blunt names like `benchmark-prompt-files`, so expect to rename
-some with `e`. It runs in ~0.2s and is also the automatic fallback whenever
-`remote` fails.
+some with `e`. A maintainer-reported historical private-data run took ~0.2s; no public run artifact/environment is supplied. Timing varies with hardware and workload. It is also the automatic fallback whenever `remote` fails.
 
 **`acp`** — legacy. Spawns the CLI configured in `[acp]` (default `copilot`).
-Best names, but 25–45s per batch and it burns your Copilot quota. Requires the
+The maintainer historically reported useful names and 25–45s per batch on private data, without a public run artifact/environment. Quality and timing vary with model and workload; it consumes the configured CLI's quota. Requires the
 `copilot` CLI authenticated and `prompts/group-suggest.md` next to the binary.
 A run exceeding `timeout_secs` is **terminated**, not just abandoned.
 
@@ -234,14 +282,14 @@ timeout_secs = 20     # remote call timeout
 ### What `remote` sends
 
 - **Sent:** session titles and working directories (as `file:///` URIs), for one
-  representative per cluster of near-duplicate sessions. In testing that reduced
-  40 sessions to 8 entries. The working directory is included because it
-  measurably improves results.
+  representative per cluster of near-duplicate sessions. The maintainer reported a historical private-data reduction from
+  40 sessions to 8 entries; no public run artifact is supplied and other histories
+  can cluster differently. Working directories provide additional context.
 - **Never sent:** session summaries, file contents, chat transcripts.
 - **On any failure** — non-2xx, timeout, schema change — it falls back to
   `wordmatch` and shows a warning. To retry the online service, use `Shift+Tab` to
   enter the Grouped view, then press `s`. If a manual run fails while its
-  suggestion review is open, press `Esc`, then `s`. Grouping never breaks.
+  suggestion review is open, press `Esc`, then `s`. The fallback is intended to preserve grouping when the service fails.
 
 > **Note:** the grouping service is Microsoft-hosted. Its URL is published in
 > Microsoft's [Edge endpoint allowlist](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-security-endpoints)
@@ -254,13 +302,13 @@ timeout_secs = 20     # remote call timeout
 ### Reusing the groups you already have
 
 New sessions that cluster with an already-grouped session inherit that group,
-so you don't accumulate near-duplicates. That happens locally and always works.
+so you don't accumulate near-duplicates. That matching happens locally; results depend on titles and existing assignments.
 
 There is also an opt-in mode that sends your existing group *names* (never the
 sessions in them) to the remote service so it can fold candidates in directly.
 It's **off by default**: the service accepts those payloads only erratically —
-measured against the live endpoint with 11 real sessions, 3 group names returned
-an empty response while 1 succeeded. Turning it on mostly costs a wasted
+in a maintainer-reported historical private-data trial with 11 sessions, 3 group names returned
+an empty response while 1 succeeded. No public run artifact is supplied; this is not a current reliability measurement. Turning it on mostly costs a wasted
 round-trip before the automatic retry.
 
 ```toml
@@ -279,10 +327,26 @@ Groups are sorted by most-recent member activity, frozen on entry to the Grouped
 
 | Package | Size | Contents |
 |---------|------|----------|
-| **Core** | ~1.1 MB | `agent-session-tui` binary only |
-| **Semantic** | ~26 MB | Core + `semantic_search_plugin` DLL |
+| **Core** | ~1.1 MB binary (archive varies) | Binary + `providers/`, `prompts/`, generated `config.toml.example`, README and license |
+| **Semantic** | ~26 MB (varies by target) | Complete Core package + platform-specific plugin; model download may follow |
 
-Built for **x64** and **arm64** across all three platforms (Windows, Linux, macOS).
+Core targets cover **x64** and **arm64** on Windows, Linux and macOS. The Semantic matrix covers Windows/Linux x64 and arm64, and macOS arm64; consult the selected release assets for availability.
+
+## Troubleshooting, update and removal
+
+| Symptom | What to check |
+|---------|---------------|
+| Empty list or no match | Confirm saved conversations, an enabled provider and the actual CLI `state_dir`. Wait for discovery; try a literal title fragment. Check Hidden with `Shift+Tab` if you archived it. Not every format/version or query is guaranteed to match. |
+| Configuration error at startup | Check TOML syntax and duplicate tables. Back up your config, compare the generated release example, and fix the file found by the config search order. Preserve the privacy setting; removing configuration can restore remote defaults. |
+| `Failed to resume` / no terminal | Try the provider's own resume command with the selected session ID in its original directory. Check authentication, `command`, resume arguments, directory existence and launcher availability. Fix configuration, not provider history. |
+| Missing or wrong running-tab focus | Focus is Windows-only and title-based, not a process attachment guarantee. Shared titles can be ambiguous. Switch manually and verify the tab; Linux/macOS users must switch manually. |
+| No 🧠 indicator | Semantic search is optional. Check the trusted matching-platform library beside the executable and model initialization; Core still has keyword/lexical search. |
+
+See [issue guidance](CONTRIBUTING.md#reporting-issues) and [security reporting](SECURITY.md). Logs can contain IDs and paths; redact sensitive content before sharing.
+
+**Update:** quit with `q`/`Ctrl+C`, back up `config.toml` and configured `data_dir` (groups, archive state and caches), and extract the new complete archive into a separate folder. Copy your configuration and keep the same `data_dir`; compare the new example without overwriting your settings. **Restore:** return to the old complete package and backed-up configuration/data. Provider updates and authentication are separate.
+
+**Remove:** quit, then remove only your extracted TUI package. Optionally back up and remove its own configured `data_dir` and OS-level TUI configuration; do not delete `.copilot`, `.claude`, `.codex`, `.qwen`, `.gemini` or `.kimi` histories. Exiting/removing the TUI does not stop running provider CLIs; close those through their own terminal.
 
 ## Adding a Provider
 
@@ -302,7 +366,7 @@ pub trait Provider: Send + Sync {
 }
 ```
 
-Launch/resume/kill are handled by the framework from `config.toml`. Register your provider in `main.rs::create_provider()`.
+Launch and resume are handled by the supervisor from `config.toml`; **kill is not implemented**. The six shipped providers use YAML definitions loaded generically by `main.rs::create_provider()`; implement the trait only when the shared YAML engine cannot express your provider.
 
 ## Building
 
@@ -313,6 +377,28 @@ rustup override set stable-x86_64-pc-windows-msvc  # Windows only
 cargo build --release
 # Binary: target/release/agent-session-tui(.exe)
 ```
+
+
+Python 3 is needed for configuration generation. From the repository root, after building, stage a fresh Windows package (do not overwrite an existing installation):
+
+```powershell
+New-Item -ItemType Directory -Path dist
+Copy-Item target\release\agent-session-tui.exe dist\
+Copy-Item providers,prompts -Destination dist -Recurse
+python scripts\generate_config.py x86_64-pc-windows-msvc config.toml.template dist\config.toml.example
+Copy-Item dist\config.toml.example dist\config.toml
+```
+
+For Windows arm64 use `aarch64-pc-windows-msvc`. For native Linux/macOS builds, copy `target/release/agent-session-tui` rather than the `.exe`, and keep `providers/` and `prompts/` beside it. The generator takes three arguments: **target triple, source template, output file**. From the repository root:
+
+```sh
+# Linux x64; use aarch64-unknown-linux-gnu for arm64
+python3 scripts/generate_config.py x86_64-unknown-linux-gnu config.toml.template dist/config.toml.example
+# macOS arm64; use x86_64-apple-darwin for x64
+python3 scripts/generate_config.py aarch64-apple-darwin config.toml.template dist/config.toml.example
+```
+
+The generator creates the output directory if needed but does not copy assets. The finished layout is `dist/agent-session-tui(.exe)`, `dist/providers/`, `dist/prompts/`, `dist/config.toml.example` and your edited `dist/config.toml`. Copy the example only for a fresh setup; never rename the placeholder template or overwrite existing configuration. **Before launching the staged binary**, follow [the prerequisites and privacy choice](#before-you-launch-prerequisites-and-privacy), including `[grouping] engine = "wordmatch"` for non-network grouping.
 
 ## Testing
 
