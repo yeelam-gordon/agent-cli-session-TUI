@@ -4,8 +4,9 @@
 //! under "Tab groups", but **only as a firewall entry** — there is no published
 //! request/response contract, versioning guarantee, or terms covering
 //! third-party callers. Everything below was determined by probing the live
-//! service, so it can break without notice. Every call path therefore degrades
-//! to the local engine on failure, and grouping never breaks.
+//! service, so it can break without notice. On remote failure, the application
+//! attempts a wordmatch fallback and surfaces a warning or error; this does not
+//! guarantee that grouping succeeds.
 //!
 //! [al]: https://learn.microsoft.com/en-us/deployedge/microsoft-edge-security-endpoints
 //!
@@ -13,20 +14,20 @@
 //!
 //! Session titles and working directories (as `file:///` URIs), for one
 //! representative per local cluster — near-duplicate sessions collapse to a
-//! single entry first — plus the user's existing group *names* as lightweight
-//! placeholders so candidates can be folded into a group they already have.
-//! Sessions already assigned to those groups are never sent.
+//! single entry first. Existing group *names* are included as lightweight
+//! placeholders only when reuse_existing_groups is enabled (off by default).
+//! Sessions already assigned to those groups are not included as candidates.
 //!
-//! The working directory is included because it measurably improves grouping:
-//! the service was built for browser tabs, where the URL is a strong signal, and
-//! it uses this field the same way. On 40 real sessions it merged two
-//! arbitrarily-split groups into one and produced better names.
+//! The working directory supplies a URL-like signal for the tab-grouping
+//! service. A historical maintainer observation on 40 private sessions reported
+//! merged groups and better names; this is not a reproducible public benchmark
+//! or a guarantee for another workload.
 //!
 //! Summaries, file contents, and chat transcripts are never sent.
 //!
 //! ## Observed protocol
 //!
-//! Verified empirically against the live service:
+//! Historical maintainer observations, not a supported public API contract:
 //!
 //! - Success is `200` with `Content-Type: text/event-stream`, a newline-
 //!   delimited sequence of JSON objects, terminated by a literal `["DONE"]`.
