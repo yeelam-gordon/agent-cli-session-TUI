@@ -2,7 +2,7 @@
 
 <a id="languages"></a>
 <details>
-<summary>Languages / 语言 / 言語 / اللغات (16)</summary>
+<summary>Languages (16)</summary>
 
 [English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
 
@@ -10,108 +10,58 @@
 
 </details>
 
-Cerca nelle cronologie di più CLI. Riprendi la conversazione con il suo contesto nel CLI originale installato. Solo su Windows, prova a selezionare la scheda Windows Terminal corrispondente già in esecuzione, senza aprire un’altra finestra.
+Ricordi il lavoro, ma non il CLI che contiene la conversazione? Cerca nelle cronologie di Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi. Se conosci già fornitore e sessione, può bastare la cronologia del CLI stesso.
 
-[Vedi il percorso](#first-workflow) · [Installa Core](#install-core) · [Fornitori e limiti](../../README.md#supported-providers)
+<img src="../agent-session-benefits.png" alt="Concetto: cercare nelle cronologie CLI, riprendere il contesto originale e tentare di selezionare la scheda Windows in esecuzione corrispondente" width="780">
 
-Il raggruppamento remoto predefinito può inviare automaticamente titoli e percorsi; scegli Core + wordmatch prima dell’avvio.
+Illustrazione concettuale, non una schermata reale dell’app. Etichette inglesi e righe fittizie.
 
-<img src="../agent-session-benefits.png" alt="Concetto: ritrovare e riprendere una conversazione nelle cronologie dei CLI" width="780">
-
-Illustrazione concettuale, non una schermata reale dell’app. Le etichette inglesi e le righe fittizie sono esempi, non cronologie private reali.
-
-- Ritrova un argomento o progetto: cerca una frase che ricordi e verifica fornitore, titolo e directory.
-- Riprendi la conversazione giusta: `Enter` su **Resumable** richiede cronologia conservata, CLI installato e autenticato e directory originale accessibile.
-- Ritrova la scheda in esecuzione su Windows: tenta di selezionare una scheda corrispondente di Windows Terminal, solo su Windows; non è un collegamento universale ai processi. Su Linux/macOS passa manualmente al terminale.
-
-Non deve essere stata avviata da questo TUI.
-
+- **Ritrova il lavoro precedente:** una ricerca in più cronologie conservate, anche per conversazioni avviate fuori da questo TUI.
+- **Riprendi la conversazione originale:** riapri il contesto salvato tramite il CLI originale installato.
+- **Ritrova la sua scheda attiva su Windows:** tenta di selezionare la scheda corrispondente di Windows Terminal; su Linux/macOS passa manualmente al terminale.
 
 <a id="install-core"></a>
 
 ## Prima ricerca privata: Core + wordmatch
 
-Serve una conversazione salvata da almeno un fornitore. Per riprenderla, il suo CLI deve essere installato, autenticato e raggiungibile tramite il `command` configurato; la directory di lavoro originale deve essere accessibile. Usa un terminale interattivo e una versione adatta al sistema e alla CPU.
+Servono cronologia salvata, CLI installato e autenticato, accessibile tramite il `command` configurato, e directory originale disponibile. Usa un terminale interattivo e una versione per il tuo sistema/CPU. Lanciatori predefiniti: Windows `wt` (alternativa `cmd`), Linux `gnome-terminal`, macOS `osascript` con Terminal. Se mancano, modifica la [configurazione](../usage.md#configuration).
 
-Lanciatori predefiniti: Windows `wt` (alternativa `cmd`), Linux `gnome-terminal`, macOS `osascript` con Terminal. Adatta la configurazione se mancano. Core ha destinazioni x64/arm64 per i tre sistemi; i pacchetti semantici non coprono tutte le destinazioni, verifica gli allegati della release. La selezione nativa delle schede richiede Windows Terminal ed è solo per Windows.
+**Prima dell’avvio:** il raggruppamento remoto predefinito può inviare automaticamente **titoli e directory di lavoro** a un servizio esterno dopo il rilevamento della cronologia. Non esiste un contratto API pubblico per terze parti. Core + `wordmatch` evita questo raggruppamento remoto, non le connessioni dei CLI stessi. Il plugin semantico facoltativo può scaricare modelli all’inizializzazione; inizia con Core senza quel plugin.
 
-Da [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases) scarica l’**archivio Core completo**, non quello del codice sorgente. Estrai tutto e mantieni insieme eseguibile, `providers/`, `prompts/` e `config.toml.example` generato. Copia l’esempio come `config.toml` accanto all’eseguibile senza sovrascrivere impostazioni esistenti. Controlla `state_dir`, `command` e il lanciatore. Il sorgente `config.toml.template` contiene segnaposto: non basta rinominarlo.
-
-Verifica il digest del file esatto prima dell’avvio; la corrispondenza non è una firma né garanzia di sicurezza. Rispetta avvisi del sistema e politiche dell’organizzazione. [SHA-256](../../README.md#verify-a-release-download).
-
-**Avviso prima del primo avvio:** il raggruppamento predefinito `remote` invia titoli e directory di lavoro a un servizio ospitato e può partire automaticamente dopo il rilevamento iniziale. Non esiste un contratto API pubblico per terze parti. Per raggruppare senza rete, nella copia trova `# [grouping]` e `# engine = "remote"`: togli il `#` iniziale da entrambe le righe e cambia il valore in `"wordmatch"`.
+1. Da [Archivi Core per sistema e CPU](../usage.md#core-archive-filenames) scarica l’**archivio Core completo** per il tuo sistema/CPU, non quello del codice sorgente. Estrai tutto e mantieni insieme eseguibile, `providers/`, `prompts/` e `config.toml.example` generato. [Verifica il digest del file esatto](../usage.md#verify-a-release-download); la corrispondenza non è firma né garanzia di sicurezza. Rispetta avvisi del sistema e regole dell’organizzazione.
+2. Per una nuova installazione, copia l’esempio generato come `config.toml` accanto all’eseguibile. **Non sovrascrivere impostazioni esistenti e non rinominare il `config.toml.template` sorgente.** Nella copia, togli il `#` iniziale da **entrambe le righe**, `# [grouping]` e `# engine = "remote"`, poi cambia il valore:
 
 ```toml
 [grouping]
 engine = "wordmatch"
 ```
 
-Lascia commentate le altre opzioni. Se esiste già una tabella `[grouping]` attiva, modifica il suo `engine` senza aggiungerne un’altra. Salva prima di avviare o leggere la cronologia. `wordmatch` confronta parole, non è IA locale e non controlla le connessioni dei CLI. Il plugin semantico facoltativo può scaricare modelli all’inizializzazione; parti con Core per non caricarlo.
+Lascia commentate le altre opzioni. Se esiste già una tabella `[grouping]` attiva, modifica il suo `engine` senza duplicarla. Controlla `state_dir` e `command`; **salva prima dell’avvio**. `wordmatch` confronta parole condivise; non è IA locale.
+
+3. Avvia da un terminale nella cartella estratta:
+
+```powershell
+# Windows PowerShell
+.\agent-session-tui.exe
+```
+
+```sh
+# Linux/macOS
+./agent-session-tui
+```
 
 <a id="first-workflow"></a>
 
 ## Prima ricerca e risultato atteso
 
-Inizia con un frammento letterale del titolo o progetto. Core offre ricerca per parole e approssimativa; le parafrasi semantiche richiedono il plugin facoltativo.
+4. Attendi l’elenco, premi `/` e digita un frammento letterale del titolo o progetto della tua cronologia. Con `↑`/`↓` controlla fornitore, titolo e directory; scegli **Resumable**, poi `Enter`. **Risultato atteso:** il CLI originale apre la conversazione scelta per continuarla. La ricerca può tralasciare risultati; le versioni native dei CLI testate sono sconosciute. [Copertura e prove](../usage.md#supported-providers).
 
-Dal terminale nella cartella estratta, su Windows PowerShell:
+<a id="windows-terminal"></a>
 
-```powershell
-.\agent-session-tui.exe
-```
+Per **Running/Waiting/Idle**, solo Windows tenta di selezionare una scheda corrispondente; non è un collegamento universale ai processi. Ripetere subito `Enter` sulla stessa sessione attiva può **forzare la ripresa** anziché cambiare scheda. Verifica prima. [Percorso Windows](../usage.md#secondary-workflow-find-a-running-windows-tab).
 
-Su Linux/macOS:
+**Nessun risultato?** Verifica cronologia conservata, fornitore abilitato e `state_dir`; se non parte, controlla autenticazione, directory originale e lanciatore. [Risoluzione dei problemi](../usage.md#troubleshooting-update-and-removal).
 
-```sh
-./agent-session-tui
-```
+**Uscire:** `Esc` annulla la ricerca; poi `q` chiude il TUI, oppure usa `Ctrl+C` nell’elenco o nella ricerca senza cancellare cronologie né fermare altri CLI. La terminazione delle sessioni non è implementata. [Aggiornamento, ripristino e rimozione](../usage.md#troubleshooting-update-and-removal).
 
-Sono incluse sei definizioni di cronologia e percorsi di ripresa configurati; le versioni dei CLI nativi testate qui sono **sconosciute**. Non è una certificazione di compatibilità in uso reale. Vedi [copertura e prove](../../README.md#supported-providers).
-
-| UI | `Enter` |
-|---|---|
-| Resumable (conversazione riprendibile) | Riprendere con CLI installato e autenticato e directory originale accessibile |
-| Running / Waiting / Idle | Solo su Windows tentare di selezionare la scheda in esecuzione corrispondente di Windows Terminal; altrimenti passare manualmente |
-| Archived / Stopped | Riprendere con CLI installato e autenticato e directory originale accessibile; [limiti](../../README.md#supported-providers) |
-
-
-
-Attendi l’elenco, premi `/` e inserisci un progetto o una frase della tua cronologia. Con `↑`/`↓` controlla i dettagli: fornitore, titolo e directory, poi `Enter`. Con **Resumable**, ci si aspetta un terminale in cui il CLI carica la conversazione scelta per continuarla.
-
-`Esc` annulla la ricerca; `q` / `Ctrl+C` esce senza cancellare la cronologia né fermare altri CLI. La terminazione delle sessioni non è implementata.
-
-- Elenco vuoto: verifica cronologia salvata, fornitore abilitato e `state_dir`.
-- Ripresa fallita: verifica installazione del CLI, autenticazione e directory originale.
-- Avvio fallito: estrai l’archivio completo con `providers/`, `prompts/` ed esempio generato; verifica il lanciatore.
-
-Elenco vuoto, configurazione errata, problemi di avvio o selezione, aggiornamento, rimozione e ripristino: [risoluzione dei problemi in inglese](../../README.md#troubleshooting-update-and-removal). Il [manuale inglese](../../README.md) è il riferimento tecnico; vedi [configurazione](../../README.md#configuration) e [dati inviati](../../README.md#what-remote-sends).
-
-
-
-
-Se conosci già fornitore e sessione, basta la cronologia del CLI. Questo catalogo aiuta con più CLI o progetti, quando ricordi l’argomento ma non l’ID.
-
-Un gestore di sessioni di terminale per le conversazioni conservate di Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi, anche avviate separatamente. Sono sei fornitori integrati: la copertura dipende dai formati e dai filtri di rilevamento, non include automaticamente ogni CLI.
-
-Segui i passi sulla privacy prima dell’avvio; il raggruppamento remoto predefinito può partire automaticamente.
-
-
-
-
-
-### Windows Terminal
-
-Con **Running/Waiting/Idle**, solo su Windows si tenta di selezionare una scheda corrispondente di Windows Terminal: se riesce, la scheda è selezionata e la finestra va in primo piano. Su Linux/macOS passa manualmente al terminale attivo. Risultati e corrispondenze approssimative non sono garantiti.
-
-<details>
-<summary>↳ Prima ricerca privata: Core + wordmatch</summary>
-
-**Esempio fittizio, non osservato in esecuzione né incluso come sessione:** premi `/`, cerca `build failure` e immagina una riga Claude Code · titolo `Build failure` · progetto `demo-project`. Con `↑`/`↓`, verifica fornitore, titolo e directory originale. Se è la conversazione **Resumable** giusta, `Enter` la riapre tramite il CLI Claude installato e autenticato, con la directory accessibile. Nessuna garanzia di risultati o compatibilità.
-
-</details>
-
-
-
-Consulta le conversazioni conservate, cerca nella tua cronologia e scegline una da riprendere. Il GIF mostra l’interfaccia inglese della versione registrata, non verifica la versione attuale o la compatibilità di ogni CLI. Tradurre i documenti non traduce l’interfaccia né le conversazioni salvate. Imposta la privacy descritta nei passi di installazione prima di avviare il programma. La versione e la data della registrazione sono sconosciute. [Installa Core](#install-core).
-
-<img src="../agentTUI.gif" alt="Demo TUI: elenco della cronologia, ricerca e ripresa" width="700">
+La [guida d’uso e delle prove in inglese](../usage.md) conserva cifre complete, risultati negativi e limiti. Versione e data della [registrazione](../usage.md#recorded-demo) sono sconosciute; non dimostra compatibilità attuale.

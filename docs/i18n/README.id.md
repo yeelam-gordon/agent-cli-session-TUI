@@ -2,7 +2,7 @@
 
 <a id="languages"></a>
 <details>
-<summary>Languages / 语言 / 言語 / اللغات (16)</summary>
+<summary>Languages (16)</summary>
 
 [English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
 
@@ -10,108 +10,58 @@
 
 </details>
 
-Cari percakapan di riwayat CLI dengan satu pencarian. Lanjutkan percakapan dan konteks lewat CLI asal yang terpasang. Hanya di Windows, coba fokuskan tab Windows Terminal yang cocok dan sedang berjalan, bukan membuka jendela lain.
+Ingat pekerjaannya, tetapi lupa percakapan itu ada di CLI mana? Cari dalam riwayat Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, dan Kimi. Jika penyedia dan sesi sudah diketahui, riwayat CLI itu sendiri mungkin cukup.
 
-[Lihat alur](#first-workflow) · [Pasang Core](#install-core) · [Penyedia dan batasan](../../README.md#supported-providers)
+<img src="../agent-session-benefits.png" alt="Konsep: mencari lintas riwayat CLI, melanjutkan konteks asal, dan mencoba memilih tab Windows berjalan yang cocok" width="780">
 
-Pengelompokan jarak jauh bawaan dapat mengirim judul dan jalur kerja otomatis; pilih Core + wordmatch sebelum menjalankan.
+Ilustrasi konsep, bukan tangkapan layar aplikasi sebenarnya. Label bahasa Inggris dan baris rekaan.
 
-<img src="../agent-session-benefits.png" alt="Konsep: menemukan dan melanjutkan percakapan lama di riwayat berbagai CLI" width="780">
-
-Ilustrasi konsep, bukan tangkapan layar aplikasi sebenarnya. Label bahasa Inggris dan baris rekaan hanya contoh, bukan riwayat pribadi nyata.
-
-- Temukan topik atau proyek lama: cari frasa yang diingat, lalu periksa penyedia, judul, dan direktori.
-- Lanjutkan percakapan yang tepat: `Enter` pada **Resumable** memerlukan riwayat tersimpan, CLI terpasang dan terautentikasi, serta direktori asal yang dapat diakses.
-- Temukan tab Windows yang berjalan: hanya di Windows, mencoba memfokuskan tab Windows Terminal yang cocok; bukan koneksi universal ke proses. Di Linux/macOS, beralih secara manual.
-
-Percakapan tidak harus dimulai dari TUI ini.
-
+- **Temukan kembali pekerjaan:** satu pencarian dalam beberapa riwayat tersimpan, termasuk percakapan yang dimulai di luar TUI ini.
+- **Lanjutkan percakapan asal:** buka kembali konteks tersimpan melalui CLI asal yang terpasang.
+- **Temukan tab Windows yang berjalan:** coba pilih tab Windows Terminal yang cocok; di Linux/macOS, beralih manual.
 
 <a id="install-core"></a>
 
 ## Pencarian pertama privat: Core + wordmatch
 
-Anda perlu percakapan tersimpan dari setidaknya satu penyedia. Untuk melanjutkannya, CLI terkait harus terpasang, sudah diautentikasi, dan dapat dijalankan lewat `command` dalam konfigurasi; direktori kerja asal harus dapat diakses. Gunakan terminal interaktif dan versi yang cocok dengan sistem operasi serta CPU.
+Perlu riwayat tersimpan, CLI terpasang dengan autentikasi selesai, dapat dijalankan lewat `command` yang dikonfigurasi, dan direktori kerja asal yang dapat diakses. Gunakan terminal interaktif dan versi untuk OS/CPU Anda. Peluncur bawaan: Windows `wt` (cadangan `cmd`), Linux `gnome-terminal`, macOS `osascript` dengan Terminal. Jika tidak tersedia, ubah [konfigurasi](../usage.md#configuration).
 
-Peluncur bawaan: Windows `wt` (cadangan `cmd`), Linux `gnome-terminal`, macOS `osascript` dengan Terminal. Sesuaikan pengaturan bila tidak tersedia. Core memiliki target x64/arm64 pada tiga sistem; paket semantik tidak tersedia untuk semua target, periksa berkas rilis. Fokus tab native memerlukan Windows Terminal dan hanya tersedia di Windows.
+**Sebelum menjalankan:** pengelompokan jarak jauh bawaan dapat mengirim **judul dan direktori kerja** otomatis ke layanan luar setelah menemukan riwayat. Tidak ada kontrak API publik bagi pihak ketiga. Core + `wordmatch` menghindari pengelompokan itu, bukan koneksi CLI sendiri. Plugin semantik opsional dapat mengunduh model saat inisialisasi; mulai dengan Core tanpa plugin itu.
 
-Unduh **arsip Core lengkap** dari [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases), bukan arsip kode sumber. Ekstrak seluruhnya; simpan program, `providers/`, `prompts/`, dan `config.toml.example` yang telah dihasilkan bersama-sama. Salin contoh menjadi `config.toml` di samping program tanpa menimpa pengaturan lama. Periksa `state_dir`, `command`, dan peluncur terminal. `config.toml.template` pada sumber masih memuat penanda yang harus diganti; jangan sekadar mengganti namanya.
-
-Bandingkan digest berkas yang tepat sebelum menjalankan; kecocokan bukan tanda tangan atau jaminan keamanan. Patuhi peringatan OS dan kebijakan organisasi. [SHA-256](../../README.md#verify-a-release-download).
-
-**Peringatan sebelum peluncuran pertama:** pengelompokan bawaan `remote` mengirim judul sesi dan direktori kerja ke layanan yang dihosting, dan dapat berjalan otomatis setelah penemuan awal. Tidak ada kontrak API publik untuk pihak ketiga. Untuk mengelompokkan tanpa jaringan, temukan `# [grouping]` dan `# engine = "remote"` dalam salinan konfigurasi; hapus `#` awal di kedua baris, lalu ubah nilainya menjadi `"wordmatch"`:
+1. Unduh **arsip Core lengkap** untuk OS/CPU Anda dari [Berkas Core untuk OS/CPU](../usage.md#core-archive-filenames), bukan arsip kode sumber. Ekstrak semuanya. Simpan program, `providers/`, `prompts/`, dan `config.toml.example` yang dihasilkan dalam folder yang sama. [Periksa digest berkas yang tepat](../usage.md#verify-a-release-download); cocok bukan berarti bertanda tangan atau dijamin aman. Patuhi peringatan OS dan kebijakan organisasi.
+2. Pada pemasangan baru, salin contoh yang dihasilkan menjadi `config.toml` di samping program. **Jangan timpa pengaturan lama atau sekadar mengganti nama `config.toml.template` dari sumber.** Dalam salinan, hapus `#` awal dari **kedua baris**, `# [grouping]` dan `# engine = "remote"`, lalu ubah nilainya:
 
 ```toml
 [grouping]
 engine = "wordmatch"
 ```
 
-Biarkan opsi lain tetap dikomentari. Jika sudah ada tabel `[grouping]` aktif, ubah `engine` di situ tanpa membuat tabel kedua. Simpan sebelum menjalankan program atau memindai riwayat. `wordmatch` hanya membandingkan kata, bukan AI lokal, dan tidak mengatur koneksi CLI penyedia. Plugin pencarian semantik opsional dapat mengunduh model saat inisialisasi; mulai dengan Core agar plugin itu tidak dimuat.
+Biarkan opsi lainnya dikomentari. Jika tabel `[grouping]` aktif sudah ada, ubah `engine` di situ, jangan membuat duplikat. Periksa `state_dir` dan `command`; **simpan sebelum menjalankan**. `wordmatch` membandingkan kata yang sama, bukan AI lokal.
+
+3. Jalankan dari terminal dalam folder hasil ekstraksi:
+
+```powershell
+# Windows PowerShell
+.\agent-session-tui.exe
+```
+
+```sh
+# Linux/macOS
+./agent-session-tui
+```
 
 <a id="first-workflow"></a>
 
 ## Pencarian pertama dan hasil yang diharapkan
 
-Mulai dengan potongan judul atau proyek yang sama persis. Core menawarkan pencarian kata dan perkiraan; parafrasa semantik memerlukan plugin opsional.
+4. Tunggu daftar, tekan `/`, lalu ketik potongan judul atau proyek persis dari riwayat Anda. Dengan `↑`/`↓`, periksa penyedia, judul, dan direktori; pilih **Resumable**, lalu `Enter`. **Hasil yang diharapkan:** CLI asal membuka percakapan terpilih untuk dilanjutkan. Pencarian bisa melewatkan hasil; versi CLI asli yang telah diuji tidak diketahui. [Cakupan dan bukti](../usage.md#supported-providers).
 
-Dari terminal di folder hasil ekstraksi, dengan Windows PowerShell:
+<a id="windows-terminal"></a>
 
-```powershell
-.\agent-session-tui.exe
-```
+Untuk **Running/Waiting/Idle**, hanya Windows mencoba memilih tab yang cocok; bukan koneksi universal ke proses. Menekan `Enter` lagi segera pada sesi berjalan yang sama dapat **memaksa melanjutkan sesi** alih-alih berpindah tab. Periksa dahulu. [Alur Windows](../usage.md#secondary-workflow-find-a-running-windows-tab).
 
-Linux/macOS:
+**Tidak ada hasil?** Periksa riwayat tersimpan, penyedia aktif, dan `state_dir`; jika gagal diluncurkan, periksa autentikasi, direktori asal, dan peluncur. [Pemecahan masalah](../usage.md#troubleshooting-update-and-removal).
 
-```sh
-./agent-session-tui
-```
+**Keluar:** `Esc` membatalkan pencarian; setelah itu `q` menutup TUI, atau gunakan `Ctrl+C` pada daftar atau pencarian tanpa menghapus riwayat atau menghentikan CLI lain. Penghentian sesi belum diimplementasikan. [Pembaruan, pemulihan, dan penghapusan](../usage.md#troubleshooting-update-and-removal).
 
-Tersedia enam definisi riwayat dan jalur lanjut yang dikonfigurasi; versi CLI asli yang diuji di sini **tidak diketahui**. Ini bukan sertifikasi kompatibilitas penggunaan nyata. Lihat [cakupan dan bukti](../../README.md#supported-providers).
-
-| UI | `Enter` |
-|---|---|
-| Resumable (percakapan yang dapat dilanjutkan) | Lanjutkan melalui CLI terpasang dan terautentikasi, dengan direktori asal yang dapat diakses |
-| Running / Waiting / Idle | Hanya di Windows, coba fokuskan tab Windows Terminal berjalan yang cocok; lainnya beralih manual |
-| Archived / Stopped | Lanjutkan melalui CLI terpasang dan terautentikasi, dengan direktori asal yang dapat diakses; [batasan](../../README.md#supported-providers) |
-
-
-
-Tunggu daftar muncul, tekan `/`, lalu masukkan nama proyek atau frasa dari riwayat Anda sendiri. Gunakan `↑`/`↓` untuk memeriksa detail, pastikan penyedia, judul, dan direktori sebelum `Enter`. Untuk **Resumable**, hasil yang diharapkan adalah terminal yang membuka CLI dengan percakapan terpilih untuk dilanjutkan.
-
-`Esc` membatalkan pencarian; `q` / `Ctrl+C` keluar dari TUI tanpa menghapus riwayat atau menghentikan CLI lain. Penghentian sesi belum diimplementasikan.
-
-- Daftar kosong: periksa riwayat tersimpan, penyedia aktif, dan `state_dir`.
-- Gagal melanjutkan: periksa pemasangan CLI, autentikasi akun, dan direktori asal.
-- Gagal mulai: ekstrak seluruh arsip dengan `providers/`, `prompts/`, dan contoh konfigurasi yang dihasilkan; periksa peluncur.
-
-Daftar kosong, kesalahan konfigurasi, peluncuran atau perpindahan tab, pembaruan, penghapusan dan pemulihan: [pemecahan masalah dalam bahasa Inggris](../../README.md#troubleshooting-update-and-removal). [Dokumentasi Inggris](../../README.md) menjadi acuan teknis; lihat [konfigurasi](../../README.md#configuration) dan [data yang dikirim](../../README.md#what-remote-sends).
-
-
-
-
-Jika sudah tahu penyedia dan sesinya, riwayat CLI itu cukup. Katalog ini berguna untuk beberapa CLI atau proyek saat Anda ingat topiknya, bukan ID sesi.
-
-Pengelola sesi terminal untuk percakapan yang masih tersimpan dari Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, dan Kimi, termasuk yang dimulai secara terpisah. Keenam penyedia ini didukung secara bawaan; cakupan bergantung pada format dan filter penemuan riwayat, bukan dukungan untuk semua CLI.
-
-Ikuti langkah privasi sebelum menjalankan; pengelompokan jarak jauh bawaan dapat berjalan otomatis.
-
-
-
-
-
-### Windows Terminal
-
-Untuk **Running/Waiting/Idle**, hanya di Windows program mencoba memilih tab Windows Terminal yang cocok; jika berhasil, tab dipilih dan jendela tampil di depan. Di Linux/macOS, pindah ke terminal yang sedang berjalan secara manual. Hasil untuk kueri samar atau salah ketik tidak dijamin.
-
-<details>
-<summary>↳ Pencarian pertama privat: Core + wordmatch</summary>
-
-**Contoh fiktif, bukan hasil pengamatan runtime atau sesi bawaan:** tekan `/`, cari `build failure`, dan bayangkan baris Claude Code · judul `Build failure` · proyek `demo-project`. Dengan `↑`/`↓`, periksa penyedia, judul, dan direktori asal. Jika ini percakapan **Resumable** yang benar, `Enter` membukanya melalui Claude CLI terpasang dan terautentikasi; direktori harus dapat diakses. Bukan jaminan hasil atau kompatibilitas.
-
-</details>
-
-
-
-Lihat percakapan tersimpan, cari dalam riwayat Anda, lalu pilih percakapan untuk dilanjutkan. GIF menampilkan antarmuka berbahasa Inggris dari versi yang direkam, bukan verifikasi versi saat ini atau kompatibilitas setiap CLI. Terjemahan dokumentasi tidak menerjemahkan antarmuka maupun percakapan tersimpan. Atur privasi seperti dalam petunjuk pemasangan sebelum menjalankan program. Versi dan tanggal rekaman tidak diketahui. [Pasang Core](#install-core).
-
-<img src="../agentTUI.gif" alt="Demo TUI: daftar riwayat, pencarian, dan melanjutkan percakapan" width="700">
+[Panduan penggunaan dan bukti dalam bahasa Inggris](../usage.md) menyimpan angka lengkap, hasil merugikan, dan batasan. Versi dan tanggal [rekaman](../usage.md#recorded-demo) tidak diketahui; bukan bukti kompatibilitas saat ini.

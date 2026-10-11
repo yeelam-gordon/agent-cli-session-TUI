@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title description">
+  <title id="title">Find the conversation. Continue the work.</title>
+  <desc id="description">Concept illustration, not an app screenshot. Histories from several coding CLIs feed one search; a saved conversation reopens in its CLI; a running Windows Terminal tab is selected. Windows focus is a matching-tab attempt.</desc>
+  <defs>
+    <style>
+      svg { font-family: 'Segoe UI', Aptos, Calibri, sans-serif; }
+      .card { fill: #ffffff; stroke: #dedede; stroke-width: 2; }
+      .object { fill: #f5f5f5; stroke: #dedede; stroke-width: 2; }
+      .selected { fill: #ffffff; stroke: #b11f4b; stroke-width: 3; }
+      .heading { fill: #242424; font-size: 29px; font-weight: 700; }
+      .label { fill: #242424; font-size: 22px; }
+      .small { fill: #5c5c5c; font-size: 20px; }
+      .line { fill: none; stroke: #b11f4b; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+      .ink { fill: #242424; }
+      .accent { fill: #b11f4b; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="accent"/></marker>
+  </defs>
+  <rect width="1200" height="420" fill="#f7f4ef"/>
+  <g id="find">
+    <rect x="12" y="16" width="376" height="388" rx="16" class="card"/>
+    <text x="36" y="60" class="heading">Find across CLI histories</text>
+    <rect x="36" y="96" width="176" height="46" rx="8" class="object"/><text x="52" y="127" class="label">Copilot CLI</text>
+    <rect x="36" y="154" width="176" height="46" rx="8" class="object"/><text x="52" y="185" class="label">Claude Code</text>
+    <rect x="36" y="212" width="176" height="46" rx="8" class="object"/><text x="52" y="243" class="label">Codex</text>
+    <path d="M 224 119 H 252 V 233 M 224 177 H 280 M 224 235 H 252" class="line"/>
+    <circle cx="309" cy="174" r="20" class="line"/><path d="M 324 189 L 342 207" class="line"/>
+    <path d="M 309 220 V 277" class="line" marker-end="url(#arrow)"/>
+    <rect x="36" y="299" width="326" height="58" rx="8" class="selected"/>
+    <path d="M 52 316 H 66 V 341 H 52 Z M 55 322 H 63 M 55 328 H 63" class="line"/>
+    <text x="82" y="336" class="label">Build failure</text>
+  </g>
+  <g id="continue">
+    <rect x="412" y="16" width="376" height="388" rx="16" class="card"/>
+    <text x="436" y="60" class="heading">Continue the original</text><text x="436" y="94" class="heading">conversation</text>
+    <rect x="436" y="122" width="326" height="82" rx="8" class="selected"/>
+    <text x="454" y="150" class="small">Saved conversation</text><text x="454" y="183" class="label">Build failure</text>
+    <path d="M 600 215 V 248" class="line" marker-end="url(#arrow)"/>
+    <rect x="436" y="270" width="326" height="108" rx="8" class="object"/>
+    <path d="M 436 305 H 762" stroke="#dedede" stroke-width="2"/><text x="454" y="295" class="small">Original CLI</text>
+    <path d="M 456 322 L 467 332 L 456 342 M 477 342 H 493" class="line"/>
+    <text x="509" y="340" class="label">Same context</text>
+    <path d="M 509 357 H 706" stroke="#dedede" stroke-width="6" stroke-linecap="round"/>
+  </g>
+  <g id="focus">
+    <rect x="812" y="16" width="376" height="388" rx="16" class="card"/>
+    <text x="836" y="60" class="heading">Try its running</text><text x="836" y="94" class="heading">Windows tab</text>
+    <rect x="836" y="122" width="326" height="206" rx="8" class="object"/>
+    <text x="854" y="155" class="label">Windows Terminal</text>
+    <rect x="848" y="172" width="98" height="43" rx="6" class="card"/><text x="868" y="201" class="small">Tab 1</text>
+    <rect x="954" y="172" width="196" height="43" rx="6" class="selected"/><text x="970" y="201" class="label">Build failure</text>
+    <path d="M 860 237 L 871 247 L 860 257 M 881 257 H 897" class="line"/>
+    <path d="M 859 278 H 1117 M 859 297 H 1047" stroke="#dedede" stroke-width="7" stroke-linecap="round"/>
+    <path d="M 1126 250 L 1096 218 L 1096 256 L 1106 247 L 1114 265 Z" class="accent"/>
+    <text x="836" y="366" class="small">Windows only - matching-tab attempt</text>
+  </g>
+</svg>

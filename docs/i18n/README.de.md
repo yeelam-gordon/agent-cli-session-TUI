@@ -2,7 +2,7 @@
 
 <a id="languages"></a>
 <details>
-<summary>Languages / 语言 / 言語 / اللغات (16)</summary>
+<summary>Languages (16)</summary>
 
 [English](../../README.md) · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Português (Brasil)](README.pt-BR.md) · [Français](README.fr.md)
 
@@ -10,100 +10,58 @@
 
 </details>
 
-CLI-Verläufe gemeinsam durchsuchen. Gespräch und Kontext mit installierter Original-CLI fortsetzen. Nur unter Windows versuchen, den passenden laufenden Windows-Terminal-Tab zu fokussieren, statt ein neues Fenster zu öffnen.
+Sie erinnern sich an die Arbeit, aber nicht an die zugehörige CLI? Durchsuchen Sie Verläufe von Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI und Kimi. Sind Anbieter und Sitzung bekannt, genügt möglicherweise der Verlauf der jeweiligen CLI.
 
-[Ablauf ansehen](#first-workflow) · [Core installieren](#install-core) · [Anbieter und Grenzen](../../README.md#supported-providers)
+<img src="../agent-session-benefits.png" alt="Konzept: CLI-Verläufe durchsuchen, den ursprünglichen Kontext fortsetzen und versuchen, den passenden laufenden Windows-Tab auszuwählen" width="780">
 
-Standardmäßige Remote-Gruppierung kann Titel und Arbeitspfade automatisch senden; vor dem Start Core + wordmatch wählen.
+Konzeptillustration, kein tatsächlicher App-Screenshot. Englische Beschriftungen und fiktive Zeilen.
 
-<img src="../agent-session-benefits.png" alt="Konzept: ein altes Gespräch über CLI-Verläufe hinweg finden und fortsetzen" width="780">
-
-Konzeptillustration, kein tatsächlicher App-Screenshot. Englische Beschriftungen und fiktive Zeilen dienen als Beispiele, nicht als echte private Verläufe.
-
-- Altes Thema oder Projekt finden: nach einem erinnerten Ausdruck suchen und Anbieter, Titel und Verzeichnis prüfen.
-- Das richtige Gespräch fortsetzen: `Enter` bei **Resumable** benötigt erhaltenen Verlauf, installierte und authentifizierte CLI sowie ein zugängliches ursprüngliches Verzeichnis.
-- Laufenden Windows-Tab finden: versucht nur unter Windows, einen passenden Windows-Terminal-Tab zu fokussieren; kein universelles Anhängen an Prozesse. Unter Linux/macOS manuell wechseln.
-
-Es muss nicht in diesem TUI begonnen worden sein.
-
+- **Frühere Arbeit wiederfinden:** eine Suche in mehreren erhaltenen CLI-Verläufen, auch für außerhalb dieses TUIs gestartete Gespräche.
+- **Das ursprüngliche Gespräch fortsetzen:** gespeicherten Kontext über die installierte ursprüngliche CLI wieder öffnen.
+- **Den laufenden Windows-Tab finden:** versuchen, den passenden Windows-Terminal-Tab auszuwählen; unter Linux/macOS manuell wechseln.
 
 <a id="install-core"></a>
 
 ## Private erste Suche: Core + wordmatch
 
-Mindestens ein Anbieter muss gespeicherte Gespräche haben. Zum Fortsetzen muss seine CLI installiert, authentifiziert und über den konfigurierten Befehl erreichbar sein; das ursprüngliche Arbeitsverzeichnis muss zugänglich bleiben. Verwenden Sie ein interaktives Terminal und die passende Version für Betriebssystem und CPU.
+Erforderlich sind gespeicherter Verlauf, eine installierte und authentifizierte CLI, erreichbar über den konfigurierten `command`, und das zugängliche ursprüngliche Arbeitsverzeichnis. Nutzen Sie ein interaktives Terminal und eine passende OS/CPU-Version. Standardstarter: Windows `wt` (Ausweichlösung `cmd`), Linux `gnome-terminal`, macOS `osascript` mit Terminal. Fehlen sie, passen Sie die [Konfiguration](../usage.md#configuration) an.
 
-Standardstarter: Windows `wt` (Ausweichlösung `cmd`), Linux `gnome-terminal`, macOS `osascript` mit Terminal. Passen Sie die Konfiguration an, falls diese fehlen. Core hat x64/arm64-Ziele für alle drei Systeme; semantische Pakete sind nicht für jedes Ziel verfügbar. Nativer Tab-Fokus erfordert Windows Terminal und ist nur unter Windows verfügbar.
+**Vor dem Start:** Die voreingestellte Remote-Gruppierung kann nach der Erkennung automatisch **Titel und Arbeitsverzeichnisse** an einen gehosteten Dienst senden. Ein öffentlicher API-Vertrag für Drittanbieter fehlt. Core + `wordmatch` vermeidet diese Remote-Gruppierung, nicht das Netzwerkverhalten der CLIs selbst. Das optionale semantische Plugin kann bei der Initialisierung Modelle herunterladen; beginnen Sie mit Core ohne dieses Plugin.
 
-Laden Sie unter [Releases](https://github.com/yeelam-gordon/agent-cli-session-TUI/releases) das **vollständige Core-Archiv** für Ihr System und Ihre CPU herunter, nicht das Quellcode-Archiv. Entpacken Sie alles; Programm, `providers/`, `prompts/` und die generierte `config.toml.example` müssen zusammenbleiben. Überschreiben Sie keine vorhandene Konfiguration. Prüfen Sie `state_dir`, `command`, den Terminalstarter und die Datenschutzoption unten. Die Quelldatei `config.toml.template` enthält Platzhalter und darf nicht einfach umbenannt werden.
-
-Vor dem Start den Digest der genauen Datei vergleichen; Übereinstimmung ist weder Signatur noch Sicherheitsgarantie. OS-Warnungen und Organisationsregeln beachten. [SHA-256](../../README.md#verify-a-release-download).
-
-**Datenschutz vor dem ersten Start:** Die voreingestellte Gruppierung `remote` sendet Sitzungstitel und Arbeitsverzeichnisse an einen gehosteten Dienst und kann nach der ersten Erkennung automatisch laufen. Es gibt keinen öffentlichen API-Vertrag für Drittanbieter. Für Gruppierung ohne Netzwerk folgen Sie der folgenden Ersteinrichtung:
-
-Kopieren Sie vor dem ersten Start von Core die generierte Datei `config.toml.example` als `config.toml` neben das Programm. Suchen Sie darin `# [grouping]` und `# engine = "remote"`: Entfernen Sie bei beiden Zeilen das führende `#` und ändern Sie den Wert zu `"wordmatch"`, wie unten gezeigt. Lassen Sie die anderen Optionen auskommentiert. Falls bereits eine aktive `[grouping]`-Tabelle existiert, ändern Sie dort `engine`, ohne eine zweite Tabelle anzulegen. Speichern Sie vor dem Start und dem Einlesen des Verlaufs.
+1. Laden Sie unter [Core-Dateien für Betriebssystem und CPU](../usage.md#core-archive-filenames) das **vollständige Core-Archiv** für Ihr OS/Ihre CPU herunter, nicht das Quellcode-Archiv. Entpacken Sie alles und behalten Sie Programm, `providers/`, `prompts/` und generierte `config.toml.example` zusammen. [Prüfen Sie den Digest der genauen Datei](../usage.md#verify-a-release-download); Übereinstimmung ist weder Signatur noch Sicherheitsgarantie. Beachten Sie OS-Warnungen und Organisationsregeln.
+2. Kopieren Sie bei einer Neuinstallation das generierte Beispiel als `config.toml` neben das Programm. **Überschreiben Sie keine Einstellungen und benennen Sie die Quellvorlage `config.toml.template` nicht einfach um.** Entfernen Sie in der Kopie das führende `#` aus **beiden Zeilen**, `# [grouping]` und `# engine = "remote"`, und ändern Sie den Wert:
 
 ```toml
 [grouping]
 engine = "wordmatch"
 ```
 
-`wordmatch` vergleicht Wörter und ist keine lokale KI. Das optionale semantische Plugin kann bei der Initialisierung Modelle herunterladen. Beginnen Sie mit Core, um dieses Plugin nicht zu laden. Diese Einstellung steuert nicht das Netzwerkverhalten der Anbieter-CLIs.
+Lassen Sie andere Optionen auskommentiert. Existiert schon eine aktive `[grouping]`-Tabelle, ändern Sie dort `engine`, ohne sie zu duplizieren. Prüfen Sie `state_dir` und `command`; **speichern Sie vor dem Start**. `wordmatch` vergleicht gemeinsame Wörter; es ist keine lokale KI.
+
+3. Starten Sie aus einem Terminal im entpackten Ordner:
+
+```powershell
+# Windows PowerShell
+.\agent-session-tui.exe
+```
+
+```sh
+# Linux/macOS
+./agent-session-tui
+```
 
 <a id="first-workflow"></a>
 
 ## Erste Suche und erwartetes Ergebnis
 
-Mit einem wörtlichen Titel- oder Projektfragment beginnen. Core bietet Schlüsselwort- und unscharfe Suche; semantische Umschreibungen benötigen das optionale Plugin.
+4. Warten Sie auf die Liste, drücken Sie `/` und geben Sie einen wörtlichen Titel- oder Projektausschnitt aus Ihrem Verlauf ein. Prüfen Sie mit `↑`/`↓` Anbieter, Titel und Verzeichnis; wählen Sie **Resumable**, dann `Enter`. **Erwartetes Ergebnis:** Die ursprüngliche CLI öffnet das gewählte Gespräch zum Fortsetzen. Die Suche kann Treffer übersehen; getestete native CLI-Versionen sind unbekannt. [Abdeckung und Belege](../usage.md#supported-providers).
 
-Starten Sie im Terminal des entpackten Ordners: `.\agent-session-tui.exe` in Windows PowerShell oder `./agent-session-tui` unter Linux/macOS. Warten Sie auf die Sitzungen, drücken Sie `/` und geben Sie einen Projektnamen oder eine Formulierung aus Ihrem eigenen Verlauf ein. Prüfen Sie mit den Pfeiltasten Anbieter, Titel und Verzeichnis in den Details, bevor Sie `Enter` drücken.
+<a id="windows-terminal"></a>
 
-Sechs Verlaufsdefinitionen und konfigurierte Fortsetzungswege werden mitgeliefert; hier getestete native CLI-Versionen sind **unbekannt**. Dies ist keine Zertifizierung der Live-Kompatibilität. Siehe [Abdeckung und Belege](../../README.md#supported-providers).
+Unter Windows versucht das TUI bei **Running/Waiting/Idle**, den passenden Tab auszuwählen; kein universelles Anhängen an Prozesse. Ein rasches zweites `Enter` auf derselben laufenden Sitzung kann stattdessen **Fortsetzen erzwingen**. Prüfen Sie vorher die Auswahl. [Windows-Ablauf](../usage.md#secondary-workflow-find-a-running-windows-tab).
 
-| UI | `Enter` |
-|---|---|
-| Resumable (fortsetzbares Gespräch) | Über installierte, authentifizierte CLI fortsetzen; ursprüngliches Verzeichnis zugänglich |
-| Running / Waiting / Idle | Nur unter Windows versuchen, den passenden laufenden Windows-Terminal-Tab zu fokussieren; sonst manuell wechseln |
-| Archived / Stopped | Über installierte, authentifizierte CLI fortsetzen; ursprüngliches Verzeichnis zugänglich; [Grenzen](../../README.md#supported-providers) |
+**Keine Ergebnisse?** Prüfen Sie erhaltenen Verlauf, aktivierten Anbieter und `state_dir`; bei Startfehlern Authentifizierung, ursprüngliches Verzeichnis und Starter. [Fehlerhilfe](../usage.md#troubleshooting-update-and-removal).
 
+**Beenden:** `Esc` bricht die Suche ab; danach beendet `q` das TUI, oder nutzen Sie `Ctrl+C` in der Liste oder Suche ohne Verlaufslöschung oder Stoppen anderer CLIs. Sitzungen zu beenden ist nicht implementiert. [Aktualisieren, Wiederherstellen und Entfernen](../usage.md#troubleshooting-update-and-removal).
 
-
-Bei **Resumable** sollte sich ein Terminal öffnen, in dem die Anbieter-CLI das gewählte Gespräch zum Fortsetzen lädt.
-
-`Esc` beendet die Suche, `q` / `Ctrl+C` beendet das TUI ohne Verlaufslöschung oder Beenden anderer CLIs. Das Beenden von Sitzungen durch das TUI ist nicht implementiert.
-
-- Leere Liste: gespeicherten Verlauf, aktivierten Anbieter und `state_dir` prüfen.
-- Fortsetzen scheitert: CLI-Installation, Anmeldung und ursprüngliches Verzeichnis prüfen.
-- Start scheitert: vollständiges Archiv mit `providers/`, `prompts/` und generiertem Beispiel entpacken; Terminalstarter prüfen.
-
-Leere Liste, Konfigurationsfehler, Start- oder Fokusprobleme, Aktualisierung, Entfernen und Wiederherstellung: [englische Fehlerhilfe](../../README.md#troubleshooting-update-and-removal). Die [englische Dokumentation](../../README.md) ist die technische Referenz; siehe [Konfiguration](../../README.md#configuration) und [Datenschutz](../../README.md#what-remote-sends).
-
-
-
-
-Wenn Anbieter und Sitzung bekannt sind, genügt der Verlauf der jeweiligen CLI. Dieser Katalog hilft bei mehreren CLIs oder Projekten, wenn Sie das Thema, aber nicht die Sitzungs-ID kennen.
-
-Ein Terminal-Sitzungsmanager für gespeicherte Gespräche aus Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI und Kimi – auch für unabhängig gestartete Sitzungen. Diese sechs Anbieter sind integriert; weitere erfordern zusätzliche Anbieterdefinitionen. Nicht jede CLI wird automatisch unterstützt.
-
-Vor dem Start die Datenschutzschritte der Installation befolgen; die standardmäßige Remote-Gruppierung kann automatisch laufen.
-
-
-
-
-
-### Windows Terminal
-
-Bei **Running/Waiting/Idle** versucht das Programm nur unter Windows, einen passenden Windows-Terminal-Tab zu fokussieren: Bei Erfolg wird der Tab ausgewählt und das Fenster in den Vordergrund gebracht. Unter Linux/macOS müssen Sie selbst zum laufenden Terminal wechseln. Vage oder falsch geschriebene Suchbegriffe garantieren keinen Treffer.
-
-<details>
-<summary>↳ Private erste Suche: Core + wordmatch</summary>
-
-**Fiktives Beispiel, weder beobachteter Lauf noch mitgelieferte Sitzung:** Mit `/` nach `build failure` suchen; angenommen, eine Zeile zeigt Claude Code · Titel `Build failure` · Projekt `demo-project`. Mit `↑`/`↓` Anbieter, Titel und ursprüngliches Verzeichnis prüfen. Ist es das richtige **Resumable**-Gespräch, öffnet `Enter` es über die installierte, authentifizierte Claude-CLI; das Verzeichnis muss zugänglich sein. Keine Ergebnis- oder Kompatibilitätsgarantie.
-
-</details>
-
-
-
-Gespeicherte Gespräche in der Liste ansehen, im eigenen Verlauf suchen und ein Gespräch zum Fortsetzen auswählen. Das GIF zeigt die englische Oberfläche der aufgezeichneten Version; es belegt weder die aktuelle Version noch die Kompatibilität jeder CLI. Übersetzte Dokumentation bedeutet keine übersetzte Oberfläche oder Übersetzung gespeicherter Gespräche. Nehmen Sie vor dem Start die oben beschriebenen Datenschutzeinstellungen vor. Version und Datum der Aufnahme sind unbekannt. [Core installieren](#install-core).
-
-<img src="../agentTUI.gif" alt="TUI-Demo: Verlaufsliste, Suche und Fortsetzen von Gesprächen" width="700">
+Die [englische Betriebs- und Belegreferenz](../usage.md) bewahrt alle Zahlen, nachteiligen Ergebnisse und Grenzen. Version und Datum der [Aufnahme](../usage.md#recorded-demo) sind unbekannt; sie belegt keine aktuelle Kompatibilität.
