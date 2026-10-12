@@ -12,7 +12,7 @@
 
 Remember the work, but not which CLI held it? Search saved conversations across Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI and Kimi. If you already know the provider and session, its native history may be enough.
 
-<img src="docs/agent-session-benefits.png" alt="Three actions: search across CLI histories, reopen the original saved conversation, and attempt to select its running Windows Terminal tab" width="780">
+<img src="docs/agent-session-benefits.png" alt="Concept: keyword search finds token expires in retained conversation context, not just its title, then resumes the saved conversation through its original CLI. Copilot CLI, Claude Code, Codex and other providers are supported." width="700">
 
 Concept illustration with fictional rows, not an app screenshot. English labels.
 

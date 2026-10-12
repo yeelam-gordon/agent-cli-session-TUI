@@ -12,7 +12,7 @@
 
 Nhớ công việc nhưng không nhớ cuộc trò chuyện nằm trong CLI nào? Tìm trong lịch sử Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI và Kimi. Nếu biết công cụ và phiên, lịch sử của CLI đó có thể đã đủ.
 
-<img src="../agent-session-benefits.png" alt="Minh họa: tìm qua lịch sử CLI, tiếp tục ngữ cảnh gốc và thử chọn tab Windows đang chạy phù hợp" width="780">
+<img src="../agent-session-benefits.png" alt="Minh họa: tìm kiếm từ khóa tìm token expires trong ngữ cảnh được giữ lại, không chỉ tiêu đề, rồi tiếp tục cuộc hội thoại qua CLI ban đầu. Hỗ trợ Copilot CLI, Claude Code, Codex và các công cụ khác." width="700">
 
 Minh họa ý tưởng, không phải ảnh chụp ứng dụng thật. Nhãn tiếng Anh và các dòng giả định.
 

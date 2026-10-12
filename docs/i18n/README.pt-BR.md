@@ -12,7 +12,7 @@
 
 Lembra do trabalho, mas não de qual CLI guardou a conversa? Pesquise históricos do Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi. Se já sabe o provedor e a sessão, o histórico do próprio CLI pode bastar.
 
-<img src="../agent-session-benefits.png" alt="Conceito: buscar em históricos de CLI, retomar o contexto original e tentar selecionar a aba do Windows em execução correspondente" width="780">
+<img src="../agent-session-benefits.png" alt="Conceito: a busca por palavras encontra token expires no contexto preservado, não apenas no título, e retoma a conversa salva no CLI original. Suporta Copilot CLI, Claude Code, Codex e outros." width="700">
 
 Ilustração conceitual, não uma captura real do aplicativo. Rótulos em inglês e linhas fictícias.
 

@@ -12,7 +12,7 @@
 
 Ingat pekerjaannya, tetapi lupa percakapan itu ada di CLI mana? Cari dalam riwayat Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, dan Kimi. Jika penyedia dan sesi sudah diketahui, riwayat CLI itu sendiri mungkin cukup.
 
-<img src="../agent-session-benefits.png" alt="Konsep: mencari lintas riwayat CLI, melanjutkan konteks asal, dan mencoba memilih tab Windows berjalan yang cocok" width="780">
+<img src="../agent-session-benefits.png" alt="Konsep: pencarian kata menemukan token expires dalam konteks yang tersimpan, bukan hanya judul, lalu melanjutkan percakapan tersimpan lewat CLI asalnya. Mendukung Copilot CLI, Claude Code, Codex dan lainnya." width="700">
 
 Ilustrasi konsep, bukan tangkapan layar aplikasi sebenarnya. Label bahasa Inggris dan baris rekaan.
 

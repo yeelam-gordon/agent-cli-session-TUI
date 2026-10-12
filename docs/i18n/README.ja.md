@@ -12,7 +12,7 @@
 
 作業内容は覚えているのに、どの CLI の会話だったか分からない？ Copilot CLI、Claude Code、Codex CLI、Qwen CLI、Gemini CLI、Kimi の保存済み会話を探せます。CLI と会話が分かっているなら、その CLI の履歴機能で十分です。
 
-<img src="../agent-session-benefits.png" alt="概念図：CLI をまたいで会話を探し、元の文脈で再開し、一致する実行中の Windows タブへの切り替えを試みる" width="780">
+<img src="../agent-session-benefits.png" alt="概念図：キーワード検索はタイトルだけでなく保持された会話の文脈で token expires を見つけ、元の CLI で保存済み会話を再開する。Copilot CLI、Claude Code、Codex などに対応。" width="700">
 
 概念図であり、実際のアプリ画面ではありません。英語のラベルと架空の行は説明用です。
 

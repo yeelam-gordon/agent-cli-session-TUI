@@ -12,7 +12,7 @@
 
 記得做過的工作，卻忘了在哪個 CLI？這裡可搜尋 Copilot CLI、Claude Code、Codex CLI、Qwen CLI、Gemini CLI 和 Kimi 保留的程式開發對話。若已知道工具與對話，用原 CLI 的紀錄功能就好。
 
-<img src="../agent-session-benefits.png" alt="三步概念圖：跨 CLI 找回對話、接續原上下文、嘗試切換至相符的 Windows 分頁" width="780">
+<img src="../agent-session-benefits.png" alt="概念圖：關鍵字搜尋在保留的對話內容中比對 token expires，而不只搜尋標題，再透過原 CLI 恢復已儲存的對話。支援 Copilot CLI、Claude Code、Codex 等提供者。" width="700">
 
 概念插圖，非實際應用程式截圖；英文標籤與虛構資料列僅供示意。
 

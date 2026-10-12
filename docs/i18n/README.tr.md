@@ -12,7 +12,7 @@
 
 Yaptığınız işi hatırlıyor ama konuşmanın hangi CLI’da olduğunu bilmiyor musunuz? Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI ve Kimi geçmişlerini arayın. Sağlayıcı ve oturum belliyse CLI’ın kendi geçmişi yeterli olabilir.
 
-<img src="../agent-session-benefits.png" alt="Kavram: CLI geçmişlerinde arama, özgün bağlamı sürdürme ve eşleşen çalışan Windows sekmesini seçmeyi deneme" width="780">
+<img src="../agent-session-benefits.png" alt="Kavram: sözcük araması token expires ifadesini yalnızca başlıkta değil, korunan konuşma bağlamında bulur ve kayıtlı konuşmayı özgün CLI ile sürdürür. Copilot CLI, Claude Code, Codex ve diğerleri desteklenir." width="700">
 
 Kavram çizimi, gerçek uygulama ekran görüntüsü değildir. İngilizce etiketler ve kurgusal satırlar kullanılır.
 

@@ -12,7 +12,7 @@
 
 Sie erinnern sich an die Arbeit, aber nicht an die zugehörige CLI? Durchsuchen Sie Verläufe von Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI und Kimi. Sind Anbieter und Sitzung bekannt, genügt möglicherweise der Verlauf der jeweiligen CLI.
 
-<img src="../agent-session-benefits.png" alt="Konzept: CLI-Verläufe durchsuchen, den ursprünglichen Kontext fortsetzen und versuchen, den passenden laufenden Windows-Tab auszuwählen" width="780">
+<img src="../agent-session-benefits.png" alt="Konzept: Die Stichwortsuche findet token expires im erhaltenen Gesprächskontext, nicht nur im Titel, und setzt das gespeicherte Gespräch in seiner ursprünglichen CLI fort. Copilot CLI, Claude Code, Codex und weitere werden unterstützt." width="700">
 
 Konzeptillustration, kein tatsächlicher App-Screenshot. Englische Beschriftungen und fiktive Zeilen.
 

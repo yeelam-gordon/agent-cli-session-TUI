@@ -12,7 +12,7 @@
 
 하던 작업은 기억나는데 어느 CLI의 대화였는지 모르겠나요? Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI, Kimi에 보존된 대화를 검색합니다. 도구와 대화를 이미 안다면 그 CLI의 기록 기능만으로 충분할 수 있습니다.
 
-<img src="../agent-session-benefits.png" alt="개념도: 여러 CLI에서 대화를 찾고 원래 맥락으로 이어가며 일치하는 실행 중 Windows 탭으로 전환을 시도" width="780">
+<img src="../agent-session-benefits.png" alt="개념도: 키워드 검색이 제목뿐 아니라 보존된 대화 맥락에서 token expires를 찾고 원래 CLI로 저장된 대화를 재개합니다. Copilot CLI, Claude Code, Codex 등을 지원합니다." width="700">
 
 실제 앱 화면이 아닌 개념 그림입니다. 영어 표기와 가상의 행은 설명용입니다.
 

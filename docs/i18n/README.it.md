@@ -12,7 +12,7 @@
 
 Ricordi il lavoro, ma non il CLI che contiene la conversazione? Cerca nelle cronologie di Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI e Kimi. Se conosci già fornitore e sessione, può bastare la cronologia del CLI stesso.
 
-<img src="../agent-session-benefits.png" alt="Concetto: cercare nelle cronologie CLI, riprendere il contesto originale e tentare di selezionare la scheda Windows in esecuzione corrispondente" width="780">
+<img src="../agent-session-benefits.png" alt="Concetto: la ricerca per parole trova token expires nel contesto conservato, non solo nel titolo, e riprende la conversazione salvata nella CLI originale. Supporta Copilot CLI, Claude Code, Codex e altri." width="700">
 
 Illustrazione concettuale, non una schermata reale dell’app. Etichette inglesi e righe fittizie.
 
