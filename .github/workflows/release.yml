@@ -3,9 +3,10 @@ name: Release
 on:
   push:
     tags: [ "v*" ]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -41,6 +42,7 @@ jobs:
             archive_ext: tar.gz
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
 
     steps:
     - uses: actions/checkout@v5
@@ -93,7 +95,8 @@ jobs:
       uses: actions/upload-artifact@v5
       with:
         name: core-${{ matrix.target }}
-        path: agent-session-tui-${{ matrix.target }}.*
+        path: agent-session-tui-${{ matrix.target }}.${{ matrix.archive_ext }}
+        if-no-files-found: error
 
   build-semantic:
     strategy:
@@ -127,6 +130,7 @@ jobs:
             archive_ext: tar.gz
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
 
     steps:
     - uses: actions/checkout@v5
@@ -176,11 +180,56 @@ jobs:
       uses: actions/upload-artifact@v5
       with:
         name: semantic-${{ matrix.target }}
-        path: agent-session-tui-${{ matrix.target }}-semantic.*
+        path: agent-session-tui-${{ matrix.target }}-semantic.${{ matrix.archive_ext }}
+        if-no-files-found: error
 
-  release:
+  attest:
     needs: [build-core, build-semantic]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+    - name: Download release archives
+      uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      with:
+        path: artifacts
+
+    - name: Attest release archives
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      with:
+        subject-path: |
+          artifacts/**/*.zip
+          artifacts/**/*.tar.gz
+
+    - name: Verify archive provenance
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        count=0
+        while IFS= read -r -d '' archive; do
+          gh attestation verify "$archive" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners
+          count=$((count + 1))
+        done < <(find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' \) -print0)
+        test "$count" -gt 0
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
 
     steps:
     - name: Download all artifacts
