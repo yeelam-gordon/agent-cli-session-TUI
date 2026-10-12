@@ -27,6 +27,7 @@ Have saved history, an installed/authenticated provider CLI reachable through it
 **Before launch:** default remote grouping can automatically send **session titles and working directories** to a hosted service after discovery. It has no published third-party API contract. Core + `wordmatch` avoids that remote grouping, not provider-CLI networking. The optional semantic plugin may download models at initialization; start with Core without that plugin.
 
 1. Download the complete **Core** archive for your OS/CPU from [Core archive filenames](docs/usage.md#core-archive-filenames), not the source archive. Extract everything together: binary, `providers/`, `prompts/`, generated `config.toml.example`. [Verify the exact asset digest](docs/usage.md#verify-a-release-download); a match is not a signature or safety guarantee. Respect OS/org controls.
+   For attestation-enabled releases, [verify GitHub build provenance](docs/usage.md#verify-github-build-provenance) before extracting. This is not Windows code signing; older releases such as v0.3.2 are not retroactively attested.
 2. For a fresh install, copy the generated example to `config.toml` beside the binary; **do not overwrite existing settings or rename the source template**. In the copy, uncomment **both** `# [grouping]` and `# engine = "remote"`, then change the value:
 
 ```toml

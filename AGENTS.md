@@ -92,6 +92,13 @@ Config search order: next to exe → `%APPDATA%\agent-session-tui\config.toml` �
 
 CI (`.github/workflows/rust.yml`) runs `cargo clippy -- -D warnings` on **BOTH** crates and treats any warning as an error. `cargo build` alone does NOT run clippy, so a local green build can still break CI. Rust toolchain updates (e.g. 1.95 added `not_unsafe_ptr_arg_deref`, `redundant_closure` tightening) routinely surface new lints.
 
+The Release workflow builds and attests the exact final archives, then verifies
+their repository, workflow, source ref and commit before tag-triggered
+publication. `workflow_dispatch` exercises the same matrix without publishing.
+Keep attestation write permissions out of the build jobs and preserve that
+manual-run publication guard. See
+[`docs/usage.md`](docs/usage.md#verify-github-build-provenance) for verification.
+
 **Update your toolchain first — a stale local `stable` silently defeats this whole check.** CI installs the *latest* stable, so an older local compiler will pass clippy on code CI rejects. This has already happened once: local 1.95.0 passed while CI on 1.97.1 failed on `question_mark` and `useless_borrows_in_formatting` in long-standing code.
 
 ```bash

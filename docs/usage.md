@@ -139,6 +139,41 @@ shasum -a 256 agent-session-tui-aarch64-apple-darwin.tar.gz
 
 Expected: local hexadecimal hash matches the exact asset digest, ignoring case and the metadata prefix. If absent/mismatched, do not execute; verify the tag, target and source or stop. A matching byte checksum is **not** a publisher signature, safety guarantee or proof of trustworthy software. Respect OS execution warnings and organizational policy; do not disable controls to run.
 
+### Verify GitHub build provenance
+
+The attestation-enabled Release workflow generates and verifies GitHub artifact
+attestations for the finished Core and Semantic archives on every platform.
+Earlier releases, including v0.3.2, were not produced by that workflow and are
+not retroactively attested.
+
+For a new release, use a recent GitHub CLI and verify the downloaded archive
+**before extracting it**. Replace the tag, full source commit SHA and filename
+below with the expected values from the release's successful workflow run:
+
+```powershell
+gh attestation verify .\agent-session-tui-x86_64-pc-windows-msvc.zip --repo yeelam-gordon/agent-cli-session-TUI --signer-workflow yeelam-gordon/agent-cli-session-TUI/.github/workflows/release.yml --source-ref refs/tags/<tag> --source-digest <full-source-commit-sha> --deny-self-hosted-runners
+```
+
+Use the same flags with your archive filename on Linux or macOS. Verification
+must exit successfully and match the expected repository, workflow, ref and
+commit. An absent or invalid attestation is a failure, not permission to skip
+verification. This proves build provenance, not code safety, Windows
+Authenticode signing, Apple notarization or SmartScreen reputation.
+
+Maintainers can exercise the complete build/attest/verify pipeline without
+publishing a release:
+
+```powershell
+gh workflow run release.yml --repo yeelam-gordon/agent-cli-session-TUI --ref <branch>
+gh run download <run-id> --repo yeelam-gordon/agent-cli-session-TUI --name core-x86_64-pc-windows-msvc --dir .\attestation-check
+```
+
+Select the resulting successful run in Actions. Verify the archive inside
+`attestation-check` with the command above, using `refs/heads/<branch>` and that
+run's full commit SHA instead of a release tag. A manual run builds the same
+matrix and uploads archives, but cannot publish a GitHub Release. Tag-triggered
+publication is gated on successful attestation and verification.
+
 Bounded inspection: v0.3.2 Windows x64 Core `agent-session-tui-x86_64-pc-windows-msvc.zip` matched the published SHA-256 `08537753c6226ed2bd1703baaca9ac25ddbf3917792fd5f8cc9ba46a97c030dc`. Only ZIP contents/configuration were read—**no executable was run**. It contained binary, six provider definitions, prompts and generated example; example lines 63/64 were commented `[grouping]`/`engine = "remote"`, consistent with the copy/uncomment recipe. This is pinned archive evidence, not validation of later releases or native CLI resume. v0.3.2 metadata lists 11 target assets; no macOS x64 Semantic asset. Consult your release, not an assumed universal matrix.
 
 <a id="troubleshooting-update-and-removal"></a>
