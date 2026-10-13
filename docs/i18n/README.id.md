@@ -26,14 +26,15 @@ Ilustrasi konsep, bukan tangkapan layar aplikasi sebenarnya. Label bahasa Inggri
 
 Perlu riwayat tersimpan, CLI terpasang dengan autentikasi selesai, dapat dijalankan lewat `command` yang dikonfigurasi, dan direktori kerja asal yang dapat diakses. Gunakan terminal interaktif dan versi untuk OS/CPU Anda. Peluncur bawaan: Windows `wt` (cadangan `cmd`), Linux `gnome-terminal`, macOS `osascript` dengan Terminal. Jika tidak tersedia, ubah [konfigurasi](../usage.md#configuration).
 
-**Sebelum menjalankan:** pengelompokan jarak jauh bawaan dapat mengirim **judul dan direktori kerja** otomatis ke layanan luar setelah menemukan riwayat. Tidak ada kontrak API publik bagi pihak ketiga. Core + `wordmatch` menghindari pengelompokan itu, bukan koneksi CLI sendiri. Plugin semantik opsional dapat mengunduh model saat inisialisasi; mulai dengan Core tanpa plugin itu.
+**Sebelum menjalankan:** build dengan perubahan standar privasi menonaktifkan pengelompokan otomatis secara bawaan dan memakai `wordmatch` manual. Rilis lama masih dapat mengelompokkan otomatis dari jarak jauh. Pilihan eksplisit `remote` mengirim judul dan direktori; ACP dapat mengirim ringkasan melalui CLI. [PRIVACY.md](../../PRIVACY.md) menjelaskan lokasi penyimpanan dan indeks isi percakapan. Plugin semantik dapat mengunduh model; Core tidak mengontrol koneksi CLI.
 
 1. Unduh **arsip Core lengkap** untuk OS/CPU Anda dari [Berkas Core untuk OS/CPU](../usage.md#core-archive-filenames), bukan arsip kode sumber. Ekstrak semuanya. Simpan program, `providers/`, `prompts/`, dan `config.toml.example` yang dihasilkan dalam folder yang sama. [Periksa digest berkas yang tepat](../usage.md#verify-a-release-download); cocok bukan berarti bertanda tangan atau dijamin aman. Patuhi peringatan OS dan kebijakan organisasi.
-2. Pada pemasangan baru, salin contoh yang dihasilkan menjadi `config.toml` di samping program. **Jangan timpa pengaturan lama atau sekadar mengganti nama `config.toml.template` dari sumber.** Dalam salinan, hapus `#` awal dari **kedua baris**, `# [grouping]` dan `# engine = "remote"`, lalu ubah nilainya:
+2. Pada pemasangan baru, salin contoh yang dihasilkan menjadi `config.toml` di samping program. **Jangan timpa pengaturan lama atau sekadar mengganti nama `config.toml.template` dari sumber.** Dalam salinan, aktifkan `# [grouping]` dan `# engine = "wordmatch"` (contoh lama: `# engine = "remote"`), lalu atur bagian itu seperti di bawah, termasuk menonaktifkan pengelompokan otomatis:
 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 Biarkan opsi lainnya dikomentari. Jika tabel `[grouping]` aktif sudah ada, ubah `engine` di situ, jangan membuat duplikat. Periksa `state_dir` dan `command`; **simpan sebelum menjalankan**. `wordmatch` membandingkan kata yang sama, bukan AI lokal.

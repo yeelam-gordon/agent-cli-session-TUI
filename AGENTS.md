@@ -38,7 +38,7 @@ agent-session-tui/
 │   ├── grouping/
 │   │   ├── mod.rs          # Grouping engine dispatch (remote | local | acp) + cluster expansion
 │   │   ├── local.rs        # Zero-egress word-overlap clustering + heuristic names
-│   │   └── remote.rs       # Client for the hosted tab auto-grouping service (default engine)
+│   │   └── remote.rs       # Client for the hosted tab auto-grouping service (opt-in)
 │   ├── log.rs              # File-based logging (%TEMP%/agent-session-tui.log)
 │   ├── log_search.rs       # Tantivy full-text index over session content (head/tail/compaction/user)
 │   ├── process_info.rs     # Shared process discovery (sysinfo + WMI fallback with cooldown)
@@ -184,11 +184,11 @@ there is no match arm to edit.
 | **AtomicBool scan guard** | Prevents overlapping scan cycles. Non-blocking — if a scan is already in progress the next poll is skipped rather than queued. |
 | **Phased selection** | First page of all providers loads synchronously (fast initial render). Remaining pages load asynchronously and merge into the viewmodel without flicker. |
 | **WMI for process detection** | sysinfo can't read command-line args for some Windows processes; WMI is reliable |
-| **No internal DB** | We read from each CLI's own state (read-only). Only `archived.json` for hide/show. No sync issues. |
+| **Read-only provider history** | Provider history is read-only. The TUI persists groups, archive state, discovery caches and content-derived search indexes; see `PRIVACY.md` for exact paths and retention. |
 | **Parallel provider scans** | All providers scan concurrently via `std::thread::scope` for fast refresh |
 | **Provider trait** | Each CLI is a plugin. Discovery, state inference, and launch are provider-specific. Common test scenarios validate any provider. |
 | **File-based logging** | `%TEMP%/agent-session-tui.log`. Panics are logged with file:line before terminal restore. |
-| **Remote-first grouping** | `[grouping] engine` defaults to `remote`. It sends session titles + cwd (as `file:///` URIs) for one representative per local cluster (measured: 40 sessions → 8 entries), never summaries or file contents, and falls back to `wordmatch` on any failure. `wordmatch` is word-overlap matching, **not** a model of any kind (it was called `local`, which misread as "local model"; that name still parses as an alias). |
+| **Manual local grouping by default** | `[grouping] engine` defaults to `wordmatch` (not an AI model; `local` remains an alias). Automatic runs require explicit `auto_suggest = true`; when omitted, legacy `[acp] auto_suggest = true` is honored only for the explicitly selected ACP engine. Explicit remote selection sends titles/cwd on manual invocation or opted-in automatic runs; see `PRIVACY.md`. |
 | **Subprocess timeouts must kill** | `tokio::time::timeout` only drops the future; it cannot reap an OS process. `acp::wait_with_timeout` polls `try_wait` and calls `child.kill()` at the limit. Any future subprocess work must do the same. |
 
 ## Common Pitfalls

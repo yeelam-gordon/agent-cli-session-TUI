@@ -26,14 +26,15 @@ Kavram çizimi, gerçek uygulama ekran görüntüsü değildir. İngilizce etike
 
 Saklanan geçmiş, kurulu ve kimlik doğrulaması yapılmış, yapılandırılmış `command` ile çalıştırılabilen CLI ve erişilebilir özgün çalışma dizini gerekir. OS/CPU’nuzla eşleşen sürümü etkileşimli terminalde kullanın. Varsayılan başlatıcılar: Windows `wt` (yedek `cmd`), Linux `gnome-terminal`, macOS `osascript` ve Terminal. Yoksa [yapılandırmayı](../usage.md#configuration) değiştirin.
 
-**Başlatmadan önce:** varsayılan uzak gruplama, geçmiş keşfinden sonra **konuşma başlıklarını ve çalışma dizinlerini** dış hizmete otomatik gönderebilir. Üçüncü taraflar için yayımlanmış API sözleşmesi yoktur. Core + `wordmatch` bu uzak gruplamayı önler, CLI’ların kendi ağ kullanımını yönetmez. İsteğe bağlı anlamsal eklenti ilk yüklemede model indirebilir; önce eklentisiz Core kullanın.
+**Başlatmadan önce:** yeni gizlilik varsayılanlarını içeren derlemelerde otomatik gruplama varsayılan olarak kapalıdır; elle gruplama `wordmatch` kullanır. Eski sürümler hâlâ otomatik uzak gruplama yapabilir. Açıkça seçilen `remote`, başlıkları ve çalışma dizinlerini gönderir; ACP, CLI üzerinden özetler gönderebilir. [PRIVACY.md](../../PRIVACY.md) kayıt yollarını ve konuşma içeriği dizinlerini açıklar. Anlamsal eklenti model indirebilir; Core CLI bağlantılarını yönetmez.
 
 1. [OS/CPU için Core dosyaları](../usage.md#core-archive-filenames) üzerinden OS/CPU’nuzla eşleşen **tam Core arşivini** indirin; kaynak kodu arşivini değil. Tamamını çıkarın; program, `providers/`, `prompts/` ve üretilmiş `config.toml.example` birlikte kalmalıdır. [Tam dosyanın özetini doğrulayın](../usage.md#verify-a-release-download); eşleşme imza veya güvenlik garantisi değildir. OS uyarılarına ve kurum politikasına uyun.
-2. Yeni kurulumda üretilmiş örneği programın yanında `config.toml` olarak kopyalayın. **Mevcut ayarları ezmeyin; kaynak `config.toml.template` dosyasını yalnızca yeniden adlandırmayın.** Kopyadaki `# [grouping]` ve `# engine = "remote"` satırlarının **ikisinden de** baştaki `#` işaretini kaldırıp değeri değiştirin:
+2. Yeni kurulumda üretilmiş örneği programın yanında `config.toml` olarak kopyalayın. **Mevcut ayarları ezmeyin; kaynak `config.toml.template` dosyasını yalnızca yeniden adlandırmayın.** Kopyadaki `# [grouping]` ve `# engine = "wordmatch"` (eski örneklerde `# engine = "remote"`) satırlarını etkinleştirin ve otomatik gruplamayı kapatma dahil bölümü aşağıdaki gibi ayarlayın:
 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 Diğer seçenekleri yorum satırı bırakın. Etkin `[grouping]` tablosu varsa oradaki `engine` değerini değiştirin, ikinci tablo eklemeyin. `state_dir` ve `command` değerlerini kontrol edip **başlatmadan önce kaydedin**. `wordmatch` ortak sözcükleri karşılaştırır; yerel yapay zekâ değildir.

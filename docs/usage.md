@@ -37,13 +37,14 @@ Select the complete Core archive using this key on [Releases](https://github.com
 
 Check the exact release asset digest before launch; a byte match is not a signature or safety guarantee. Respect OS warnings and organizational policy. [SHA-256](#verify-a-release-download).
 
-**Privacy warning before first launch:** default `remote` grouping sends session **titles and working directories** to a hosted service and can run automatically after initial discovery, not just when you press `s`. The service has no published third-party request/response contract. Choose non-network grouping before launching:
+**Privacy before first launch:** builds containing the privacy-defaults change use manual `wordmatch` grouping by default. Older published releases may still auto-run remote grouping. Choosing `remote` sends **titles and cwd** externally; ACP can send summary snippets via its CLI. Local search saves conversation-content indexes. Read [PRIVACY.md](../PRIVACY.md) in your browser or extracted archive, without running the binary, for paths, retention and network controls. Only builds known to contain this change support `--privacy` and `--help` as early exits before discovery/model loading. **Do not try these flags on older or unknown builds:** they may be ignored and start discovery and automatic remote grouping. Configure local grouping before launching:
 
-3. For a fresh Core install, first copy the **generated** `config.toml.example` to `config.toml` beside the executable. In that copy, find `# [grouping]` and `# engine = "remote"`: remove the leading `#` from **both lines** and change the engine value to `"wordmatch"`, producing the two active lines below. Leave the other commented grouping options unchanged. If you already have an active `[grouping]` table, change its `engine` there instead—do not add a second table. Save the file before launching or scanning any history.
+3. For a fresh Core install, copy the **generated** `config.toml.example` to `config.toml` beside the executable. Set the following in its existing `[grouping]` table (uncomment it if needed; old examples show `engine = "remote"`). Do not duplicate tables or overwrite existing config. Save before launch:
 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 `wordmatch` uses word overlap; it is **not local AI**. This setting controls grouping, not the behavior of your provider CLIs. The optional semantic plugin can download model files on initialization; use Core for a first run without that plugin. See [grouping privacy](#what-remote-sends) and [semantic search](#what-you-get-out-of-the-box). Keep configuration, logs and session metadata private.
@@ -98,7 +99,7 @@ Native CLI history is enough when you already know the provider and session. Use
 
 Built-in history definitions: **Copilot CLI, Claude Code, Codex CLI, Qwen CLI, Gemini CLI and Kimi**. Discovery depends on retained formats and filters; additional providers require [definitions](#adding-a-provider), not universal CLI support.
 
-Follow the installation privacy steps before launching; default remote grouping can run automatically.
+Follow the installation privacy steps before launching, particularly with older published builds.
 
 
 
@@ -182,7 +183,7 @@ Bounded inspection: v0.3.2 Windows x64 Core `agent-session-tui-x86_64-pc-windows
 | Symptom | What to check |
 |---------|---------------|
 | Empty list or no match | Confirm saved conversations, an enabled provider and the actual CLI `state_dir`. Wait for discovery; try a literal title fragment. Check Hidden with `Shift+Tab` if you archived it. Not every format/version or query is guaranteed to match. |
-| Configuration error at startup | Check TOML syntax and duplicate tables. Back up your config, compare the generated release example, and fix the file found by the config search order. Preserve the privacy setting; removing configuration can restore remote defaults. |
+| Configuration error at startup | Check TOML syntax and duplicate tables. Back up your config, compare the generated release example, and fix the file found by the config search order. Preserve explicit privacy choices; older published builds can restore remote defaults when config is removed. |
 | `Failed to resume` / no terminal | Try the provider's own resume command with the selected session ID in its original directory. Check authentication, `command`, resume arguments, directory existence and launcher availability. Fix configuration, not provider history. |
 | Missing or wrong running-tab focus | Focus is Windows-only and title-based, not a process attachment guarantee. Shared titles can be ambiguous. Switch manually and verify the tab; Linux/macOS users must switch manually. |
 | No 🧠 indicator | Semantic search is optional. Check the trusted matching-platform library beside the executable and model initialization; Core still has keyword/lexical search. |
@@ -191,7 +192,7 @@ See [issue guidance](../CONTRIBUTING.md#reporting-issues) and [security reportin
 
 **Update:** cancel search with `Esc`, then quit with `q`, or use `Ctrl+C` in the list or search; back up `config.toml` and configured `data_dir` (groups, archive state and caches), and extract the new complete archive into a separate folder. Copy your configuration and keep the same `data_dir`; compare the new example without overwriting your settings. **Restore:** return to the old complete package and backed-up configuration/data. Provider updates and authentication are separate.
 
-**Remove:** quit, then remove only your extracted TUI package. Optionally back up and remove its own configured `data_dir` and OS-level TUI configuration; do not delete `.copilot`, `.claude`, `.codex`, `.qwen`, `.gemini` or `.kimi` histories. Exiting/removing the TUI does not stop running provider CLIs; close those through their own terminal.
+**Remove:** quit, then remove only your extracted TUI package. Optionally back up and remove its own configured `data_dir` and OS-level TUI configuration. Discovery caches and diagnostics in the OS temporary directory, and model/embedding caches outside a custom `data_dir`, need separate cleanup; see [exact storage paths and deletion](../PRIVACY.md#retention-deletion-and-protection). Do not delete `.copilot`, `.claude`, `.codex`, `.qwen`, `.gemini` or `.kimi` histories. Exiting/removing the TUI does not stop running provider CLIs; close those through their own terminal.
 
 <a id="pain-points-solved"></a>
 ## Pain Points Solved
@@ -265,7 +266,8 @@ Definitions describe retained-history parsing; configured resume flags express i
 Use the generated release example, copied to `config.toml` next to the binary. This excerpt is Windows-oriented; retain your release example's OS-specific settings and the pre-launch privacy choice above:
 
 ```toml
-data_dir = '~/.local/share/agent-session-tui'
+# Optional literal absolute override; no ~ or environment expansion.
+# data_dir = '/absolute/path/to/agent-session-tui'
 poll_interval_ms = 2000
 log_max_lines = 500
 
@@ -370,7 +372,8 @@ The semantic plugin lives in `semantic-plugin/`. See [`CONTRIBUTING.md` § Seman
 <details>
 <summary>Advanced reference</summary>
 
-Suggests thematic groups for your ungrouped sessions. It runs **once**, after
+Suggests thematic groups for your ungrouped sessions. Automatic runs are **off
+by default**. With `[grouping] auto_suggest = true`, it runs **once**, after
 the initial full discovery completes, so the top-30 batch is selected from the
 complete session list rather than the fast first page. Press `s` in the Grouped
 view to run another batch on demand. Suggestions appear as a dim
@@ -385,11 +388,11 @@ same existing group instead of a brand-new one.
 
 Set with `[grouping] engine` in `config.toml`.
 
-**`remote` — the default.** Sends session titles and working directories to a
+**`remote` — explicit choice.** Sends session titles and working directories to a
 hosted tab auto-grouping service, which returns natural group names like
 "System Maintenance". A maintainer-reported historical private-data run took about 2 seconds for 30 sessions; no public run artifact/environment is supplied. Latency varies with service, network and workload. No separate service installation or authentication is configured, but titles and paths leave the machine.
 
-**`wordmatch`** — no network, and **not an AI model of any kind**. It clusters normalized title/summary tokens when their Jaccard similarity (shared tokens divided by all distinct tokens) is strictly above 0.5, then names each group after its most common words.
+**`wordmatch` — the default** — no network, and **not an AI model of any kind**. It clusters normalized tokens from each title plus up to the first 100 summary characters when their Jaccard similarity (shared tokens divided by all distinct tokens) is strictly above 0.5, then names each group after its most common words.
 That produces blunt names like `benchmark-prompt-files`, so expect to rename
 some with `e`. A maintainer-reported historical private-data run took ~0.2s; no public run artifact/environment or batch size is supplied. Timing varies with hardware and workload. It is also the automatic fallback whenever `remote` fails.
 
@@ -400,10 +403,17 @@ A run exceeding `timeout_secs` is **terminated**, not just abandoned.
 
 ```toml
 [grouping]
-engine = "remote"     # "remote" | "wordmatch" | "acp"
+engine = "wordmatch"  # "remote" | "wordmatch" | "acp"; outbound engines are opt-in
+auto_suggest = false  # true = once after full discovery; s remains manual
 language = "en-US"    # language for generated group names
 timeout_secs = 20     # remote call timeout
 ```
+
+Existing explicit engine choices are preserved. Missing `auto_suggest` is off
+except for legacy `[acp] auto_suggest = true` with `engine = "acp"`; explicit
+`[grouping] auto_suggest` overrides that legacy flag. ACP still needs `[acp]`
+and its prompt template. Selecting remote alone does not enable automatic runs,
+but manual `s` transmits data. [Privacy and storage](../PRIVACY.md).
 
 <a id="what-remote-sends"></a>
 ### What `remote` sends
@@ -412,7 +422,11 @@ timeout_secs = 20     # remote call timeout
   representative per cluster of near-duplicate sessions. The maintainer reported a historical private-data reduction from
   40 sessions to 8 entries; no public run artifact is supplied and other histories
   can cluster differently. Working directories provide additional context.
-- **Never sent:** session summaries, file contents, chat transcripts.
+- **Local versus outbound text:** the local pre-pass compares titles plus up to
+  the first 100 summary characters. The outgoing `title` remains the original
+  session title, not that enriched text. No separate summary, file-content or
+  transcript fields are sent. Titles may themselves come from conversation
+  messages and contain private text.
 - **On any failure** — non-2xx, timeout, schema change — it falls back to
   `wordmatch` and shows a warning. To retry the online service, use `Shift+Tab` to
   enter the Grouped view, then press `s`. If a manual run fails while its

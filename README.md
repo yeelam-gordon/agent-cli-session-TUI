@@ -24,18 +24,19 @@ Concept illustration with fictional rows, not an app screenshot. English labels.
 
 Have saved history, an installed/authenticated provider CLI reachable through its configured `command`, and an accessible original working directory. Use an interactive terminal. Default launchers: Windows `wt` (fallback `cmd`), Linux `gnome-terminal`, macOS `osascript` with Terminal; [configure another launcher](docs/usage.md#configuration) if unavailable.
 
-**Before launch:** default remote grouping can automatically send **session titles and working directories** to a hosted service after discovery. It has no published third-party API contract. Core + `wordmatch` avoids that remote grouping, not provider-CLI networking. The optional semantic plugin may download models at initialization; start with Core without that plugin.
+**Before launch:** builds containing this privacy-defaults change use **manual `wordmatch` grouping by default**; older published releases may still auto-run remote grouping. Explicit `remote` sends titles/cwd to an external service; ACP can send summary snippets through its CLI. Local search saves an index of conversation content, not just metadata. Read [PRIVACY.md](PRIVACY.md) in your browser or extracted archive for exact storage paths, deletion and network choices. Only builds known to contain this change safely exit early with `--privacy` or `--help`; older/unknown builds may ignore these flags and start discovery and automatic remote grouping, so do not run them to inspect privacy. The optional semantic plugin may download models at initialization; Core without that plugin avoids this download, not provider-CLI networking.
 
 1. Download the complete **Core** archive for your OS/CPU from [Core archive filenames](docs/usage.md#core-archive-filenames), not the source archive. Extract everything together: binary, `providers/`, `prompts/`, generated `config.toml.example`. [Verify the exact asset digest](docs/usage.md#verify-a-release-download); a match is not a signature or safety guarantee. Respect OS/org controls.
    For attestation-enabled releases, [verify GitHub build provenance](docs/usage.md#verify-github-build-provenance) before extracting. This is not Windows code signing; older releases such as v0.3.2 are not retroactively attested.
-2. For a fresh install, copy the generated example to `config.toml` beside the binary; **do not overwrite existing settings or rename the source template**. In the copy, uncomment **both** `# [grouping]` and `# engine = "remote"`, then change the value:
+2. For a fresh install, copy the generated example to `config.toml` beside the binary; **do not overwrite existing settings or rename the source template**. Set the following in its existing `[grouping]` section (uncomment it if needed; older examples show `engine = "remote"`):
 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
-Keep other grouping options commented. If `[grouping]` already exists, change its `engine` rather than adding a duplicate. Check `state_dir` and `command`; save **before launch**. `wordmatch` is word overlap, not local AI.
+Keep other grouping options commented. Do not add a duplicate `[grouping]` table. Check `state_dir` and `command`; save **before launch**. `wordmatch` is word overlap, not local AI. Automatic grouping requires explicit opt-in; [legacy ACP compatibility](PRIVACY.md#defaults-and-choices) is preserved.
 
 3. In the extracted folder, run:
 
@@ -57,7 +58,7 @@ For **Running/Waiting/Idle**, `Enter` attempts Windows matching-tab focus, not p
 
 **Exit:** `Esc` cancels search; then `q` exits, or `Ctrl+C` in the list or search without deleting histories or stopping other CLIs. Kill is unimplemented. [Update, restore and removal](docs/usage.md#troubleshooting-update-and-removal).
 
-[Operating guide](docs/usage.md) · [Recorded demo](docs/usage.md#recorded-demo) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Operating guide](docs/usage.md) · [Recorded demo](docs/usage.md#recorded-demo) · [Privacy](PRIVACY.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
 
 <details>
 <summary>Earlier section links → operating guide</summary>

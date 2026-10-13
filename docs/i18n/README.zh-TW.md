@@ -26,14 +26,15 @@
 
 須有已儲存的對話；對應 CLI 已安裝，帳戶已登入並完成驗證，能透過設定的 `command` 執行，且原工作目錄仍可存取。使用符合系統、CPU 的版本與互動式終端機。預設啟動器為 Windows `wt`（備援 `cmd`）、Linux `gnome-terminal`、macOS `osascript` 與 Terminal；缺少時調整[設定](../usage.md#configuration)。
 
-**啟動前：** 預設遠端分組在探索紀錄後可能自動將**對話標題與工作目錄**傳至託管服務，沒有公開的第三方 API 契約。Core + `wordmatch` 可避免這種遠端分組，不會控制各 CLI 的網路行為。選用的語意外掛初始化時可能下載模型；第一次請使用不含外掛的 Core。
+**啟動前：** 包含隱私預設值變更的建置預設關閉自動分組，手動使用 `wordmatch`；舊版發行包可能仍自動遠端分組。明確選擇 `remote` 會傳送標題與工作目錄，ACP 可透過 CLI 傳送摘要。搜尋索引會保存對話內容的衍生資料，不只是中繼資料。[PRIVACY.md](../../PRIVACY.md) 說明保存路徑、清理與網路行為。語意外掛仍可能下載模型；Core 不控制各 CLI 的網路行為。
 
 1. 從 [依系統與 CPU 選擇 Core 檔案](../usage.md#core-archive-filenames) 下載符合系統、CPU 的完整 **Core** 壓縮檔，而非原始碼壓縮檔。全部解壓，保留程式、`providers/`、`prompts/` 與產生好的 `config.toml.example`。[核對該檔案的摘要](../usage.md#verify-a-release-download)；相符不代表簽章或安全保證，仍須遵守系統警告與組織政策。
-2. 首次安裝時，將產生好的範例複製為程式旁的 `config.toml`；**不要覆寫既有設定，也不要將原始碼的 `config.toml.template` 直接改名使用**。在副本中找到 `# [grouping]` 和 `# engine = "remote"`，移除**兩行**開頭的 `#`，將值改為：
+2. 首次安裝時，將產生好的範例複製為程式旁的 `config.toml`；**不要覆寫既有設定，也不要將原始碼的 `config.toml.template` 直接改名使用**。在副本中找到 `# [grouping]` 和 `# engine = "wordmatch"`（舊範例可能為 `# engine = "remote"`），取消註解並將該區段設為以下內容，包括關閉自動分組：
 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 其他分組選項保持註解。若已有啟用的 `[grouping]` 區段，只改其中的 `engine`，不要新增重複區段。核對 `state_dir`、`command`，**儲存後才啟動**。`wordmatch` 只比對共同字詞，不是本機 AI。

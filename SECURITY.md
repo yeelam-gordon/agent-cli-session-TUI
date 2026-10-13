@@ -14,7 +14,7 @@ This tool reads session data from local CLI state directories (read-only) and la
 
 - **Config injection** — malicious `config.toml` could specify arbitrary commands in `launch_cmd` / `command` fields
 - **Path traversal** — provider `state_dir` paths are used for filesystem reads
-- **File writes** — the tool writes `archived.json` and `embeddings_cache.json` (in `data_dir/models/`); both are JSON and writable by the current user
+- **File writes** — groups/archive state, discovery caches and content-derived full-text/embedding indexes can contain sensitive data. Model caches are not relocated by `data_dir`. See [PRIVACY.md](PRIVACY.md) for exact paths, network boundaries and retention.
 - **Semantic plugin DLL loading** — if a `semantic_plugin.dll` / `libsemantic_plugin.so` is found at startup, it is loaded via `libloading`. A malicious DLL in the search path can execute arbitrary code. Only load DLLs you built yourself or obtained from a trusted source
 - **Model download trust** — the semantic plugin uses `fastembed-rs`, which downloads ONNX models from Hugging Face on first use. Ensure you trust the model repository and that your network is not intercepting the download
 

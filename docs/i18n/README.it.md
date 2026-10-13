@@ -26,14 +26,15 @@ Illustrazione concettuale, non una schermata reale dell’app. Etichette inglesi
 
 Servono cronologia salvata, CLI installato e autenticato, accessibile tramite il `command` configurato, e directory originale disponibile. Usa un terminale interattivo e una versione per il tuo sistema/CPU. Lanciatori predefiniti: Windows `wt` (alternativa `cmd`), Linux `gnome-terminal`, macOS `osascript` con Terminal. Se mancano, modifica la [configurazione](../usage.md#configuration).
 
-**Prima dell’avvio:** il raggruppamento remoto predefinito può inviare automaticamente **titoli e directory di lavoro** a un servizio esterno dopo il rilevamento della cronologia. Non esiste un contratto API pubblico per terze parti. Core + `wordmatch` evita questo raggruppamento remoto, non le connessioni dei CLI stessi. Il plugin semantico facoltativo può scaricare modelli all’inizializzazione; inizia con Core senza quel plugin.
+**Prima dell’avvio:** le build con i nuovi valori di privacy disattivano il raggruppamento automatico per impostazione predefinita e usano `wordmatch` manualmente. Le vecchie versioni possono ancora raggruppare automaticamente da remoto. Scegliere `remote` invia titoli e directory; ACP può inviare riassunti tramite il CLI. [PRIVACY.md](../../PRIVACY.md) descrive percorsi e indici del contenuto delle conversazioni. Il plugin semantico può scaricare modelli; Core non controlla le connessioni dei CLI.
 
 1. Da [Archivi Core per sistema e CPU](../usage.md#core-archive-filenames) scarica l’**archivio Core completo** per il tuo sistema/CPU, non quello del codice sorgente. Estrai tutto e mantieni insieme eseguibile, `providers/`, `prompts/` e `config.toml.example` generato. [Verifica il digest del file esatto](../usage.md#verify-a-release-download); la corrispondenza non è firma né garanzia di sicurezza. Rispetta avvisi del sistema e regole dell’organizzazione.
-2. Per una nuova installazione, copia l’esempio generato come `config.toml` accanto all’eseguibile. **Non sovrascrivere impostazioni esistenti e non rinominare il `config.toml.template` sorgente.** Nella copia, togli il `#` iniziale da **entrambe le righe**, `# [grouping]` e `# engine = "remote"`, poi cambia il valore:
+2. Per una nuova installazione, copia l’esempio generato come `config.toml` accanto all’eseguibile. **Non sovrascrivere impostazioni esistenti e non rinominare il `config.toml.template` sorgente.** Nella copia, decommenta `# [grouping]` e `# engine = "wordmatch"` (vecchi esempi: `# engine = "remote"`) e configura la sezione come sotto, disattivando anche il raggruppamento automatico:
 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 Lascia commentate le altre opzioni. Se esiste già una tabella `[grouping]` attiva, modifica il suo `engine` senza duplicarla. Controlla `state_dir` e `command`; **salva prima dell’avvio**. `wordmatch` confronta parole condivise; non è IA locale.
