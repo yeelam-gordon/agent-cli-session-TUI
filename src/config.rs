@@ -184,9 +184,9 @@ pub enum GroupingEngine {
     /// titles and working directories and returns suggested group names;
     /// see `src/grouping/remote.rs` for transmission and stability caveats.
     Remote,
-    /// Word-overlap matching on titles — **not a local AI model**. It counts
-    /// how many words two session titles share and groups them if more than
-    /// half overlap, naming each group after its most common words (e.g.
+    /// Word-overlap matching on titles plus short summary snippets — **not a
+    /// local AI model**. It counts how many words the inputs share and groups
+    /// them if more than half overlap, naming each group after its most common words (e.g.
     /// `benchmark-prompt-files`). No network or model. Also the automatic
     /// fallback whenever `Remote` fails.
     ///
@@ -732,6 +732,49 @@ mod tests {
         ] {
             assert!(policy.contains(path), "{path}");
         }
+    }
+
+    #[test]
+    fn localized_grouping_steps_match_current_and_legacy_templates() {
+        let template = include_str!("../config.toml.template");
+        assert!(template.lines().any(|line| line == "# engine = \"wordmatch\""));
+        let translations = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("i18n");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(translations).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if !name.starts_with("README.") || !name.ends_with(".md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let step = text.lines().find(|line| line.starts_with("2. ")).unwrap();
+            assert!(step.contains("# [grouping]"), "{name}");
+            let current = step
+                .find("# engine = \"wordmatch\"")
+                .expect("current example");
+            let legacy = step.find("# engine = \"remote\"").expect("legacy example");
+            assert!(current < legacy, "{name}: current example must come first");
+            assert_eq!(
+                text.matches("# engine = \"wordmatch\"").count(),
+                1,
+                "{name}"
+            );
+            assert_eq!(text.matches("# engine = \"remote\"").count(), 1, "{name}");
+            let block = text
+                .split_once("```toml")
+                .unwrap()
+                .1
+                .split("```")
+                .next()
+                .unwrap();
+            let config: AppConfig = toml::from_str(block).unwrap();
+            assert_eq!(config.grouping.engine, GroupingEngine::WordMatch, "{name}");
+            assert_eq!(config.grouping.auto_suggest, Some(false), "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 15);
     }
 
     /// `local` was the original name for the word-overlap engine. It read as

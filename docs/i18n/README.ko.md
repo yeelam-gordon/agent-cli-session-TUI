@@ -26,10 +26,10 @@
 
 저장된 대화, 설치되어 있고 계정 로그인·인증을 마쳐 설정의 `command`로 실행 가능한 CLI, 접근 가능한 원래 작업 디렉터리가 필요합니다. OS와 CPU에 맞는 버전을 대화형 터미널에서 쓰세요. 기본 실행기는 Windows `wt`(대체 `cmd`), Linux `gnome-terminal`, macOS `osascript`와 Terminal입니다. 없으면 [설정](../usage.md#configuration)을 변경하세요.
 
-**실행 전:** 개인정보 기본값 변경이 포함된 빌드는 자동 그룹화가 기본으로 꺼져 있고 수동 그룹화는 `wordmatch`입니다. 이전 릴리스는 자동 원격 그룹화를 유지할 수 있습니다. 명시적으로 선택한 `remote`는 제목과 작업 디렉터리를 보내고 ACP는 CLI를 통해 요약도 보낼 수 있습니다. 대화 내용 검색 색인과 저장 경로는 [PRIVACY.md](../../PRIVACY.md)를 참고하세요. 의미 검색 플러그인은 모델을 내려받을 수 있으며 Core는 CLI 통신을 제어하지 않습니다. 이전 예제는 `# engine = "remote"`, 새 예제는 `# engine = "wordmatch"`입니다.
+**실행 전:** 개인정보 기본값 변경이 포함된 빌드는 자동 그룹화가 기본으로 꺼져 있고 수동 그룹화는 `wordmatch`입니다. 이전 릴리스는 자동 원격 그룹화를 유지할 수 있습니다. 명시적으로 선택한 `remote`는 제목과 작업 디렉터리를 보내고 ACP는 CLI를 통해 요약도 보낼 수 있습니다. 대화 내용 검색 색인과 저장 경로는 [PRIVACY.md](../../PRIVACY.md)를 참고하세요. 의미 검색 플러그인은 모델을 내려받을 수 있으며 Core는 CLI 통신을 제어하지 않습니다.
 
 1. [OS·CPU별 Core 파일](../usage.md#core-archive-filenames)에서 OS·CPU에 맞는 **Core 전체 압축 파일**을 받으세요. 소스 코드 압축 파일이 아닙니다. 전부 풀고 프로그램, `providers/`, `prompts/`, 생성된 `config.toml.example`을 함께 둡니다. [해당 파일의 다이제스트를 확인](../usage.md#verify-a-release-download)하세요. 일치는 서명이나 안전 보장이 아니며 OS 경고와 조직 정책을 따라야 합니다.
-2. 처음 설치할 때 생성된 예제를 실행 파일 옆 `config.toml`로 복사하세요. **기존 설정을 덮어쓰거나 소스의 `config.toml.template` 이름만 바꿔 쓰지 마세요.** 복사본에서 `# [grouping]`과 `# engine = "remote"` **두 줄 모두** 앞의 `#`를 지우고 값을 바꾸세요.
+2. 처음 설치할 때 생성된 예제를 실행 파일 옆 `config.toml`로 복사하세요. **기존 설정을 덮어쓰거나 소스의 `config.toml.template` 이름만 바꿔 쓰지 마세요.** 복사본에서 `# [grouping]`과 `# engine = "wordmatch"`(이전 예제는 `# engine = "remote"`)의 주석을 해제하고 자동 그룹화 끄기를 포함하여 아래와 같이 설정하세요.
 
 ```toml
 [grouping]

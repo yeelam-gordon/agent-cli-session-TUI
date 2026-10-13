@@ -75,14 +75,18 @@ read budgets, **not retention or total disk-size limits**.
 ## Network boundaries
 
 * **Wordmatch and core search:** local computation, no grouping/search service.
+  Wordmatch compares session titles plus up to the first 100 summary characters.
   Disabling automatic grouping does not disable local indexing.
 * **Remote grouping (explicit engine choice):** sends session **titles and working
   directories as `file:///` URIs**, one representative per local cluster, plus
   language and request bookkeeping, to
   `https://edge.microsoft.com/taggrouptitlegeneration/api/AutoGrouping/groupingacstreaming`.
   Existing group **names** are additionally sent only with
-  `reuse_existing_groups = true` (default false). This path does not send summary
-  fields, file contents or transcripts; titles/paths themselves can be sensitive.
+  `reuse_existing_groups = true` (default false). Its local pre-pass compares
+  titles plus up to the first 100 summary characters, but the outgoing `title`
+  is the original session title, not that enriched text. No separate summary,
+  file-content or transcript fields are sent. Titles can themselves be derived
+  from a conversation message; titles/paths can contain sensitive text.
   A local fallback after a remote failure does not undo transmission.
   The Microsoft-hosted endpoint appears in the Edge firewall allowlist, not a
   published third-party API contract. This project cannot promise the service's
@@ -94,7 +98,7 @@ read budgets, **not retention or total disk-size limits**.
   may receive these data, incur quota charges and save its own history. Custom
   prompts/commands can change this behavior. If semantic embeddings are available,
   the prompt can also include session-pair IDs and similarity scores (not vectors).
-  The remote-engine “no summaries”
+  The remote-engine “no separate summary fields”
   statement does **not** apply to ACP.
 * **Optional semantic plugin:** uses local ONNX inference for query/document
   embeddings, but initializes before the TUI and can download MiniLM-L6-v2

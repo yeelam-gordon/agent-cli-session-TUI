@@ -26,10 +26,10 @@ Minh họa ý tưởng, không phải ảnh chụp ứng dụng thật. Nhãn ti
 
 Cần lịch sử đã lưu, CLI đã cài và xác thực, gọi được qua `command` đã cấu hình, cùng thư mục làm việc gốc còn truy cập được. Dùng terminal tương tác và phiên bản đúng hệ điều hành/CPU. Trình mở mặc định: Windows `wt` (dự phòng `cmd`), Linux `gnome-terminal`, macOS `osascript` với Terminal. Nếu thiếu, sửa [cấu hình](../usage.md#configuration).
 
-**Trước khi chạy:** bản dựng có thay đổi mặc định quyền riêng tư tắt nhóm tự động theo mặc định và dùng `wordmatch` thủ công. Bản phát hành cũ vẫn có thể tự nhóm từ xa. Chọn rõ `remote` sẽ gửi tiêu đề và thư mục; ACP có thể gửi tóm tắt qua CLI. [PRIVACY.md](../../PRIVACY.md) mô tả nơi lưu và chỉ mục nội dung hội thoại. Plugin ngữ nghĩa có thể tải mô hình; Core không kiểm soát kết nối CLI. Ví dụ cũ: `# engine = "remote"`; mới: `# engine = "wordmatch"`.
+**Trước khi chạy:** bản dựng có thay đổi mặc định quyền riêng tư tắt nhóm tự động theo mặc định và dùng `wordmatch` thủ công. Bản phát hành cũ vẫn có thể tự nhóm từ xa. Chọn rõ `remote` sẽ gửi tiêu đề và thư mục; ACP có thể gửi tóm tắt qua CLI. [PRIVACY.md](../../PRIVACY.md) mô tả nơi lưu và chỉ mục nội dung hội thoại. Plugin ngữ nghĩa có thể tải mô hình; Core không kiểm soát kết nối CLI.
 
 1. Tải **gói Core đầy đủ** đúng hệ điều hành/CPU từ [Tệp Core theo hệ điều hành/CPU](../usage.md#core-archive-filenames), không lấy gói mã nguồn. Giải nén hết, giữ chương trình, `providers/`, `prompts/` và `config.toml.example` đã tạo cùng nhau. [Kiểm tra mã băm của đúng tệp](../usage.md#verify-a-release-download); khớp không phải chữ ký hay bảo đảm an toàn. Tuân thủ cảnh báo hệ điều hành và chính sách tổ chức.
-2. Lần cài mới, sao chép ví dụ đã tạo thành `config.toml` cạnh chương trình. **Không ghi đè cấu hình có sẵn hoặc chỉ đổi tên `config.toml.template` trong mã nguồn.** Trong bản sao, bỏ `#` đầu **cả hai dòng** `# [grouping]` và `# engine = "remote"`, rồi đổi giá trị:
+2. Lần cài mới, sao chép ví dụ đã tạo thành `config.toml` cạnh chương trình. **Không ghi đè cấu hình có sẵn hoặc chỉ đổi tên `config.toml.template` trong mã nguồn.** Trong bản sao, bỏ chú thích cho `# [grouping]` và `# engine = "wordmatch"` (ví dụ cũ: `# engine = "remote"`), rồi đặt phần này như bên dưới, gồm cả tắt nhóm tự động:
 
 ```toml
 [grouping]

@@ -11,7 +11,9 @@
 # App data directory: groups.json, archived.json, log_index/ and fingerprints.
 # Default is the OS local-data directory/agent-session-tui; use an absolute
 # literal override (no ~ or environment-variable expansion).
-# Model/embedding caches stay in the default OS directory/models regardless.
+# embeddings_cache_v3.json stays in the default OS local-data
+# agent-session-tui/models/ directory regardless of data_dir or HF_HOME.
+# Model assets default to that directory, but HF_HOME relocates those assets.
 # data_dir = '/absolute/path/to/agent-session-tui'
 poll_interval_ms = 2000
 log_max_lines = 500 # UI list only; diagnostic file has no rotation/size limit
@@ -62,8 +64,9 @@ log_max_lines = 500 # UI list only; diagnostic file has no rotation/size limit
 #                      Nothing to install or authenticate. See the note below on
 #                      what is sent.
 #
-#   engine = "wordmatch" DEFAULT. No network. NOT an AI model — it compares how
-#                      many words two titles share, and names each group after
+#   engine = "wordmatch" DEFAULT. No network. NOT an AI model — it compares
+#                      words from titles plus up to the first 100 summary characters,
+#                      and names each group after
 #                      its most common words (e.g. "benchmark-prompt-files"), so
 #                      expect to rename some. Historically the maintainer reported
 #                      ~0.2s on private data; timing varies by environment/workload.
@@ -91,7 +94,10 @@ log_max_lines = 500 # UI list only; diagnostic file has no rotation/size limit
 #             Existing group NAMES are additionally offered only when
 #             reuse_existing_groups = true (off by default); sessions in those
 #             groups are not sent.
-# Never sent: session summaries, file contents, chat transcripts.
+# The local pre-pass uses title + up to 100 summary characters; the remote
+# title field receives only the original session title, not that enriched text.
+# No separate summary, file-content or transcript fields are sent. Titles may
+# themselves be derived from a conversation message and contain private text.
 # On remote failure: falls back to wordmatch and surfaces a warning/status.
 #             The fallback does not guarantee suggestions or failure-free grouping.
 #

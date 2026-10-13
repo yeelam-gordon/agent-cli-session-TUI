@@ -392,7 +392,7 @@ Set with `[grouping] engine` in `config.toml`.
 hosted tab auto-grouping service, which returns natural group names like
 "System Maintenance". A maintainer-reported historical private-data run took about 2 seconds for 30 sessions; no public run artifact/environment is supplied. Latency varies with service, network and workload. No separate service installation or authentication is configured, but titles and paths leave the machine.
 
-**`wordmatch` — the default** — no network, and **not an AI model of any kind**. It clusters normalized title/summary tokens when their Jaccard similarity (shared tokens divided by all distinct tokens) is strictly above 0.5, then names each group after its most common words.
+**`wordmatch` — the default** — no network, and **not an AI model of any kind**. It clusters normalized tokens from each title plus up to the first 100 summary characters when their Jaccard similarity (shared tokens divided by all distinct tokens) is strictly above 0.5, then names each group after its most common words.
 That produces blunt names like `benchmark-prompt-files`, so expect to rename
 some with `e`. A maintainer-reported historical private-data run took ~0.2s; no public run artifact/environment or batch size is supplied. Timing varies with hardware and workload. It is also the automatic fallback whenever `remote` fails.
 
@@ -422,7 +422,11 @@ but manual `s` transmits data. [Privacy and storage](../PRIVACY.md).
   representative per cluster of near-duplicate sessions. The maintainer reported a historical private-data reduction from
   40 sessions to 8 entries; no public run artifact is supplied and other histories
   can cluster differently. Working directories provide additional context.
-- **Never sent:** session summaries, file contents, chat transcripts.
+- **Local versus outbound text:** the local pre-pass compares titles plus up to
+  the first 100 summary characters. The outgoing `title` remains the original
+  session title, not that enriched text. No separate summary, file-content or
+  transcript fields are sent. Titles may themselves come from conversation
+  messages and contain private text.
 - **On any failure** — non-2xx, timeout, schema change — it falls back to
   `wordmatch` and shows a warning. To retry the online service, use `Shift+Tab` to
   enter the Grouped view, then press `s`. If a manual run fails while its

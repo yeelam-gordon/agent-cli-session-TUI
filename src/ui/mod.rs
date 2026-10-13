@@ -4864,6 +4864,113 @@ mod ui_invariant_tests {
     }
 
     #[test]
+    fn collected_summary_snippets_never_replace_titles_in_remote_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = empty_grouping_app(dir.path(), crate::config::AppConfig::default());
+        let session = crate::models::Session {
+            id: "private-id".into(),
+            provider_session_id: "private-provider-id".into(),
+            provider_name: "fixture".into(),
+            cwd: dir.path().join("project"),
+            title: "Original session title".into(),
+            tab_title: None,
+            summary: format!("{}OMITTED_AFTER_100", "私".repeat(100)),
+            state: Default::default(),
+            pid: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            state_dir: None,
+        };
+        let anchor = crate::models::Session {
+            id: "anchor-id".into(),
+            provider_session_id: "anchor-provider-id".into(),
+            title: "PRIVATE_ANCHOR_TITLE".into(),
+            summary: "PRIVATE_ANCHOR_SUMMARY".into(),
+            ..session.clone()
+        };
+        app.group_mgr
+            .assign_in_memory("fixture:anchor-provider-id", "Existing group");
+        app.sessions = vec![session.clone(), anchor];
+        let (inputs, asked) = app.collect_grouping_batch();
+        assert_eq!(asked, ["fixture:private-provider-id"]);
+        let candidate = inputs.iter().find(|i| i.existing_group.is_none()).unwrap();
+        assert_eq!(
+            candidate.text,
+            format!("{} {}", session.title, "私".repeat(100))
+        );
+        assert_eq!(candidate.title, session.title);
+        assert!(inputs
+            .iter()
+            .any(|i| i.text.contains("PRIVATE_ANCHOR_SUMMARY")));
+
+        for reuse_existing_groups in [false, true] {
+            let config = crate::config::GroupingConfig {
+                reuse_existing_groups,
+                ..Default::default()
+            };
+            let requests = crate::grouping::remote::capture_requests(|| {
+                let result = crate::grouping::suggest_with_status(
+                    crate::config::GroupingEngine::Remote,
+                    &inputs,
+                    &["Existing group".into()],
+                    &config,
+                )
+                .unwrap();
+                assert!(!result.remote_fallback);
+            });
+            assert_eq!(requests.len(), 1);
+            let body = &requests[0];
+            for private_text in [
+                "私",
+                "OMITTED_AFTER_100",
+                "PRIVATE_ANCHOR_TITLE",
+                "PRIVATE_ANCHOR_SUMMARY",
+                "private-id",
+                "private-provider-id",
+            ] {
+                assert!(!body.contains(private_text), "{private_text}: {body}");
+            }
+            let request: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(request.as_object().unwrap().len(), 3);
+            assert_eq!(request["experimentId"], "");
+            assert_eq!(request["language"], "en-US");
+            let rows = request["targetGroup"].as_array().unwrap();
+            assert_eq!(rows.len(), if reuse_existing_groups { 2 } else { 1 });
+            let row = rows.last().unwrap();
+            assert_eq!(row["title"], session.title);
+            assert_eq!(
+                row["url"],
+                crate::grouping::remote::path_to_file_uri(&session.cwd)
+            );
+            let mut keys: Vec<_> = row
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "groupId",
+                    "groupName",
+                    "openerTabId",
+                    "tabId",
+                    "title",
+                    "url"
+                ]
+            );
+            if reuse_existing_groups {
+                assert_eq!(rows[0]["title"], "Existing group");
+                assert_eq!(rows[0]["groupName"], "Existing group");
+                assert_eq!(rows[0]["url"], "file:///groups/Existing group");
+            } else {
+                assert!(!body.contains("Existing group"));
+            }
+        }
+    }
+
+    #[test]
     fn missing_and_legacy_config_do_not_attempt_automatic_grouping() {
         for text in [
             "",

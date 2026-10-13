@@ -23,7 +23,10 @@
 //! merged groups and better names; this is not a reproducible public benchmark
 //! or a guarantee for another workload.
 //!
-//! Summaries, file contents, and chat transcripts are never sent.
+//! The local pre-pass can use summary snippets, but outgoing titles are the
+//! original session titles, not summary-enriched text. No separate summary,
+//! file-content or transcript fields are sent. A title may itself come from a
+//! conversation message and contain private text.
 //!
 //! ## Observed protocol
 //!
@@ -46,6 +49,31 @@ use crate::acp::AiSuggestion;
 
 const ENDPOINT: &str =
     "https://edge.microsoft.com/taggrouptitlegeneration/api/AutoGrouping/groupingacstreaming";
+
+#[cfg(test)]
+thread_local! {
+    static CAPTURED_REQUESTS: std::cell::RefCell<Option<Vec<String>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Capture serialized requests on this test thread without contacting the service.
+#[cfg(test)]
+pub(crate) fn capture_requests(action: impl FnOnce()) -> Vec<String> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CAPTURED_REQUESTS.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+    CAPTURED_REQUESTS.with_borrow_mut(|slot| {
+        assert!(slot.is_none(), "request capture cannot be nested");
+        *slot = Some(Vec::new());
+    });
+    let _reset = Reset;
+    action();
+    CAPTURED_REQUESTS.with_borrow_mut(|slot| slot.take().unwrap())
+}
 
 /// Stream terminator emitted after the final data line on success.
 const DONE_SENTINEL: &str = r#"["DONE"]"#;
@@ -269,6 +297,18 @@ pub fn suggest(
 
     let req = build_request(inputs, language);
     let body = serde_json::to_string(&req).map_err(|e| format!("serialize failed: {e}"))?;
+
+    #[cfg(test)]
+    if CAPTURED_REQUESTS.with_borrow_mut(|slot| {
+        if let Some(requests) = slot {
+            requests.push(body.clone());
+            true
+        } else {
+            false
+        }
+    }) {
+        return Ok(Vec::new());
+    }
 
     crate::log::info(&format!(
         "Remote grouping: POST {} items ({} bytes)",
