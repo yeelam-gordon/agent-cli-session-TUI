@@ -9,12 +9,34 @@ the binary. **Only builds known to contain this change** support `--help` and
 loading. Do not use these flags to inspect an older or unknown build: it may
 ignore them and start the application, including automatic remote grouping.
 
+## Application, dependency and service responsibilities
+
+The TUI selects the configured histories and content to search, then uses
+**Tantivy** to build and query its local full-text index. Tantivy implements the
+index storage; the TUI chooses its location and when to refresh it. These are
+local search operations, not uploads to a hosted search service.
+
+The optional semantic plugin uses **fastembed/ONNX Runtime** for local model
+inference and **Hugging Face download/cache dependencies** to obtain and cache
+model assets. The TUI starts plugin initialization and supplies a cache path;
+the dependencies implement model downloads and asset caching. Separately,
+the TUI writes its session embedding-vector cache. These distinct locations
+and controls are listed below.
+
+Installed agent CLIs manage their own account sign-in, original histories and
+service requests. Their vendors and any configured remote services govern
+server-side handling; those are not TUI-operated storage services. The TUI's
+own outbound grouping requests and prompts passed to CLIs are described under
+Network boundaries. This distinction attributes each operation without
+excluding dependency behavior from the notice.
+
 ## Defaults and choices
 
 Local discovery and search read enabled providers' saved sessions and inspect
 local process metadata (including command lines/PIDs, and Windows window/tab
-information). Search is not just a metadata list: it builds a local index of
-conversation content. Provider history is not deleted by archiving a session.
+information). Search is not just a metadata list: the TUI supplies conversation
+content to its local indexing dependency. Provider history is not deleted by
+archiving a session.
 
 Grouping is **manual by default**, with non-network `wordmatch` as the default
 engine. `s` in the Grouped view runs the selected engine on demand; assigning
