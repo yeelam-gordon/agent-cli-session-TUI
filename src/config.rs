@@ -37,12 +37,10 @@ pub struct AppConfig {
     /// opt-in and a resolvable prompt template; otherwise its `s` shortcut and
     /// automatic suggestions are unavailable and no ACP subprocess is spawned.
     /// Remote and wordmatch grouping remain available without this section;
-    /// remote is the default and can send titles and working directories.
+    /// wordmatch is the default and does not use the network.
     #[serde(default)]
     pub acp: Option<AcpConfig>,
-    /// Grouping engine selection. Defaults to the hosted remote engine, which
-    /// can send titles and working directories automatically after initial
-    /// discovery. Select wordmatch before launch for non-network grouping.
+    /// Grouping defaults to manual, non-network word matching.
     #[serde(default)]
     pub grouping: GroupingConfig,
     /// Shared template for `--remote <box>` mode. When you run the TUI with
@@ -182,10 +180,9 @@ fn default_launch_method() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupingEngine {
-    /// Hosted tab auto-grouping service, selected by default. Sends session
+    /// Opt-in hosted tab auto-grouping service. Sends session
     /// titles and working directories and returns suggested group names;
     /// see `src/grouping/remote.rs` for transmission and stability caveats.
-    #[default]
     Remote,
     /// Word-overlap matching on titles — **not a local AI model**. It counts
     /// how many words two session titles share and groups them if more than
@@ -196,6 +193,7 @@ pub enum GroupingEngine {
     /// Accepts `"local"` as an alias — that was the original name, and it
     /// repeatedly read as "runs a local model", which it does not.
     #[serde(alias = "local")]
+    #[default]
     WordMatch,
     /// Legacy: spawn the configured CLI (`[acp]`) as a one-shot subprocess.
     Acp,
@@ -204,11 +202,14 @@ pub enum GroupingEngine {
 /// Configuration for group suggestions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupingConfig {
-    /// Engine to use. Defaults to the hosted remote engine, which can send
-    /// titles and working directories automatically after initial discovery.
-    /// Select wordmatch before launch for non-network grouping.
+    /// Engine to use for manual and automatic suggestions. Defaults to wordmatch.
     #[serde(default)]
     pub engine: GroupingEngine,
+    /// Run once after discovery when true; false disables automatic grouping.
+    /// When omitted, only the legacy ACP engine's explicit auto_suggest opt-in
+    /// is honored. Manual suggestions remain available independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_suggest: Option<bool>,
     /// Language tag passed to a remote engine; controls the language generated
     /// group names are written in.
     #[serde(default = "default_grouping_language")]
@@ -256,11 +257,20 @@ impl Default for GroupingConfig {
     fn default() -> Self {
         Self {
             engine: GroupingEngine::default(),
+            auto_suggest: None,
             language: default_grouping_language(),
             reuse_existing_groups: default_reuse_existing_groups(),
             max_group_anchors: default_max_group_anchors(),
             timeout_secs: default_grouping_timeout_secs(),
         }
+    }
+}
+
+impl GroupingConfig {
+    /// Resolve the automatic-run opt-in, preserving legacy ACP configuration.
+    pub fn auto_suggest_enabled(&self, acp: &AcpConfig) -> bool {
+        self.auto_suggest
+            .unwrap_or(self.engine == GroupingEngine::Acp && acp.auto_suggest)
     }
 }
 
@@ -611,29 +621,32 @@ mod tests {
         assert!(cfg.acp.is_none(), "default AppConfig must not opt into AI");
     }
 
-    /// With no `[grouping]` section, the remote engine is used — it is the
-    /// default because it produces far better group names than word matching.
+    /// Regression: missing config must not silently select outbound grouping.
     #[test]
-    fn grouping_defaults_to_remote_when_section_absent() {
+    fn grouping_defaults_to_wordmatch_when_section_absent() {
         let toml_str = r#"
             poll_interval_ms = 2000
         "#;
         let cfg: AppConfig = toml::from_str(toml_str).expect("parse");
-        assert_eq!(cfg.grouping.engine, GroupingEngine::Remote);
+        assert_eq!(cfg.grouping.engine, GroupingEngine::WordMatch);
+        assert!(!cfg.grouping.auto_suggest_enabled(&AcpConfig::default()));
         assert_eq!(cfg.grouping.language, "en-US");
         assert_eq!(cfg.grouping.timeout_secs, 20);
     }
 
     #[test]
-    fn default_app_config_uses_remote_grouping() {
-        assert_eq!(AppConfig::default().grouping.engine, GroupingEngine::Remote);
+    fn default_app_config_uses_manual_wordmatch_grouping() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.grouping.engine, GroupingEngine::WordMatch);
+        assert!(!cfg.grouping.auto_suggest_enabled(&AcpConfig::default()));
     }
 
     /// An empty `[grouping]` section must behave exactly like an absent one.
     #[test]
     fn empty_grouping_section_matches_the_default() {
         let cfg: AppConfig = toml::from_str("[grouping]\n").expect("parse");
-        assert_eq!(cfg.grouping.engine, GroupingEngine::Remote);
+        assert_eq!(cfg.grouping.engine, GroupingEngine::WordMatch);
+        assert!(!cfg.grouping.auto_suggest_enabled(&AcpConfig::default()));
     }
 
     /// Opting out to the offline engine must be possible and must stick.
@@ -654,6 +667,70 @@ mod tests {
             let cfg: AppConfig =
                 toml::from_str(&format!("[grouping]\nengine = \"{s}\"\n")).expect("parse");
             assert_eq!(cfg.grouping.engine, want, "engine = {s}");
+            assert!(!cfg.grouping.auto_suggest_enabled(&AcpConfig::default()));
+        }
+    }
+
+    #[test]
+    fn automatic_grouping_requires_explicit_opt_in_for_each_engine() {
+        for engine in ["wordmatch", "local", "remote", "acp"] {
+            for enabled in [false, true] {
+                let cfg: AppConfig = toml::from_str(&format!(
+                    "[grouping]\nengine = \"{engine}\"\nauto_suggest = {enabled}\n[acp]\n"
+                ))
+                .unwrap();
+                assert_eq!(
+                    cfg.grouping.auto_suggest_enabled(cfg.acp.as_ref().unwrap()),
+                    enabled,
+                    "{engine}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_acp_opt_in_is_preserved_but_never_enables_other_engines() {
+        for engine in ["wordmatch", "remote", "acp"] {
+            let text = format!("[grouping]\nengine = \"{engine}\"\n[acp]\nauto_suggest = true\n");
+            let cfg: AppConfig = toml::from_str(&text).unwrap();
+            assert_eq!(
+                cfg.grouping.auto_suggest_enabled(cfg.acp.as_ref().unwrap()),
+                engine == "acp"
+            );
+            let text = text.replace("[grouping]", "[grouping]\nauto_suggest = false");
+            let cfg: AppConfig = toml::from_str(&text).unwrap();
+            assert!(!cfg.grouping.auto_suggest_enabled(cfg.acp.as_ref().unwrap()));
+        }
+    }
+
+    #[test]
+    fn manual_remote_selection_survives_disabled_automatic_grouping() {
+        let cfg: AppConfig =
+            toml::from_str("[grouping]\nengine = \"remote\"\nauto_suggest = false\n").unwrap();
+        let round_trip: AppConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round_trip.grouping.engine, GroupingEngine::Remote);
+        assert!(!round_trip
+            .grouping
+            .auto_suggest_enabled(&AcpConfig::default()));
+    }
+
+    #[test]
+    fn privacy_notice_is_packaged_and_available_before_startup() {
+        let release = include_str!("../.github/workflows/release.yml");
+        assert_eq!(release.matches("cp PRIVACY.md dist/").count(), 2);
+        let main = include_str!("main.rs");
+        let startup = main.find("let log_path =").unwrap();
+        assert!(main.find("arg == \"--privacy\"").unwrap() < startup);
+        assert!(main.find("arg == \"--help\"").unwrap() < startup);
+        assert!(main.contains("include_str!(\"../PRIVACY.md\")"));
+        let policy = include_str!("../PRIVACY.md");
+        for path in [
+            "log_index_fingerprints.json",
+            "embeddings_cache_v3.json",
+            "agent-session-tui-scan-",
+            "HF_HOME",
+        ] {
+            assert!(policy.contains(path), "{path}");
         }
     }
 

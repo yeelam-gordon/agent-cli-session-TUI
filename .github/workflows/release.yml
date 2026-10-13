@@ -78,6 +78,7 @@ jobs:
         cp -r prompts dist/
         python3 scripts/generate_config.py ${{ matrix.target }} config.toml.template dist/config.toml.example
         cp README.md dist/
+        cp PRIVACY.md dist/
         cp LICENSE dist/
         if [ "${{ runner.os }}" != "Windows" ]; then
           chmod +x dist/${{ matrix.artifact }}
@@ -163,6 +164,7 @@ jobs:
         cp -r prompts dist/
         python3 scripts/generate_config.py ${{ matrix.target }} config.toml.template dist/config.toml.example
         cp README.md dist/
+        cp PRIVACY.md dist/
         cp LICENSE dist/
         if [ "${{ runner.os }}" != "Windows" ]; then
           chmod +x dist/${{ matrix.core_artifact }}

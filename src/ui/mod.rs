@@ -606,20 +606,16 @@ impl App {
         if self.auto_suggest_kicked {
             return;
         }
+        if !self.grouping_config.auto_suggest_enabled(&self.acp_config) {
+            return;
+        }
         if !self.acp_available {
             crate::log::info(
                 "AI auto-suggest SKIPPED: prompts/group-suggest.md not found next to binary",
             );
             return;
         }
-        // `[acp] auto_suggest` gates the ACP engine only. It exists because that
-        // engine spawns a CLI, takes 25-45s, and consumes quota — none of which
-        // should happen without explicit consent. The remote and local engines
-        // are fast and free, so they run automatically.
         let is_acp = self.grouping_config.engine == crate::config::GroupingEngine::Acp;
-        if is_acp && !self.acp_config.auto_suggest {
-            return;
-        }
         if !self.initial_load_complete {
             return;
         }
@@ -1427,7 +1423,7 @@ impl App {
                     }
                     SupervisorEvent::InitialDiscoveryComplete => {
                         crate::log::info(&format!(
-                            "Initial full discovery complete: {} active sessions; starting auto-suggest",
+                            "Initial full discovery complete: {} active sessions; checking auto-suggest opt-in",
                             self.sessions.len()
                         ));
                         self.maybe_kick_auto_suggest(&cmd_tx);
@@ -2905,7 +2901,15 @@ impl App {
                     ];
                     if self.acp_available {
                         spans.push(Span::styled("s", hl));
-                        spans.push(Span::raw(" AI suggest  "));
+                        spans.push(Span::raw(match self.grouping_config.engine {
+                            crate::config::GroupingEngine::WordMatch => " wordmatch (local)  ",
+                            crate::config::GroupingEngine::Remote => {
+                                " remote (sends titles/cwd; --privacy)  "
+                            }
+                            crate::config::GroupingEngine::Acp => {
+                                " ACP (sends summaries via CLI; --privacy)  "
+                            }
+                        }));
                     }
                     spans.extend([
                         Span::styled("e", hl),
@@ -4843,6 +4847,69 @@ mod ui_invariant_tests {
     use super::{clamp_cursor_after_removal, empty_provider_bootstrap, grouping_result_status};
     use std::fs;
 
+    fn empty_grouping_app(dir: &std::path::Path, config: crate::config::AppConfig) -> super::App {
+        super::App::new(
+            Vec::new(),
+            String::new(),
+            500,
+            std::sync::Arc::new(crate::provider::ProviderRegistry::new()),
+            dir.to_path_buf(),
+            std::sync::Arc::new(std::sync::Mutex::new(crate::search::SemanticPlugin::new())),
+            1000,
+            10000,
+            crate::groups::GroupManager::open(&dir.join("groups.json")),
+            config.acp,
+            config.grouping,
+        )
+    }
+
+    #[test]
+    fn missing_and_legacy_config_do_not_attempt_automatic_grouping() {
+        for text in [
+            "",
+            "[grouping]",
+            "[grouping]\nengine = \"remote\"",
+            "[grouping]\nengine = \"local\"",
+            "[grouping]\nengine = \"acp\"\n[acp]",
+            "[acp]\nauto_suggest = true",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = toml::from_str(text).unwrap();
+            let mut app = empty_grouping_app(dir.path(), config);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            app.maybe_kick_auto_suggest(&tx);
+            assert!(!app.auto_suggest_kicked, "{text}");
+            assert!(app.auto_suggest_asked.is_empty());
+            assert!(matches!(app.acp_state, super::AcpState::Idle));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_automatic_opt_in_attempts_once_without_candidates_or_egress() {
+        for engine in ["wordmatch", "remote", "acp"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config: crate::config::AppConfig = toml::from_str(&format!(
+                "[grouping]\nengine = \"{engine}\"\nauto_suggest = true\n[acp]"
+            ))
+            .unwrap();
+            config.acp.as_mut().unwrap().prompt_template = Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("prompts")
+                    .join("group-suggest.md"),
+            );
+            let mut app = empty_grouping_app(dir.path(), config);
+            assert!(app.acp_available, "{engine}");
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            app.maybe_kick_auto_suggest(&tx);
+            assert!(app.auto_suggest_kicked, "{engine}");
+            app.maybe_kick_auto_suggest(&tx);
+            assert!(app.auto_suggest_asked.is_empty());
+            assert!(matches!(app.acp_state, super::AcpState::Idle));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
     fn ui_source() -> String {
         fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/mod.rs"))
             .expect("should read ui/mod.rs")
@@ -4895,20 +4962,20 @@ mod ui_invariant_tests {
         );
     }
 
-    /// Regression: `[acp] auto_suggest` defaults to false, and it used to gate
-    /// *every* engine. That meant the fast remote/local engines silently never
-    /// ran on startup and the user had to press `s` by hand. The flag must
-    /// apply to the ACP engine only, since that is the one that spawns a CLI
-    /// and costs quota.
+    /// Regression: startup used to invoke remote/wordmatch without opt-in.
     #[test]
-    fn auto_suggest_flag_gates_only_the_acp_engine() {
+    fn automatic_grouping_checks_opt_in_before_dispatch() {
         let src = code_section();
-        assert!(
-            src.contains("if is_acp && !self.acp_config.auto_suggest"),
-            "auto_suggest must be gated behind is_acp — an unconditional \
-             `if !self.acp_config.auto_suggest` check stops the default \
-             engine from ever auto-running."
-        );
+        let start = src.find("fn maybe_kick_auto_suggest(").unwrap();
+        let body = &src[start..];
+        let gate = body
+            .find("if !self.grouping_config.auto_suggest_enabled(&self.acp_config)")
+            .unwrap();
+        assert!(gate < body.find("self.auto_suggest_kicked = true").unwrap());
+        assert!(gate < body.find("self.spawn_grouping_run(").unwrap());
+        assert!(gate < body.find("crate::acp::prepare_prompt(").unwrap());
+        assert_eq!(src.matches("auto_suggest_enabled(").count(), 1);
+        assert!(src.contains("self.spawn_grouping_run(cmd_tx, false)"));
     }
 
     /// Regression: discovery is phased, and auto-suggest originally fired from

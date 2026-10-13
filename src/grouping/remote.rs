@@ -69,7 +69,7 @@ struct TargetTab {
     opener_tab_id: String,
     tab_id: String,
     title: String,
-    /// Always empty — see the privacy note in the module docs.
+    /// Working directory as a file URI, or empty when unavailable.
     url: String,
 }
 

@@ -4,10 +4,14 @@
 #
 # Copy this file next to the agent-session-tui binary and edit paths for your system.
 
-# App data directory (archived.json, embeddings_cache.json stored here)
-# data_dir = '~/.local/share/agent-session-tui'
+# Privacy/storage/network details: PRIVACY.md (or run --privacy before launch).
+# App data directory: groups.json, archived.json, log_index/ and fingerprints.
+# Default is the OS local-data directory/agent-session-tui; use an absolute
+# literal override (no ~ or environment-variable expansion).
+# Model/embedding caches stay in the default OS directory/models regardless.
+# data_dir = '/absolute/path/to/agent-session-tui'
 poll_interval_ms = 2000
-log_max_lines = 500
+log_max_lines = 500 # UI list only; diagnostic file has no rotation/size limit
 
 # ─── Launch Configuration ───
 # Each provider can configure how sessions are launched in a terminal.
@@ -38,6 +42,7 @@ log_max_lines = 500
 # ─── Semantic Search ───
 # No configuration needed. Drop the semantic_search_plugin library next to
 # the TUI binary (already included in the "-semantic" release zip).
+# Local inference, but initialization may download models from Hugging Face.
 
 # ─── Grouping engine ───
 # Picks HOW thematic groups are suggested for ungrouped sessions. Suggestions
@@ -45,7 +50,8 @@ log_max_lines = 500
 # press `y` to accept, `n` to dismiss, `e` to edit. Press `s` in the Grouped
 # view to run on demand.
 #
-#   engine = "remote"  DEFAULT. Sends session titles and working directories to
+# Automatic grouping is OFF unless explicitly opted in below.
+#   engine = "remote"  OPT-IN. Sends session titles and working directories to
 #                      a hosted tab auto-grouping service, which returns natural
 #                      names like "System Maintenance". The maintainer historically
 #                      reported ~2s for 30 sessions on private data; timing varies
@@ -53,7 +59,7 @@ log_max_lines = 500
 #                      Nothing to install or authenticate. See the note below on
 #                      what is sent.
 #
-#   engine = "wordmatch" No network. NOT an AI model of any kind — it just compares how
+#   engine = "wordmatch" DEFAULT. No network. NOT an AI model — it compares how
 #                      many words two titles share, and names each group after
 #                      its most common words (e.g. "benchmark-prompt-files"), so
 #                      expect to rename some. Historically the maintainer reported
@@ -67,7 +73,10 @@ log_max_lines = 500
 #                      model/environment/workload, not guaranteed. Uses CLI quota.
 #
 # [grouping]
-# engine = "remote"
+# engine = "wordmatch"
+# auto_suggest = false          # true = once after discovery; s stays manual
+# Explicit auto_suggest overrides legacy [acp] auto_suggest for the ACP engine.
+# If omitted, only ACP's existing explicit true opt-in is inherited.
 # language = "en-US"            # language for generated group names
 # timeout_secs = 20             # remote call timeout, not a latency guarantee
 # reuse_existing_groups = false # true = offer existing group names (service rejects these erratically)
@@ -95,7 +104,10 @@ log_max_lines = 500
 # suggest thematic groups for ungrouped sessions. When this section is absent
 # or commented out, no `copilot` process is ever spawned.
 #
-# Set `auto_suggest = true` for background runs.
+# ACP sends titles, cwd, session keys, summary snippets and group descriptions
+# through the configured CLI, which may use an external service and save history.
+# Legacy `auto_suggest = true` enables background runs only when [grouping]
+# auto_suggest is omitted; explicit [grouping] true/false takes precedence.
 #
 # Requirements (only relevant once you uncomment):
 #   - `copilot` CLI installed on PATH and authenticated (`copilot login`)

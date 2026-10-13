@@ -200,6 +200,24 @@ fn create_provider(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--privacy") {
+        println!("{}", include_str!("../PRIVACY.md"));
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!(
+            "Agent Session TUI\n\
+            Run without arguments to browse local provider sessions.\n\
+            --privacy  Show storage paths, retention and network disclosures (PRIVACY.md).\n\
+            Grouping defaults to manual wordmatch (no network).\n\
+            [grouping] auto_suggest = true opts into automatic suggestions.\n\
+            Selecting remote sends titles/cwd; ACP may send summary snippets via its CLI.\n\
+            The optional semantic plugin may download models at startup.\n\
+            See README.md and docs/usage.md for other operating modes."
+        );
+        return Ok(());
+    }
     // Init log file in temp directory
     let log_path = std::env::temp_dir().join("agent-session-tui.log");
     log::init(log_path.clone());
@@ -261,7 +279,6 @@ async fn main() -> Result<()> {
     // and screenshots. The data lives in the gitignored `mock-plugin/` workspace
     // member; without that DLL dropped next to the exe, this flag is a silent
     // no-op so end-users of distributed builds never see mock behaviour.
-    let args: Vec<String> = std::env::args().collect();
     let mock_flag = args.iter().any(|a| a == "--mock-data");
     let mock_plugin = if mock_flag {
         mock::MockPlugin::try_load()

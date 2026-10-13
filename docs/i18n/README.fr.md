@@ -26,7 +26,7 @@ Illustration conceptuelle, pas une capture réelle de l’application. Libellés
 
 Il faut un historique enregistré, un CLI installé et authentifié, accessible par le `command` configuré, et le répertoire d’origine disponible. Utilisez un terminal interactif et une version pour votre système/processeur. Lanceurs par défaut : Windows `wt` (repli `cmd`), Linux `gnome-terminal`, macOS `osascript` avec Terminal. Sinon, adaptez la [configuration](../usage.md#configuration).
 
-**Avant le lancement :** le regroupement distant par défaut peut envoyer automatiquement **titres et répertoires de travail** à un service hébergé après la découverte de l’historique. Il n’existe pas de contrat public d’API pour les tiers. Core + `wordmatch` évite ce regroupement distant, pas les connexions des CLI eux-mêmes. Le plugin sémantique facultatif peut télécharger des modèles à l’initialisation ; commencez avec Core sans ce plugin.
+**Avant le lancement :** les builds intégrant les nouveaux paramètres de confidentialité désactivent le regroupement automatique par défaut et utilisent `wordmatch` manuellement. Les anciennes versions peuvent encore lancer le regroupement distant automatiquement. Le choix explicite `remote` envoie titres et répertoires ; ACP peut envoyer des résumés via son CLI. [PRIVACY.md](../../PRIVACY.md) décrit les chemins et les index de contenu des conversations. Le plugin sémantique peut télécharger des modèles ; Core ne contrôle pas les connexions des CLI. Ancien exemple : `# engine = "remote"` ; nouveau : `# engine = "wordmatch"`.
 
 1. Dans [Archives Core par système et processeur](../usage.md#core-archive-filenames), prenez l’**archive Core complète** pour votre système/processeur, pas l’archive du code source. Extrayez tout et gardez ensemble le binaire, `providers/`, `prompts/` et le `config.toml.example` généré. [Vérifiez l’empreinte du fichier exact](../usage.md#verify-a-release-download) ; la concordance n’est ni signature ni garantie de sécurité. Respectez alertes du système et règles de l’organisation.
 2. Pour une installation neuve, copiez l’exemple généré en `config.toml` près du binaire. **N’écrasez pas les réglages existants et ne renommez pas le `config.toml.template` source.** Dans la copie, retirez le `#` initial des **deux lignes**, `# [grouping]` et `# engine = "remote"`, puis changez la valeur :
@@ -34,6 +34,7 @@ Il faut un historique enregistré, un CLI installé et authentifié, accessible 
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 Laissez les autres options commentées. Si une table `[grouping]` active existe déjà, modifiez son `engine` sans la dupliquer. Vérifiez `state_dir` et `command` ; **enregistrez avant le lancement**. `wordmatch` compare les mots communs ; ce n’est pas une IA locale.

@@ -26,7 +26,7 @@
 
 保存済み会話と、インストール済みで、ログイン・認証を済ませて設定の `command` から実行できる CLI、アクセス可能な元の作業ディレクトリが必要です。OS・CPU に合う版を対話型ターミナルで使います。既定の起動方法は Windows `wt`（代替 `cmd`）、Linux `gnome-terminal`、macOS `osascript` と Terminal。なければ[設定](../usage.md#configuration)を変更します。
 
-**起動前の注意：** 既定のリモート分類は、履歴の検出後に**会話タイトルと作業ディレクトリ**を外部サービスへ自動送信する場合があります。第三者向けの公開 API 契約はありません。Core + `wordmatch` はこの通信を避けますが、各 CLI の通信は制御しません。任意のセマンティック検索プラグインは初期化時にモデルを取得する場合があります。まずプラグインなしの Core を使ってください。
+**起動前の注意：** プライバシー既定値の変更を含むビルドでは自動分類は既定でオフ、手動分類は `wordmatch` です。旧リリースでは自動リモート分類が残る場合があります。明示的な `remote` はタイトルと作業ディレクトリを送信し、ACP は CLI 経由で要約も送信できます。保存先と会話内容の検索索引は [PRIVACY.md](../../PRIVACY.md) を参照。任意のセマンティックプラグインはモデルをダウンロードする場合があり、Core は CLI の通信を制御しません。旧例は `# engine = "remote"`、新例は `# engine = "wordmatch"` です。
 
 1. [OS・CPU 別の Core ファイル](../usage.md#core-archive-filenames) から OS・CPU に合う **Core の完全なアーカイブ**を取得します。ソースコードのアーカイブではありません。すべて展開し、実行ファイル、`providers/`、`prompts/`、生成済み `config.toml.example` を一緒に保ちます。[対象ファイルのダイジェストを確認](../usage.md#verify-a-release-download)してください。一致は署名や安全性の保証ではなく、OS の警告と組織の規則にも従います。
 2. 初回は生成済みの例を実行ファイル横の `config.toml` にコピーします。**既存設定を上書きせず、ソースの `config.toml.template` を単に改名しないでください。** コピー内の `# [grouping]` と `# engine = "remote"` の**両方**から先頭の `#` を外し、値を変更します：
@@ -34,6 +34,7 @@
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 他の分類設定はコメントのままにします。有効な `[grouping]` が既にあれば、その `engine` のみ変更し、同名の表を追加しません。`state_dir` と `command` を確認して**保存してから起動**します。`wordmatch` は単語の重なりの比較で、ローカル AI ではありません。

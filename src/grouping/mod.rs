@@ -4,7 +4,7 @@
 //!
 //! | Engine      | Network | Notes |
 //! |-------------|---------|-------|
-//! | `remote`    | yes     | **default** — local pre-pass, then the service names the clusters |
+//! | `remote`    | yes     | opt-in — local pre-pass, then the service names the clusters |
 //! | `wordmatch` | none    | word-overlap matching; also the fallback when `remote` fails |
 //! | `acp`       | yes     | legacy: spawns the configured CLI |
 //!

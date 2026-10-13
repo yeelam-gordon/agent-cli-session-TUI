@@ -26,7 +26,7 @@
 
 须有已保存的对话；对应 CLI 已安装，账户已登录并完成认证，且可通过配置的 `command` 运行，原工作目录仍可访问。使用符合系统和 CPU 的版本，在交互式终端运行。默认启动器为 Windows `wt`（回退 `cmd`）、Linux `gnome-terminal`、macOS `osascript` 与 Terminal；缺少时调整[配置](../usage.md#configuration)。
 
-**启动前：** 默认远程分组在发现历史后可能自动向托管服务发送**会话标题和工作目录**，没有公开的第三方 API 契约。Core + `wordmatch` 可避免这种远程分组，并不限制各 CLI 的网络行为。可选语义插件初始化时可能下载模型；首次使用请选择不含该插件的 Core。
+**启动前：** 包含隐私默认值变更的构建默认关闭自动分组，手动使用 `wordmatch`；旧版发行包可能仍自动远程分组。显式选择 `remote` 会发送标题和工作目录，ACP 可通过 CLI 发送摘要。搜索索引会保存对话内容的派生数据，不只是元数据。[PRIVACY.md](../../PRIVACY.md) 说明保存路径、清理和网络行为。语义插件仍可能下载模型；Core 不控制各 CLI 的网络行为。旧示例为 `# engine = "remote"`，新示例为 `# engine = "wordmatch"`。
 
 1. 从 [按系统和 CPU 选择 Core 文件](../usage.md#core-archive-filenames) 下载对应系统、CPU 的完整 **Core** 压缩包，而非源码包。全部解压，保留程序、`providers/`、`prompts/` 和生成的 `config.toml.example`。[核对对应文件的摘要](../usage.md#verify-a-release-download)；相符不等于签名或安全保证，须遵守系统警告和组织策略。
 2. 首次安装时，将生成的示例复制为程序旁的 `config.toml`，**不要覆盖已有配置，也不要直接改名使用源码的 `config.toml.template`**。在副本中找到 `# [grouping]` 和 `# engine = "remote"`，去掉**两行**开头的 `#`，将值改为：
@@ -34,6 +34,7 @@
 ```toml
 [grouping]
 engine = "wordmatch"
+auto_suggest = false
 ```
 
 其他分组选项保持注释。若已有启用的 `[grouping]`，只修改其中的 `engine`，不要添加重复节。核对 `state_dir`、`command`，**保存后才启动**。`wordmatch` 只比较重合词，不是本地 AI。
