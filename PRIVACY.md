@@ -3,8 +3,11 @@
 This notice describes builds containing the **privacy-defaults change**, not
 older published releases. Those releases may automatically use remote grouping.
 This is implementation documentation, not a compliance certification or external
-approval. Read the notice shipped with your actual build (`--privacy`); `--help`
-and `--privacy` exit before config creation, session discovery or model loading.
+approval. Read the notice in your browser or extracted archive without running
+the binary. **Only builds known to contain this change** support `--help` and
+`--privacy` as early exits before config creation, session discovery or model
+loading. Do not use these flags to inspect an older or unknown build: it may
+ignore them and start the application, including automatic remote grouping.
 
 ## Defaults and choices
 

@@ -4,7 +4,10 @@
 #
 # Copy this file next to the agent-session-tui binary and edit paths for your system.
 
-# Privacy/storage/network details: PRIVACY.md (or run --privacy before launch).
+# Privacy/storage/network details: read PRIVACY.md in your browser or archive.
+# Only builds known to contain the privacy-defaults change safely exit early
+# with --privacy/--help. Older/unknown builds may ignore them and start discovery
+# and automatic remote grouping; do not run these flags to inspect those builds.
 # App data directory: groups.json, archived.json, log_index/ and fingerprints.
 # Default is the OS local-data directory/agent-session-tui; use an absolute
 # literal override (no ~ or environment-variable expansion).
